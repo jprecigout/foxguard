@@ -2,6 +2,8 @@
 
 **FoxGuard** est un système de vidéosurveillance intelligent propulsé par l'IA et développé en Rust.
 
+---
+
 ## 🚀 Fonctionnalités Principales
 
 * **Détection d'objets par IA** : Analyse des flux vidéo en temps réel à l'aide de modèles YOLOv8 via la bibliothèque `tract-onnx`.
@@ -55,6 +57,7 @@ docker run -d \
 ```
 
 ### Construire l'image pour le raspberry
+
 Utiliser Docker Buildx pour cibler l'architecture ARM64 (linux/arm64).
 
 1. Activer l'émulation multi-architecture sur votre PC
@@ -105,6 +108,81 @@ sur le Raspberry Pi
 docker pull jprecigout/foxguard:rpi4
 ```
 
+## 🛠️ Modification de la configuration du rapsberry pour activer le pilote V4L2 Legacy
+Il faut configurer le Raspberry Pi pour qu'il utilise le contrôleur vidéo hérité compatible V4L2 natif.
+
+1. Modifier la configuration du Raspberry Pi (sur l'hôte)
+Ouvrez le fichier de configuration de démarrage du Pi :
+
+```bash
+# Sur Raspberry Pi OS Bookworm :
+sudo nano /boot/firmware/config.txt
+
+# For more options and information see
+# http://rptl.io/configtxt
+# Some settings may impact device functionality. See link above for details
+
+# Uncomment some or all of these to enable the optional hardware interfaces
+#dtparam=i2c_arm=on
+#dtparam=i2s=on
+#dtparam=spi=on
+
+# Enable audio (loads snd_bcm2835)
+dtparam=audio=on
+
+# Additional overlays and parameters are documented
+# /boot/firmware/overlays/README
+
+# Désactivation du pilote moderne libcamera / Unicam
+# camera_auto_detect=1
+camera_auto_detect=0
+
+# Activation du pilote V4L2 hérité pour la caméra CSI
+start_x=1
+gpu_mem=128
+
+# Automatically load overlays for detected DSI displays
+display_auto_detect=1
+
+# Automatically load initramfs files, if found
+auto_initramfs=1
+
+# Enable DRM VC4 V3D driver
+dtoverlay=vc4-kms-v3d
+max_framebuffers=2
+
+# Don't have the firmware create an initial video= setting in cmdline.txt.
+# Use the kernel's default instead.
+disable_fw_kms_setup=1
+
+# Run in 64-bit mode
+arm_64bit=1
+
+# Disable compensation for displays with overscan
+disable_overscan=1
+
+# Run as fast as firmware / board allows
+arm_boost=1
+
+[cm4]
+# Enable host mode on the 2711 built-in XHCI USB controller.
+# This line should be removed if the legacy DWC2 controller is required
+# (e.g. for USB device mode) or if USB support is not required.
+otg_mode=1
+
+[cm5]
+dtoverlay=dwc2,dr_mode=host
+
+[all]
+```
+2. Charger le module et redémarrer
+Exécutez ces commandes puis redémarrez le Pi :
+
+```bash
+echo "bcm2835-v4l2" | sudo tee /etc/modules-load.d/bcm2835-v4l2.conf
+sudo reboot
+```
+
 ### 📦 Lancer le conteneur sur le Raspberry Pi 4
 
 Une fois l'image disponible sur le Raspberry Pi (via docker build local, docker load ou docker pull), exécutez le conteneur en transmettant le périphérique caméra /dev/video0
@@ -113,7 +191,8 @@ Une fois l'image disponible sur le Raspberry Pi (via docker build local, docker 
 docker run -d \
   --name foxguard \
   --restart unless-stopped \
-  --device=/dev/video0:/dev/video0 \
+  --privileged \
+  -v /dev:/dev \
   -p 8080:8080 \
   -v $(pwd)/output_record:/app/output_record \
   foxguard:rpi4

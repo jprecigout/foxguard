@@ -23,6 +23,7 @@ RUN rm -rf src
 # Copie du code source et des assets
 COPY src ./src
 COPY static ./static
+COPY assets ./assets
 
 # Compilation finale du binaire
 RUN touch src/main.rs && cargo build --release
@@ -64,5 +65,4 @@ EXPOSE 8080
 
 ENV RUST_LOG=info
 
-# Lancement sous l'identité 'foxguard'
-CMD ["./foxguard"]
+CMD [ "./foxguard"]

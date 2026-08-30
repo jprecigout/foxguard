@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::Local;
-use lettre::message::{Attachment, MultiPart, SinglePart, header::ContentType};
+use lettre::message::header::{ContentDisposition, ContentId, ContentType};
+use lettre::message::{MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use tokio::runtime::Handle;
@@ -26,19 +27,33 @@ impl Mailer {
         }
 
         // Exécution asynchrone pour ne pas bloquer le flux vidéo de la caméra
-        if let Ok(handle) = Handle::try_current() {
-            handle.spawn(async move {
-                if let Err(e) = Self::dispatch_email(config, image_bytes).await {
-                    eprintln!("❌ Erreur lors de l'envoi de l'email : {}", e);
-                }
-            });
-        }
+        tokio::spawn(async move {
+            if let Err(e) = Self::dispatch_email(config, image_bytes).await {
+                eprintln!("❌ Erreur lors de l'envoi de l'email : {}", e);
+            }
+        });
     }
 
     async fn dispatch_email(config: EmailConfig, image_bytes: Vec<u8>) -> Result<()> {
         let now = Local::now().format("%d/%m/%Y à %H:%M:%S").to_string();
 
-        // 1. Template HTML Responsive
+        // 1. Inclusion du logo SVG compilé dans le binaire (fichier à placer dans src/../assets/logo.svg)
+        let logo_bytes = include_bytes!("../assets/logo.svg");
+
+        let logo_part = SinglePart::builder()
+            .header(ContentType::parse("image/svg+xml")?)
+            .header(ContentId::from("<logo_foxguard>".to_string()))
+            .header(ContentDisposition::inline())
+            .body(logo_bytes.to_vec());
+
+        // 2. Pièce jointe Image JPEG nommée "detection.jpg" et affichée inline
+        let image_part = SinglePart::builder()
+            .header(ContentType::parse("image/jpeg")?)
+            .header(ContentId::from("<detection_photo>".to_string()))
+            .header(ContentDisposition::inline())
+            .body(image_bytes);
+
+        // 3. Template HTML Responsive
         let html_template = format!(
             r#"<!DOCTYPE html>
 <html lang="fr">
@@ -67,7 +82,15 @@ impl Mailer {
             padding: 20px;
             text-align: center;
         }}
+        .header img {{
+            height: 45px;
+            width: auto;
+            vertical-align: middle;
+            margin-right: 10px;
+        }}
         .header h1 {{
+            display: inline-block;
+            vertical-align: middle;
             margin: 0;
             font-size: 22px;
             letter-spacing: 1px;
@@ -110,7 +133,8 @@ impl Mailer {
 <body>
     <div class="container">
         <div class="header">
-            <h1>🦊 FOXGUARD SECURITY</h1>
+            <img src="cid:logo_foxguard" alt="Logo FoxGuard" />
+            <h1>FOXGUARD SECURITY</h1>
         </div>
         <div class="content">
             <div class="alert-info">
@@ -130,11 +154,7 @@ impl Mailer {
 </html>"#
         );
 
-        // 2. Pièce jointe Image avec Content-ID (CID)
-        let image_part = Attachment::new_inline("detection_photo".to_string())
-            .body(image_bytes, ContentType::parse("image/jpeg")?);
-
-        // 3. Construction du message MIME multipart
+        // 4. Construction du message MIME multipart related (HTML + SVG Logo + Photo JPEG)
         let email = Message::builder()
             .from(config.from_address.parse()?)
             .to(config.to_address.parse()?)
@@ -142,6 +162,7 @@ impl Mailer {
             .multipart(
                 MultiPart::related()
                     .singlepart(SinglePart::html(html_template))
+                    .singlepart(logo_part)
                     .singlepart(image_part),
             )?;
 

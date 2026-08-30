@@ -146,6 +146,9 @@ impl ObjectDetector {
         let img_width = img.width() as f32;
         let img_height = img.height() as f32;
 
+        // Définition des classes autorisées pour la détection (personne, chat, chien)
+        let allowed_classes = ["person", "cat", "dog"];
+
         for col in 0..num_anchors {
             let cx = output[[0, 0, col]];
             let cy = output[[0, 1, col]];
@@ -164,34 +167,95 @@ impl ObjectDetector {
             }
 
             if max_score >= self.config.confidence_threshold {
-                let scale_x = img_width / size as f32;
-                let scale_y = img_height / size as f32;
-
-                let x = ((cx - w / 2.0) * scale_x).max(0.0) as u32;
-                let y = ((cy - h / 2.0) * scale_y).max(0.0) as u32;
-                let width = (w * scale_x) as u32;
-                let height = (h * scale_y) as u32;
-
                 let label = COCO_CLASSES.get(class_id).unwrap_or(&"inconnu").to_string();
 
-                detections.push(BoundingBox {
-                    x,
-                    y,
-                    width,
-                    height,
-                    label,
-                    confidence: max_score,
-                });
+                // FILTRE : On vérifie si la classe détectée fait partie de notre liste
+                if allowed_classes.contains(&label.as_str()) {
+                    let scale_x = img_width / size as f32;
+                    let scale_y = img_height / size as f32;
+
+                    let x = ((cx - w / 2.0) * scale_x).max(0.0) as u32;
+                    let y = ((cy - h / 2.0) * scale_y).max(0.0) as u32;
+                    let width = (w * scale_x) as u32;
+                    let height = (h * scale_y) as u32;
+
+                    let label = COCO_CLASSES.get(class_id).unwrap_or(&"inconnu").to_string();
+
+                    detections.push(BoundingBox {
+                        x,
+                        y,
+                        width,
+                        height,
+                        label,
+                        confidence: max_score,
+                    });
+                }
             }
         }
 
+        // Tri décroissant par score de confiance
         detections.sort_by(|a, b| {
             b.confidence
                 .partial_cmp(&a.confidence)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        detections.truncate(10);
 
-        Ok(detections)
+        // Filtrage NMS (seuil IoU fixé a 0.45)
+        let mut final_detections = non_maximum_suppression(detections, 0.45);
+
+        // Conservation des 10 meilleures détections pour éviter les surcharges
+        final_detections.truncate(10);
+
+        Ok(final_detections)
     }
+}
+
+// Les modèles YOLO génèrent des milliers de boîtes candidates (environ 2 100 pour une entrée en 320×320).
+// Sans NMS, plusieurs ancres voisines détectent la même personne avec un score supérieur au seuil de confiance, le code dessine alors un cadre pour chacune d'entre elles.
+// Pour ne conserver qu'une seule boîte par objet détecté, on applique la suppression non maximale (NMS) après le tri par confiance.
+
+// Calcule le chevauchement (Intersection over Union) entre deux boîtes
+fn calculate_iou(box1: &BoundingBox, box2: &BoundingBox) -> f32 {
+    let x1 = box1.x.max(box2.x);
+    let y1 = box1.y.max(box2.y);
+    let x2 = (box1.x + box1.width).min(box2.x + box2.width);
+    let y2 = (box1.y + box1.height).min(box2.y + box2.height);
+
+    if x2 <= x1 || y2 <= y1 {
+        return 0.0;
+    }
+
+    let intersection = ((x2 - x1) * (y2 - y1)) as f32;
+    let area1 = (box1.width * box1.height) as f32;
+    let area2 = (box2.width * box2.height) as f32;
+    let union = area1 + area2 - intersection;
+
+    if union <= 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
+}
+
+// Filtre les détections doublons pour un même objet
+fn non_maximum_suppression(mut boxes: Vec<BoundingBox>, iou_threshold: f32) -> Vec<BoundingBox> {
+    let mut kept_boxes = Vec::new();
+
+    while !boxes.is_empty() {
+        // La boîte avec la plus haute confiance est extraite
+        let current = boxes.remove(0);
+
+        // On élimine les autres boîtes de même classe qui chevauchent trop la boîte courante
+        boxes.retain(|b| {
+            if b.label == current.label {
+                calculate_iou(&current, b) < iou_threshold
+            } else {
+                true
+            }
+        });
+
+        kept_boxes.push(current);
+    }
+
+    kept_boxes
 }

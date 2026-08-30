@@ -51,27 +51,18 @@ fn draw_text_8x8(img: &mut RgbImage, text: &str, start_x: i32, start_y: i32, col
 }
 
 pub fn start_camera_loop(config: Config, state: Arc<SharedState>) -> Result<()> {
-    // 1. Initialisation dynamique du périphérique V4L2
+    // Initialisation dynamique du périphérique V4L2
     let dev = Device::new(config.camera.device_index)?;
-    let mut fmt = dev.format()?;
-    println!("🎥 Caméra détectée (Format initial : {:?})", fmt);
+    let fmt = dev.format()?;
+    println!(
+        "🎥 Caméra détectée : {}x{} ({:?})",
+        fmt.width, fmt.height, fmt.fourcc
+    );
 
-    // Essai d'application de la résolution souhaitée sans forcer de FourCC incompatible
-    fmt.width = config.camera.width;
-    fmt.height = config.camera.height;
+    // Allocation de 2 buffers MMAP (plus stable pour le sous-système mémoire du Pi)
+    let mut stream = MmapStream::with_buffers(&dev, Type::VideoCapture, 2)?;
 
-    if let Err(e) = dev.set_format(&fmt) {
-        eprintln!(
-            "⚠️ [V4L2] Impossible d'appliquer le format demandé ({}) : conservation du format par défaut.",
-            e
-        );
-    } else {
-        println!("✅ [V4L2] Format configuré : {}x{}", fmt.width, fmt.height);
-    }
-
-    let mut stream = MmapStream::new(&dev, Type::VideoCapture)?;
-
-    // 2. Initialisation de l'IA (ObjectDetector) et du Mailer
+    // Initialisation de l'IA (ObjectDetector) et du Mailer
     let detector = ObjectDetector::new(config.detection.clone())?;
     let mailer = Mailer::new(config.email.clone());
 
@@ -91,8 +82,15 @@ pub fn start_camera_loop(config: Config, state: Arc<SharedState>) -> Result<()> 
         let is_detection_active = state.detection_enabled.load(Ordering::Relaxed);
         let is_recording_active = state.recording_enabled.load(Ordering::Relaxed);
 
-        // Décodage universel de la frame en image RGB
-        let decoded_img = image::load_from_memory(buf).ok().map(|i| i.to_rgb8());
+        // Détection dynamique du format (PC vs PI)
+        // Les fichiers JPEG/MJPEG commencent TOUJOURS par les octets magiques 0xFF 0xD8
+        let decoded_img = if buf.len() > 2 && buf[0] == 0xFF && buf[1] == 0xD8 {
+            // Mode PC : La caméra envoie du MJPEG, on utilise la crate image
+            image::load_from_memory(buf).ok().map(|i| i.to_rgb8())
+        } else {
+            // Mode Raspberry Pi : La caméra envoie du YUYV brut
+            decode_yuyv_to_rgb(buf, fmt.width, fmt.height)
+        };
 
         let jpeg_bytes = if is_detection_active {
             // --- MODE DÉTECTION (IA) ---
@@ -109,15 +107,15 @@ pub fn start_camera_loop(config: Config, state: Arc<SharedState>) -> Result<()> 
                         let red = Rgb([255u8, 0u8, 0u8]);
                         let white = Rgb([255u8, 255u8, 255u8]);
 
-                        // A. Boîte de détection rouge
+                        // Boîte de détection rouge
                         let rect =
                             Rect::at(bbox.x as i32, bbox.y as i32).of_size(bbox.width, bbox.height);
                         draw_hollow_rect_mut(&mut img, rect, red);
 
-                        // B. Formatage du texte
+                        // Formatage du texte
                         let caption = format!("{} {:.0}%", bbox.label, bbox.confidence * 100.0);
 
-                        // C. Fond rouge sous le texte
+                        // Fond rouge sous le texte
                         let text_bg_height = 10u32;
                         let text_bg_width = (caption.len() * 8) as u32 + 2;
                         let text_bg_y = if bbox.y >= text_bg_height {
@@ -130,7 +128,7 @@ pub fn start_camera_loop(config: Config, state: Arc<SharedState>) -> Result<()> 
                             .of_size(text_bg_width, text_bg_height);
                         draw_filled_rect_mut(&mut img, bg_rect, red);
 
-                        // D. Texte blanc avec font8x8
+                        // Texte blanc avec font8x8
                         draw_text_8x8(
                             &mut img,
                             &caption,
@@ -164,11 +162,11 @@ pub fn start_camera_loop(config: Config, state: Arc<SharedState>) -> Result<()> 
                 buf.to_vec()
             }
         } else {
-            // --- MODE PASS-THROUGH (0% CPU) ---
+            // Mode PASS-THROUGH (0% CPU)
             buf.to_vec()
         };
 
-        // --- ENREGISTREMENT FICHIER DANS output_record ---
+        // Enregistrement fichier dans output_record
         if is_recording_active {
             if video_file.is_none() {
                 std::fs::create_dir_all("output_record")?;
@@ -188,7 +186,43 @@ pub fn start_camera_loop(config: Config, state: Arc<SharedState>) -> Result<()> 
             video_file = None;
         }
 
-        // --- BROADCAST FRAME WEBSOCKET ---
+        // Broadcast frame websocket
         let _ = state.tx.send(jpeg_bytes);
     }
+}
+
+// Décode un flux brut YUYV (YUY2) en RgbImage (Caméra Raspberry Pi)
+fn decode_yuyv_to_rgb(buf: &[u8], width: u32, height: u32) -> Option<RgbImage> {
+    if buf.len() < (width * height * 2) as usize {
+        return None;
+    }
+
+    let mut rgb_img = RgbImage::new(width, height);
+
+    for (i, chunk) in buf.chunks_exact(4).enumerate() {
+        let y0 = chunk[0] as f32;
+        let u = chunk[1] as f32 - 128.0;
+        let y1 = chunk[2] as f32;
+        let v = chunk[3] as f32 - 128.0;
+
+        let x = (i as u32 * 2) % width;
+        let y = (i as u32 * 2) / width;
+
+        if y < height {
+            // Pixel 1
+            let r1 = (y0 + 1.402 * v).clamp(0.0, 255.0) as u8;
+            let g1 = (y0 - 0.34414 * u - 0.71414 * v).clamp(0.0, 255.0) as u8;
+            let b1 = (y0 + 1.772 * u).clamp(0.0, 255.0) as u8;
+            rgb_img.put_pixel(x, y, Rgb([r1, g1, b1]));
+
+            // Pixel 2
+            if x + 1 < width {
+                let r2 = (y1 + 1.402 * v).clamp(0.0, 255.0) as u8;
+                let g2 = (y1 - 0.34414 * u - 0.71414 * v).clamp(0.0, 255.0) as u8;
+                let b2 = (y1 + 1.772 * u).clamp(0.0, 255.0) as u8;
+                rgb_img.put_pixel(x + 1, y, Rgb([r2, g2, b2]));
+            }
+        }
+    }
+    Some(rgb_img)
 }
