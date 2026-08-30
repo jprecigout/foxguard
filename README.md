@@ -109,7 +109,7 @@ docker pull jprecigout/foxguard:rpi4
 ```
 
 ## 🛠️ Modification de la configuration du rapsberry pour activer le pilote V4L2 Legacy
-Il faut configurer le Raspberry Pi pour qu'il utilise le contrôleur vidéo hérité compatible V4L2 natif.
+Il faut configurer le Raspberry Pi pour qu'il utilise le contrôleur vidéo hérité compatible V4L2 natif. (Necessaire pour les cameras branchées avec une nappe CSI)
 
 1. Modifier la configuration du Raspberry Pi (sur l'hôte)
    
