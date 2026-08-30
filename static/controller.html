@@ -391,7 +391,7 @@
 
         <!-- Zone Commandes -->
         <div class="controls-card">
-            <button id="btnToggleSystem" class="btn btn-disabled" onclick="toggleSystem()">
+            <button id="btnToggleSystem" class="btn btn-disabled" onclick="activateMonitoringSystem()">
                 <span class="icon icon-shield-off"></span>
                 <span id="systemStatusText">Activer la surveillance</span>
             </button>
@@ -475,12 +475,12 @@
             };
         }
 
-        function toggleSystem() {
+        function activateMonitoringSystem() {
             isSystemActive = !isSystemActive;
 
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
-                    command: 'set_surveillance',
+                    command: 'set_monitoring',
                     enabled: isSystemActive
                 }));
             }

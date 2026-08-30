@@ -44,8 +44,8 @@ pub struct AuthQuery {
 #[derive(Deserialize)]
 #[serde(tag = "command")]
 pub enum ClientCommand {
-    #[serde(rename = "set_surveillance")]
-    SetSurveillance { enabled: bool },
+    #[serde(rename = "set_monitoring")]
+    SetMonitoring { enabled: bool },
     #[serde(rename = "set_detection")]
     SetDetection { enabled: bool },
     #[serde(rename = "set_recording")]
@@ -222,7 +222,7 @@ pub async fn handle_socket(
             if let Message::Text(text) = msg {
                 if let Ok(cmd) = serde_json::from_str::<ClientCommand>(&text) {
                     match cmd {
-                        ClientCommand::SetSurveillance { enabled } => {
+                        ClientCommand::SetMonitoring { enabled } => {
                             state_cmd
                                 .detection_enabled
                                 .store(enabled, Ordering::Relaxed);
