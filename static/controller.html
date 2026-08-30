@@ -6,7 +6,7 @@
         href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cdefs%3E%3ClinearGradient id='bg' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%23212129'/%3E%3Cstop offset='100%25' stop-color='%230F0F12'/%3E%3C/linearGradient%3E%3ClinearGradient id='sh-l' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%233A3A48'/%3E%3Cstop offset='100%25' stop-color='%2323232C'/%3E%3C/linearGradient%3E%3ClinearGradient id='sh-r' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%232D2D38'/%3E%3Cstop offset='100%25' stop-color='%23191920'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='32' y='32' width='448' height='448' rx='96' fill='url(%23bg)'/%3E%3Cpath d='M 256,70 L 110,120 C 110,270 170,380 256,430 Z' fill='url(%23sh-l)' stroke='%23FF5500' stroke-width='3'/%3E%3Cpath d='M 256,70 L 402,120 C 402,270 342,380 256,430 Z' fill='url(%23sh-r)' stroke='%23FF5500' stroke-width='3'/%3E%3Cg transform='translate(256, 250) scale(0.75) translate(-256, -235)'%3E%3Cpolygon points='256,160 180,160 90,50' fill='%23FF6B4A'/%3E%3Cpolygon points='256,160 332,160 422,50' fill='%23FF451A'/%3E%3Cpolygon points='256,160 180,160 70,310 256,350' fill='%23FF6B4A'/%3E%3Cpolygon points='256,160 332,160 442,310 256,350' fill='%23FF451A'/%3E%3Cpolygon points='70,310 256,350 256,420 180,370' fill='%23EAEAEA'/%3E%3Cpolygon points='442,310 256,350 256,420 332,370' fill='%23CBD5E1'/%3E%3Ccircle cx='185' cy='245' r='11' fill='%233D2922'/%3E%3Ccircle cx='327' cy='245' r='11' fill='%232A1B16'/%3E%3Cpolygon points='256,350 238,368 256,392 274,368' fill='%232A1B16'/%3E%3C/g%3E%3C/svg%3E">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FoxGuard - Controller </title>
+    <title>FoxGuard - Controller</title>
     <style>
         :root {
             --bg-color: #121212;
@@ -51,15 +51,15 @@
         }
 
         .logo-svg {
-            width: 128px;
-            height: 128px;
+            width: 64px;
+            height: 64px;
             display: flex;
             align-items: center;
             justify-content: center;
         }
 
         h1 {
-            font-size: 3.5rem;
+            font-size: 2.5rem;
             color: var(--text-color);
             display: flex;
             align-items: center;
@@ -72,9 +72,9 @@
 
         .status-badge {
             font-size: 0.85rem;
-            padding: 5px 12px;
+            padding: 6px 14px;
             border-radius: 20px;
-            background-color: #333;
+            background-color: #2a2a2a;
             color: var(--text-muted);
             display: flex;
             align-items: center;
@@ -129,115 +129,79 @@
         }
 
         .controls-card,
-        .recordings-card {
+        .recordings-card,
+        .player-card {
             background-color: var(--card-bg);
             border-radius: 12px;
             padding: 20px;
             box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
         }
 
-        .controls-card {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 20px;
-        }
-
-        .control-group {
-            display: flex;
-            justify-content: space-between;
+        /* Bouton Global de Surveillance */
+        .btn {
+            display: inline-flex;
             align-items: center;
-            background-color: #2a2a2a;
-            padding: 15px;
+            justify-content: center;
+            gap: 10px;
+            width: 100%;
+            min-height: 52px;
+            padding: 12px 20px;
             border-radius: 8px;
-        }
-
-        .control-info label {
-            font-weight: bold;
-            display: block;
-            margin-bottom: 4px;
-        }
-
-        .control-info span {
-            font-size: 0.8rem;
-            color: var(--text-muted);
-        }
-
-        /* Interrupteur Switch CSS */
-        .switch {
-            position: relative;
-            display: inline-block;
-            width: 50px;
-            height: 26px;
-        }
-
-        .switch input {
-            opacity: 0;
-            width: 0;
-            height: 0;
-        }
-
-        .slider {
-            position: absolute;
+            font-size: 1rem;
+            font-weight: 600;
             cursor: pointer;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: #555;
-            transition: .3s;
-            border-radius: 26px;
+            transition: all 0.2s ease-in-out;
         }
 
-        .slider:before {
-            position: absolute;
-            content: "";
-            height: 18px;
-            width: 18px;
-            left: 4px;
-            bottom: 4px;
-            background-color: white;
-            transition: .3s;
-            border-radius: 50%;
+        .btn-disabled {
+            background-color: #2a2a2a;
+            color: var(--text-muted);
+            border: 1px solid #444;
         }
 
-        input:checked+.slider {
-            background-color: var(--accent-green);
+        .btn-disabled:hover {
+            background-color: #333;
         }
 
-        input:checked+.slider:before {
-            transform: translateX(24px);
+        .btn-active {
+            background-color: var(--accent-red);
+            color: #ffffff;
+            border: 1px solid #ff5252;
+            box-shadow: 0 0 12px rgba(229, 57, 53, 0.4);
         }
 
-        /* Section Galerie Enregistrements */
+        /* Section Titres & Galerie */
         h2 {
             font-size: 1.2rem;
-            margin-bottom: 15px;
             color: var(--accent-blue);
             display: flex;
             justify-content: space-between;
             align-items: center;
+            margin-bottom: 15px;
         }
 
-        /* Regroupement icône + texte */
         .h2-title {
             display: flex;
             align-items: center;
-            gap: 8px; /* Espacement exact entre l'icône et le texte */
+            gap: 8px;
         }
 
         .refresh-btn {
-            background: #333;
-            border: none;
+            background: #2a2a2a;
+            border: 1px solid #444;
             color: white;
-            padding: 6px 12px;
+            padding: 6px 14px;
             border-radius: 6px;
             cursor: pointer;
             font-size: 0.85rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
             transition: background 0.2s;
         }
 
         .refresh-btn:hover {
-            background: #444;
+            background: #3a3a3a;
         }
 
         .recordings-list {
@@ -267,6 +231,9 @@
         .recording-info {
             font-size: 0.9rem;
             font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
 
         .recording-size {
@@ -274,32 +241,17 @@
             color: var(--text-muted);
         }
 
-        /* Lecteur de média */
         .player-card {
-            background-color: var(--card-bg);
-            border-radius: 12px;
-            padding: 20px;
             display: none;
-            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
         }
 
-        .player-card img,
-        .player-card video {
-            width: 100%;
-            border-radius: 8px;
-            max-height: 500px;
-            object-fit: contain;
-            background: #000;
-        }
-        /* Style de base pour toutes les icônes */
+        /* Styles Masques SVG */
         .icon {
             display: inline-block;
-            width: 24px;
-            height: 24px;
+            width: 22px;
+            height: 22px;
             vertical-align: middle;
-            background-color: #e0e0e0; /* Couleur par défaut (gris clair) */
-            
-            /* Propriétés du masque */
+            background-color: currentColor;
             mask-size: contain;
             mask-repeat: no-repeat;
             mask-position: center;
@@ -308,30 +260,72 @@
             -webkit-mask-position: center;
         }
 
+        .icon-shield {
+            mask-image: url('/static/icons/shield.svg');
+            -webkit-mask-image: url('/static/icons/shield.svg');
+        }
+
+        .icon-shield-off {
+            mask-image: url('/static/icons/shield-off.svg');
+            -webkit-mask-image: url('/static/icons/shield-off.svg');
+        }
+
+
+        .icon-shield-active {
+            mask-image: url('/static/icons/shield-check.svg');
+            -webkit-mask-image: url('/static/icons/shield-check.svg');
+        }
+
         .icon-file-video-camera {
             mask-image: url('/static/icons/file-video-camera.svg');
             -webkit-mask-image: url('/static/icons/file-video-camera.svg');
-            background-color: #1e88e5;
         }
 
         .icon-refresh {
             mask-image: url('/static/icons/refresh-cw.svg');
             -webkit-mask-image: url('/static/icons/refresh-cw.svg');
-            background-color: #1e88e5;
         }
 
         .icon-clapperboard {
             mask-image: url('/static/icons/clapperboard.svg');
             -webkit-mask-image: url('/static/icons/clapperboard.svg');
-            background-color: #1e88e5;
         }
 
-        /* Flexbox sur les boutons pour un centrage parfait */
-        .btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
+        /* Adaptations Responsive Mobile */
+        @media (max-width: 768px) {
+            body {
+                padding: 10px;
+            }
+
+            header {
+                flex-direction: column;
+                gap: 12px;
+                align-items: flex-start;
+            }
+
+            .logo-svg {
+                width: 48px;
+                height: 48px;
+            }
+
+            h1 {
+                font-size: 2rem;
+            }
+
+            .video-card {
+                min-height: 240px;
+            }
+
+            h2 {
+                font-size: 1.05rem;
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+
+            .refresh-btn {
+                width: 100%;
+                justify-content: center;
+            }
         }
     </style>
 </head>
@@ -340,7 +334,6 @@
 
     <header>
         <div class="logo-title-container">
-            <!-- Logo SVG FoxGuard -->
             <div class="logo-svg">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
                     <defs>
@@ -398,29 +391,10 @@
 
         <!-- Zone Commandes -->
         <div class="controls-card">
-            <!-- Interrupteur Détection IA -->
-            <div class="control-group">
-                <div class="control-info">
-                    <label>Détection IA</label>
-                    <span>Détection d'objets YOLOv8</span>
-                </div>
-                <label class="switch">
-                    <input type="checkbox" id="toggleDetection" onchange="sendDetectionCommand(this.checked)">
-                    <span class="slider"></span>
-                </label>
-            </div>
-
-            <!-- Interrupteur Enregistrement Vidéo -->
-            <div class="control-group">
-                <div class="control-info">
-                    <label>Enregistrement</label>
-                    <span>Sauvegarde des fichiers MJPEG</span>
-                </div>
-                <label class="switch">
-                    <input type="checkbox" id="toggleRecording" onchange="sendRecordingCommand(this.checked)">
-                    <span class="slider"></span>
-                </label>
-            </div>
+            <button id="btnToggleSystem" class="btn btn-disabled" onclick="toggleSystem()">
+                <span class="icon icon-shield-off"></span>
+                <span id="systemStatusText">Activer la surveillance</span>
+            </button>
         </div>
 
         <!-- Section Liste des Enregistrements -->
@@ -430,7 +404,10 @@
                     <span class="icon icon-file-video-camera"></span>
                     <span>Enregistrements sauvegardés</span>
                 </div>
-                <button class="refresh-btn" onclick="loadRecordings()"><span class="icon icon-refresh"></span> Actualiser</button>
+                <button class="refresh-btn" onclick="loadRecordings()">
+                    <span class="icon icon-refresh"></span>
+                    <span>Actualiser</span>
+                </button>
             </h2>
             <ul id="recordingsList" class="recordings-list">
                 <li style="color: var(--text-muted); text-align: center; padding: 10px;">Chargement des fichiers...</li>
@@ -439,7 +416,9 @@
 
         <!-- Lecteur pour le fichier enregistré -->
         <div id="playerCard" class="player-card">
-            <h3 id="playingTitle" style="margin-bottom: 12px; font-size: 1rem; color: var(--accent-blue);">Lecteur Vidéo
+            <h3 id="playingTitle"
+                style="margin-bottom: 12px; font-size: 1rem; color: var(--accent-blue); display: flex; align-items: center; gap: 8px;">
+                Lecteur Vidéo
             </h3>
             <canvas id="mjpegCanvas" style="width: 100%; border-radius: 8px; background: #000;"></canvas>
         </div>
@@ -447,6 +426,8 @@
 
     <script>
         let ws;
+        let isSystemActive = false;
+
         const streamImg = document.getElementById('videoStream');
         const placeholder = document.getElementById('placeholder');
         const statusDot = document.getElementById('statusDot');
@@ -494,15 +475,34 @@
             };
         }
 
-        function sendDetectionCommand(enabled) {
+        function toggleSystem() {
+            isSystemActive = !isSystemActive;
+
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ command: 'set_detection', enabled: enabled }));
+                ws.send(JSON.stringify({
+                    command: 'set_surveillance',
+                    enabled: isSystemActive
+                }));
             }
+
+            updateSystemUI(isSystemActive);
         }
 
-        function sendRecordingCommand(enabled) {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ command: 'set_recording', enabled: enabled }));
+        function updateSystemUI(active) {
+            const btn = document.getElementById('btnToggleSystem');
+            const label = document.getElementById('systemStatusText');
+            const icon = btn.querySelector('.icon');
+
+            if (active) {
+                btn.classList.remove('btn-disabled');
+                btn.classList.add('btn-active');
+                label.innerText = 'Surveillance active (IA + Enregistrement)';
+                icon.className = 'icon icon-shield-active';
+            } else {
+                btn.classList.remove('btn-active');
+                btn.classList.add('btn-disabled');
+                label.innerText = 'Activer la surveillance';
+                icon.className = 'icon icon-shield-off';
             }
         }
 
@@ -521,7 +521,10 @@
 
                 listEl.innerHTML = files.map(f => `
                     <li class="recording-item" onclick="playVideo('${f.name}')">
-                        <span class="recording-info"><span class="icon icon-clapperboard"></span> ${f.name}</span>
+                        <span class="recording-info">
+                            <span class="icon icon-clapperboard"></span> 
+                            ${f.name}
+                        </span>
                         <span class="recording-size">${f.size_mb} MB</span>
                     </li>
                 `).join('');
@@ -539,7 +542,9 @@
             const ctx = canvas.getContext('2d');
             const title = document.getElementById('playingTitle');
 
-            if (title) title.innerHTML = `<span class="icon icon-clapperboard"></span> Chargement : ${filename}...`;
+            if (title) {
+                title.innerHTML = `<span class="icon icon-clapperboard"></span> Chargement : ${filename}...`;
+            }
             playerCard.style.display = 'block';
             playerCard.scrollIntoView({ behavior: 'smooth' });
 

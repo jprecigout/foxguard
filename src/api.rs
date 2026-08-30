@@ -16,9 +16,11 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::Duration;
 use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast::error::RecvError;
-use tokio_util::io::ReaderStream;
+use tokio::time::sleep;
 use tower_http::services::ServeDir;
 
 use crate::camera::SharedState;
@@ -42,6 +44,8 @@ pub struct AuthQuery {
 #[derive(Deserialize)]
 #[serde(tag = "command")]
 pub enum ClientCommand {
+    #[serde(rename = "set_surveillance")]
+    SetSurveillance { enabled: bool },
     #[serde(rename = "set_detection")]
     SetDetection { enabled: bool },
     #[serde(rename = "set_recording")]
@@ -75,20 +79,59 @@ async fn list_recordings_handler() -> Json<Vec<VideoFile>> {
     Json(files)
 }
 
-// Handler qui transmet un fichier .mjpeg sous forme de vrai flux vidéo
+// Handler qui transmet un fichier .mjpeg avec une temporisation à 30 FPS
 async fn stream_mjpeg_handler(Path(filename): Path<String>) -> Result<Response, StatusCode> {
-    // Sécurité basique sur le nom de fichier
     if filename.contains("..") || !filename.ends_with(".mjpeg") {
         return Err(StatusCode::BAD_REQUEST);
     }
 
     let filepath = format!("output_record/{}", filename);
-    let file = File::open(&filepath)
+    let mut file = File::open(&filepath)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
-    // Convertit le fichier en Stream binaire
-    let stream = ReaderStream::new(file);
+    // Création d'un flux (stream) régulé frame par frame
+    let stream = async_stream::stream! {
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 8192];
+
+        loop {
+            match file.read(&mut chunk).await {
+                Ok(0) => break, // Fin du fichier
+                Ok(n) => {
+                    buffer.extend_from_slice(&chunk[..n]);
+
+                    // Recherche des marqueurs de début (0xFF 0xD8) et de fin (0xFF 0xD9) de JPEG
+                    while let Some(start) = find_jpeg_start(&buffer) {
+                        if let Some(end) = find_jpeg_end(&buffer[start..]) {
+                            let frame_end = start + end + 2;
+                            let frame_data = buffer[start..frame_end].to_vec();
+
+                            // Envoi de l'image avec l'entête multipart MJPEG
+                            let header = format!(
+                                "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+                                frame_data.len()
+                            );
+
+                            yield Ok::<_, std::io::Error>(bytes::Bytes::from(header));
+                            yield Ok::<_, std::io::Error>(bytes::Bytes::from(frame_data));
+                            yield Ok::<_, std::io::Error>(bytes::Bytes::from("\r\n"));
+
+                            // Réduction du buffer
+                            buffer.drain(..frame_end);
+
+                            // ⏱️ Pause de 33ms (~30 FPS) pour cadence réelle
+                            sleep(Duration::from_millis(33)).await;
+                        } else {
+                            break; // Frame incomplète, attendre plus de données
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    };
+
     let body = Body::from_stream(stream);
 
     let response = Response::builder()
@@ -98,6 +141,15 @@ async fn stream_mjpeg_handler(Path(filename): Path<String>) -> Result<Response, 
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(response)
+}
+
+// Fonctions helpers pour localiser les marqueurs JPEG dans le buffer
+fn find_jpeg_start(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == [0xFF, 0xD8])
+}
+
+fn find_jpeg_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == [0xFF, 0xD9])
 }
 
 /// Handler pour servir le fichier HTML de contrôle
@@ -154,15 +206,9 @@ pub async fn handle_socket(
                     }
                 }
                 Err(RecvError::Lagged(_skipped)) => {
-                    // Le client a pris du retard, on ignore simplement les images sautées et on continue la boucle !
-                    // eprintln!(
-                    //     "⚠️ [WS Client #{}] Réseau lent, {} images sautées",
-                    //     client_id, _skipped
-                    // );
                     continue;
                 }
                 Err(RecvError::Closed) => {
-                    // Le canal principal s'est fermé (ex: arrêt de la caméra)
                     break;
                 }
             }
@@ -176,6 +222,18 @@ pub async fn handle_socket(
             if let Message::Text(text) = msg {
                 if let Ok(cmd) = serde_json::from_str::<ClientCommand>(&text) {
                     match cmd {
+                        ClientCommand::SetSurveillance { enabled } => {
+                            state_cmd
+                                .detection_enabled
+                                .store(enabled, Ordering::Relaxed);
+                            state_cmd
+                                .recording_enabled
+                                .store(enabled, Ordering::Relaxed);
+                            println!(
+                                "🛡️ [WS Client #{}] A modifié la surveillance générale : {}",
+                                client_id, enabled
+                            );
+                        }
                         ClientCommand::SetDetection { enabled } => {
                             state_cmd
                                 .detection_enabled

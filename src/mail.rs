@@ -4,7 +4,6 @@ use lettre::message::header::{ContentDisposition, ContentId, ContentType};
 use lettre::message::{MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
-use tokio::runtime::Handle;
 
 use crate::config::EmailConfig;
 

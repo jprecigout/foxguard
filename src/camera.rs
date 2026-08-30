@@ -6,8 +6,12 @@ use imageproc::drawing::{draw_filled_rect_mut, draw_hollow_rect_mut};
 use imageproc::rect::Rect;
 use std::fs::File;
 use std::io::Write;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
+use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use v4l::buffer::Type;
@@ -59,51 +63,61 @@ pub fn start_camera_loop(config: Config, state: Arc<SharedState>) -> Result<()> 
         fmt.width, fmt.height, fmt.fourcc
     );
 
-    // Allocation de 2 buffers MMAP (plus stable pour le sous-système mémoire du Pi)
+    // Allocation de 2 buffers MMAP
     let mut stream = MmapStream::with_buffers(&dev, Type::VideoCapture, 2)?;
 
     // Initialisation de l'IA (ObjectDetector) et du Mailer
     let detector = ObjectDetector::new(config.detection.clone())?;
     let mailer = Mailer::new(config.email.clone());
 
+    // Canal non-bloquant pour la détection IA en arrière-plan (garde la vidéo à 30 FPS)
+    let (detect_tx, detect_rx) = mpsc::sync_channel::<RgbImage>(1);
+    let last_boxes: Arc<Mutex<Vec<BoundingBox>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let last_boxes_worker = Arc::clone(&last_boxes);
+    thread::spawn(move || {
+        while let Ok(img) = detect_rx.recv() {
+            if let Ok(boxes) = detector.detect(&img) {
+                if let Ok(mut guard) = last_boxes_worker.lock() {
+                    *guard = boxes;
+                }
+            }
+        }
+    });
+
     let mut video_file: Option<File> = None;
     let mut last_email_time =
         Instant::now() - Duration::from_secs(config.detection.email_cooldown_secs);
-    let mut frame_count: u64 = 0;
-    let mut last_boxes: Vec<BoundingBox> = Vec::new();
 
     println!("📹 Boucle Caméra démarrée avec succès.");
 
     loop {
         // Capture du buffer brut depuis V4L2
         let (buf, _) = stream.next()?;
-        frame_count += 1;
 
         let is_detection_active = state.detection_enabled.load(Ordering::Relaxed);
         let is_recording_active = state.recording_enabled.load(Ordering::Relaxed);
 
-        // Détection dynamique du format (PC vs PI)
-        // Les fichiers JPEG/MJPEG commencent TOUJOURS par les octets magiques 0xFF 0xD8
-        let decoded_img = if buf.len() > 2 && buf[0] == 0xFF && buf[1] == 0xD8 {
-            // Mode PC : La caméra envoie du MJPEG, on utilise la crate image
-            image::load_from_memory(buf).ok().map(|i| i.to_rgb8())
-        } else {
-            // Mode Raspberry Pi : La caméra envoie du YUYV brut
-            decode_yuyv_to_rgb(buf, fmt.width, fmt.height)
-        };
+        // Détection du format (PC en MJPEG vs Raspberry Pi en YUYV)
+        let is_jpeg = buf.len() > 2 && buf[0] == 0xFF && buf[1] == 0xD8;
 
         let jpeg_bytes = if is_detection_active {
-            // --- MODE DÉTECTION (IA) ---
-            if let Some(mut img) = decoded_img {
-                // Exécution de l'IA une frame sur 2
-                if frame_count % 2 == 0 {
-                    if let Ok(boxes) = detector.detect(&img) {
-                        last_boxes = boxes;
-                    }
-                }
+            // Decodage de l'image source pour annotation / détection
+            let decoded_img = if is_jpeg {
+                image::load_from_memory(buf).ok().map(|i| i.to_rgb8())
+            } else {
+                decode_yuyv_to_rgb(buf, fmt.width, fmt.height)
+            };
 
-                if !last_boxes.is_empty() {
-                    for bbox in &last_boxes {
+            if let Some(mut img) = decoded_img {
+                // Envoi asynchrone sans bloquer la boucle vidéo si le thread IA est occupé
+                let _ = detect_tx.try_send(img.clone());
+
+                // Récupération des dernières détections sans bloquer
+                let current_boxes = last_boxes.lock().unwrap_or_else(|e| e.into_inner()).clone();
+
+                if !current_boxes.is_empty() {
+                    for bbox in &current_boxes {
                         let red = Rgb([255u8, 0u8, 0u8]);
                         let white = Rgb([255u8, 255u8, 255u8]);
 
@@ -128,7 +142,7 @@ pub fn start_camera_loop(config: Config, state: Arc<SharedState>) -> Result<()> 
                             .of_size(text_bg_width, text_bg_height);
                         draw_filled_rect_mut(&mut img, bg_rect, red);
 
-                        // Texte blanc avec font8x8
+                        // Texte blanc
                         draw_text_8x8(
                             &mut img,
                             &caption,
@@ -137,36 +151,57 @@ pub fn start_camera_loop(config: Config, state: Arc<SharedState>) -> Result<()> 
                             white,
                         );
                     }
+
+                    // Envoi d'email d'alerte avec respect du cooldown
+                    if last_email_time.elapsed()
+                        >= Duration::from_secs(config.detection.email_cooldown_secs)
+                    {
+                        let mut alert_encoded = Vec::new();
+                        let mut cursor = std::io::Cursor::new(&mut alert_encoded);
+                        if img.write_to(&mut cursor, ImageFormat::Jpeg).is_ok() {
+                            mailer.send_alert(alert_encoded);
+                            last_email_time = Instant::now();
+                        }
+                    }
                 }
 
-                // Ré-encodage de la frame modifiée par l'overlay
+                // Encodage JPEG de la frame (annotée ou non)
                 let mut encoded = Vec::new();
                 let mut cursor = std::io::Cursor::new(&mut encoded);
-                let current_bytes = if img.write_to(&mut cursor, ImageFormat::Jpeg).is_ok() {
+                if img.write_to(&mut cursor, ImageFormat::Jpeg).is_ok() {
                     encoded
                 } else {
                     buf.to_vec()
-                };
-
-                // Envoi d'e-mail avec l'image encodée et gestion du cooldown
-                if !last_boxes.is_empty()
-                    && last_email_time.elapsed()
-                        >= Duration::from_secs(config.detection.email_cooldown_secs)
-                {
-                    mailer.send_alert(current_bytes.clone());
-                    last_email_time = Instant::now();
                 }
-
-                current_bytes
             } else {
                 buf.to_vec()
             }
         } else {
-            // Mode PASS-THROUGH (0% CPU)
-            buf.to_vec()
+            // Mode Détection désactivée : remise à zéro des boîtes
+            if let Ok(mut guard) = last_boxes.lock() {
+                guard.clear();
+            }
+
+            if is_jpeg {
+                // Pass-through direct à 0% CPU si la caméra sort du MJPEG natif
+                buf.to_vec()
+            } else {
+                // Conversion rapide YUYV -> JPEG sans inférence IA
+                if let Some(img) = decode_yuyv_to_rgb(buf, fmt.width, fmt.height) {
+                    let mut encoded = Vec::new();
+                    let mut cursor = std::io::Cursor::new(&mut encoded);
+                    if img.write_to(&mut cursor, ImageFormat::Jpeg).is_ok() {
+                        encoded
+                    } else {
+                        buf.to_vec()
+                    }
+                } else {
+                    buf.to_vec()
+                }
+            }
         };
 
-        // Enregistrement fichier dans output_record
+        // Enregistrement dans le fichier .mjpeg
         if is_recording_active {
             if video_file.is_none() {
                 std::fs::create_dir_all("output_record")?;
@@ -186,7 +221,7 @@ pub fn start_camera_loop(config: Config, state: Arc<SharedState>) -> Result<()> 
             video_file = None;
         }
 
-        // Broadcast frame websocket
+        // Transmission au flux WebSocket
         let _ = state.tx.send(jpeg_bytes);
     }
 }
