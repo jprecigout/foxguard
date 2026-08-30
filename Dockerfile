@@ -37,7 +37,11 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
     libv4l-0 \
     ca-certificates \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+# Définition du fuseau horaire (Europe/Paris)
+ENV TZ=Europe/Paris
 
 # 🔒 CRÉATION DE L'UTILISATEUR NON-ROOT SÉCURISÉ
 # 1. On crée un utilisateur/groupe 'foxguard' sans privilèges

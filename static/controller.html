@@ -218,6 +218,13 @@
             align-items: center;
         }
 
+        /* Regroupement icône + texte */
+        .h2-title {
+            display: flex;
+            align-items: center;
+            gap: 8px; /* Espacement exact entre l'icône et le texte */
+        }
+
         .refresh-btn {
             background: #333;
             border: none;
@@ -283,6 +290,48 @@
             max-height: 500px;
             object-fit: contain;
             background: #000;
+        }
+        /* Style de base pour toutes les icônes */
+        .icon {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            vertical-align: middle;
+            background-color: #e0e0e0; /* Couleur par défaut (gris clair) */
+            
+            /* Propriétés du masque */
+            mask-size: contain;
+            mask-repeat: no-repeat;
+            mask-position: center;
+            -webkit-mask-size: contain;
+            -webkit-mask-repeat: no-repeat;
+            -webkit-mask-position: center;
+        }
+
+        .icon-file-video-camera {
+            mask-image: url('/static/icons/file-video-camera.svg');
+            -webkit-mask-image: url('/static/icons/file-video-camera.svg');
+            background-color: #1e88e5;
+        }
+
+        .icon-refresh {
+            mask-image: url('/static/icons/refresh-cw.svg');
+            -webkit-mask-image: url('/static/icons/refresh-cw.svg');
+            background-color: #1e88e5;
+        }
+
+        .icon-clapperboard {
+            mask-image: url('/static/icons/clapperboard.svg');
+            -webkit-mask-image: url('/static/icons/clapperboard.svg');
+            background-color: #1e88e5;
+        }
+
+        /* Flexbox sur les boutons pour un centrage parfait */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
         }
     </style>
 </head>
@@ -377,8 +426,11 @@
         <!-- Section Liste des Enregistrements -->
         <div class="recordings-card">
             <h2>
-                📂 Enregistrements sauvegardés
-                <button class="refresh-btn" onclick="loadRecordings()">🔄 Actualiser</button>
+                <div class="h2-title">
+                    <span class="icon icon-file-video-camera"></span>
+                    <span>Enregistrements sauvegardés</span>
+                </div>
+                <button class="refresh-btn" onclick="loadRecordings()"><span class="icon icon-refresh"></span> Actualiser</button>
             </h2>
             <ul id="recordingsList" class="recordings-list">
                 <li style="color: var(--text-muted); text-align: center; padding: 10px;">Chargement des fichiers...</li>
@@ -469,7 +521,7 @@
 
                 listEl.innerHTML = files.map(f => `
                     <li class="recording-item" onclick="playVideo('${f.name}')">
-                        <span class="recording-info">🎬 ${f.name}</span>
+                        <span class="recording-info"><span class="icon icon-clapperboard"></span> ${f.name}</span>
                         <span class="recording-size">${f.size_mb} MB</span>
                     </li>
                 `).join('');
@@ -487,7 +539,7 @@
             const ctx = canvas.getContext('2d');
             const title = document.getElementById('playingTitle');
 
-            if (title) title.innerText = `▶️ Chargement : ${filename}...`;
+            if (title) title.innerHTML = `<span class="icon icon-clapperboard"></span> Chargement : ${filename}...`;
             playerCard.style.display = 'block';
             playerCard.scrollIntoView({ behavior: 'smooth' });
 

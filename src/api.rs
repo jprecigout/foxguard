@@ -19,6 +19,7 @@ use std::sync::{
 use tokio::fs::File;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::io::ReaderStream;
+use tower_http::services::ServeDir;
 
 use crate::camera::SharedState;
 
@@ -219,5 +220,6 @@ pub fn create_router(state: Arc<SharedState>) -> Router {
         .route("/ws", get(ws_handler))
         .route("/api/recordings", get(list_recordings_handler)) // API Liste des vidéos
         .route("/recordings/{filename}", get(stream_mjpeg_handler))
+        .nest_service("/static", ServeDir::new("static"))
         .with_state(state)
 }
