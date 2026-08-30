@@ -112,6 +112,7 @@ docker pull jprecigout/foxguard:rpi4
 Il faut configurer le Raspberry Pi pour qu'il utilise le contrôleur vidéo hérité compatible V4L2 natif.
 
 1. Modifier la configuration du Raspberry Pi (sur l'hôte)
+   
 Ouvrez le fichier de configuration de démarrage du Pi :
 
 ```bash
@@ -176,6 +177,7 @@ dtoverlay=dwc2,dr_mode=host
 [all]
 ```
 2. Charger le module et redémarrer
+   
 Exécutez ces commandes puis redémarrez le Pi :
 
 ```bash
