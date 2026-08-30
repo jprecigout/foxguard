@@ -1,0 +1,6 @@
+target/
+output_record/
+.git/
+.gitignore
+README.md
+*.tar

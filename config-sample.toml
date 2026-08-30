@@ -1,0 +1,24 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+api_token = "secret123"
+
+[camera]
+device_index = 0
+width = 640
+height = 480
+
+[detection]
+enabled = false
+model_path = "src/vision/yolov8n.onnx"
+input_size = 320
+confidence_threshold = 0.5
+email_cooldown_secs = 60
+
+[email]
+enabled = true
+smtp_server = "XXXXXXXXXX"
+smtp_user = "XXXXXXXXXX"
+smtp_password = "XXXXXXXXXX"
+from_address = "XXXXXXXXXX"
+to_address = "XXXXXXXXXX"

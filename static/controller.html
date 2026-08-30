@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <link rel="icon" type="image/svg+xml"
+        href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cdefs%3E%3ClinearGradient id='bg' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%23212129'/%3E%3Cstop offset='100%25' stop-color='%230F0F12'/%3E%3C/linearGradient%3E%3ClinearGradient id='sh-l' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%233A3A48'/%3E%3Cstop offset='100%25' stop-color='%2323232C'/%3E%3C/linearGradient%3E%3ClinearGradient id='sh-r' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%232D2D38'/%3E%3Cstop offset='100%25' stop-color='%23191920'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='32' y='32' width='448' height='448' rx='96' fill='url(%23bg)'/%3E%3Cpath d='M 256,70 L 110,120 C 110,270 170,380 256,430 Z' fill='url(%23sh-l)' stroke='%23FF5500' stroke-width='3'/%3E%3Cpath d='M 256,70 L 402,120 C 402,270 342,380 256,430 Z' fill='url(%23sh-r)' stroke='%23FF5500' stroke-width='3'/%3E%3Cg transform='translate(256, 250) scale(0.75) translate(-256, -235)'%3E%3Cpolygon points='256,160 180,160 90,50' fill='%23FF6B4A'/%3E%3Cpolygon points='256,160 332,160 422,50' fill='%23FF451A'/%3E%3Cpolygon points='256,160 180,160 70,310 256,350' fill='%23FF6B4A'/%3E%3Cpolygon points='256,160 332,160 442,310 256,350' fill='%23FF451A'/%3E%3Cpolygon points='70,310 256,350 256,420 180,370' fill='%23EAEAEA'/%3E%3Cpolygon points='442,310 256,350 256,420 332,370' fill='%23CBD5E1'/%3E%3Ccircle cx='185' cy='245' r='11' fill='%233D2922'/%3E%3Ccircle cx='327' cy='245' r='11' fill='%232A1B16'/%3E%3Cpolygon points='256,350 238,368 256,392 274,368' fill='%232A1B16'/%3E%3C/g%3E%3C/svg%3E">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoxGuard - Controller </title>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --card-bg: #1e1e1e;
+            --accent-red: #e53935;
+            --accent-green: #43a047;
+            --accent-blue: #1e88e5;
+            --text-color: #ffffff;
+            --text-muted: #b0b0b0;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        header {
+            width: 100%;
+            max-width: 900px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .logo-title-container {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo-svg {
+            width: 128px;
+            height: 128px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        h1 {
+            font-size: 3.5rem;
+            color: var(--text-color);
+            display: flex;
+            align-items: center;
+            margin: 0;
+        }
+
+        h1 span {
+            color: var(--accent-red);
+        }
+
+        .status-badge {
+            font-size: 0.85rem;
+            padding: 5px 12px;
+            border-radius: 20px;
+            background-color: #333;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #888;
+        }
+
+        .status-dot.connected {
+            background-color: var(--accent-green);
+        }
+
+        .status-dot.disconnected {
+            background-color: var(--accent-red);
+        }
+
+        .container {
+            width: 100%;
+            max-width: 900px;
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+        }
+
+        .video-card {
+            background-color: var(--card-bg);
+            border-radius: 12px;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 360px;
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
+            position: relative;
+        }
+
+        .video-card img {
+            width: 100%;
+            height: auto;
+            display: block;
+            object-fit: contain;
+        }
+
+        .placeholder {
+            color: var(--text-muted);
+            font-size: 1rem;
+        }
+
+        .controls-card,
+        .recordings-card {
+            background-color: var(--card-bg);
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
+        }
+
+        .controls-card {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }
+
+        .control-group {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background-color: #2a2a2a;
+            padding: 15px;
+            border-radius: 8px;
+        }
+
+        .control-info label {
+            font-weight: bold;
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        .control-info span {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        /* Interrupteur Switch CSS */
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 26px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #555;
+            transition: .3s;
+            border-radius: 26px;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .3s;
+            border-radius: 50%;
+        }
+
+        input:checked+.slider {
+            background-color: var(--accent-green);
+        }
+
+        input:checked+.slider:before {
+            transform: translateX(24px);
+        }
+
+        /* Section Galerie Enregistrements */
+        h2 {
+            font-size: 1.2rem;
+            margin-bottom: 15px;
+            color: var(--accent-blue);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .refresh-btn {
+            background: #333;
+            border: none;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: background 0.2s;
+        }
+
+        .refresh-btn:hover {
+            background: #444;
+        }
+
+        .recordings-list {
+            list-style: none;
+            max-height: 250px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .recording-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #2a2a2a;
+            padding: 12px 15px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .recording-item:hover {
+            background: #3a3a3a;
+        }
+
+        .recording-info {
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        .recording-size {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        /* Lecteur de média */
+        .player-card {
+            background-color: var(--card-bg);
+            border-radius: 12px;
+            padding: 20px;
+            display: none;
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
+        }
+
+        .player-card img,
+        .player-card video {
+            width: 100%;
+            border-radius: 8px;
+            max-height: 500px;
+            object-fit: contain;
+            background: #000;
+        }
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <div class="logo-title-container">
+            <!-- Logo SVG FoxGuard -->
+            <div class="logo-svg">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+                    <defs>
+                        <filter id="md-shadow" x="-20%" y="-20%" width="140%" height="140%">
+                            <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000000" flood-opacity="0.35" />
+                        </filter>
+                        <linearGradient id="bg-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#212129" />
+                            <stop offset="100%" stop-color="#0F0F12" />
+                        </linearGradient>
+                        <linearGradient id="shield-gradient-left" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#3A3A48" />
+                            <stop offset="100%" stop-color="#23232C" />
+                        </linearGradient>
+                        <linearGradient id="shield-gradient-right" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#2D2D38" />
+                            <stop offset="100%" stop-color="#191920" />
+                        </linearGradient>
+                    </defs>
+                    <rect x="32" y="32" width="448" height="448" rx="96" fill="url(#bg-gradient)"
+                        filter="url(#md-shadow)" />
+                    <g id="shield">
+                        <path d="M 256,70 L 110,120 C 110,270 170,380 256,430 Z" fill="url(#shield-gradient-left)"
+                            stroke="#FF5500" stroke-width="3" />
+                        <path d="M 256,70 L 402,120 C 402,270 342,380 256,430 Z" fill="url(#shield-gradient-right)"
+                            stroke="#FF5500" stroke-width="3" />
+                    </g>
+                    <g transform="translate(256, 250) scale(0.75) translate(-256, -235)">
+                        <polygon points="256,160 180,160 90,50" fill="#FF6B4A" />
+                        <polygon points="256,160 332,160 422,50" fill="#FF451A" />
+                        <polygon points="256,160 180,160 70,310 256,350" fill="#FF6B4A" />
+                        <polygon points="256,160 332,160 442,310 256,350" fill="#FF451A" />
+                        <polygon points="70,310 256,350 256,420 180,370" fill="#EAEAEA" />
+                        <polygon points="442,310 256,350 256,420 332,370" fill="#CBD5E1" />
+                        <circle cx="185" cy="245" r="11" fill="#3D2922" />
+                        <circle cx="327" cy="245" r="11" fill="#2A1B16" />
+                        <polygon points="256,350 238,368 256,392 274,368" fill="#2A1B16" />
+                    </g>
+                </svg>
+            </div>
+            <h1>Fox<span>Guard</span></h1>
+        </div>
+        <div class="status-badge">
+            <div id="statusDot" class="status-dot disconnected"></div>
+            <span id="statusText">Déconnecté</span>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Zone Flux Vidéo WebSocket -->
+        <div class="video-card">
+            <img id="videoStream" alt="Flux vidéo en direct" style="display: none;">
+            <div id="placeholder" class="placeholder">Connexion au flux vidéo...</div>
+        </div>
+
+        <!-- Zone Commandes -->
+        <div class="controls-card">
+            <!-- Interrupteur Détection IA -->
+            <div class="control-group">
+                <div class="control-info">
+                    <label>Détection IA</label>
+                    <span>Détection d'objets YOLOv8</span>
+                </div>
+                <label class="switch">
+                    <input type="checkbox" id="toggleDetection" onchange="sendDetectionCommand(this.checked)">
+                    <span class="slider"></span>
+                </label>
+            </div>
+
+            <!-- Interrupteur Enregistrement Vidéo -->
+            <div class="control-group">
+                <div class="control-info">
+                    <label>Enregistrement</label>
+                    <span>Sauvegarde des fichiers MJPEG</span>
+                </div>
+                <label class="switch">
+                    <input type="checkbox" id="toggleRecording" onchange="sendRecordingCommand(this.checked)">
+                    <span class="slider"></span>
+                </label>
+            </div>
+        </div>
+
+        <!-- Section Liste des Enregistrements -->
+        <div class="recordings-card">
+            <h2>
+                📂 Enregistrements sauvegardés
+                <button class="refresh-btn" onclick="loadRecordings()">🔄 Actualiser</button>
+            </h2>
+            <ul id="recordingsList" class="recordings-list">
+                <li style="color: var(--text-muted); text-align: center; padding: 10px;">Chargement des fichiers...</li>
+            </ul>
+        </div>
+
+        <!-- Lecteur pour le fichier enregistré -->
+        <div id="playerCard" class="player-card">
+            <h3 id="playingTitle" style="margin-bottom: 12px; font-size: 1rem; color: var(--accent-blue);">Lecteur Vidéo
+            </h3>
+            <canvas id="mjpegCanvas" style="width: 100%; border-radius: 8px; background: #000;"></canvas>
+        </div>
+    </div>
+
+    <script>
+        let ws;
+        const streamImg = document.getElementById('videoStream');
+        const placeholder = document.getElementById('placeholder');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const API_TOKEN = "secret123";
+            const wsUrl = `${protocol}//${window.location.host}/ws?token=${API_TOKEN}`;
+
+            ws = new WebSocket(wsUrl);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = () => {
+                statusDot.className = 'status-dot connected';
+                statusText.innerText = 'En direct';
+                placeholder.style.display = 'none';
+                streamImg.style.display = 'block';
+            };
+
+            ws.onmessage = (event) => {
+                if (event.data instanceof ArrayBuffer) {
+                    let bytes = new Uint8Array(event.data);
+                    let binary = '';
+                    for (let i = 0; i < bytes.byteLength; i++) {
+                        binary += String.fromCharCode(bytes[i]);
+                    }
+                    let base64 = window.btoa(binary);
+                    streamImg.src = 'data:image/jpeg;base64,' + base64;
+                }
+            };
+
+            ws.onclose = () => {
+                statusDot.className = 'status-dot disconnected';
+                statusText.innerText = 'Déconnecté';
+                placeholder.innerText = 'Reconnexion au flux...';
+                placeholder.style.display = 'block';
+                streamImg.style.display = 'none';
+                setTimeout(connectWebSocket, 2000);
+            };
+
+            ws.onerror = (err) => {
+                console.error('Erreur WebSocket:', err);
+                ws.close();
+            };
+        }
+
+        function sendDetectionCommand(enabled) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ command: 'set_detection', enabled: enabled }));
+            }
+        }
+
+        function sendRecordingCommand(enabled) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ command: 'set_recording', enabled: enabled }));
+            }
+        }
+
+        async function loadRecordings() {
+            const listEl = document.getElementById('recordingsList');
+            try {
+                const res = await fetch('/api/recordings');
+                if (!res.ok) throw new Error('Erreur HTTP ' + res.status);
+
+                const files = await res.json();
+
+                if (files.length === 0) {
+                    listEl.innerHTML = '<li style="color: var(--text-muted); text-align: center; padding: 10px;">Aucun enregistrement disponible.</li>';
+                    return;
+                }
+
+                listEl.innerHTML = files.map(f => `
+                    <li class="recording-item" onclick="playVideo('${f.name}')">
+                        <span class="recording-info">🎬 ${f.name}</span>
+                        <span class="recording-size">${f.size_mb} MB</span>
+                    </li>
+                `).join('');
+            } catch (err) {
+                console.error("Erreur de chargement des enregistrements:", err);
+                listEl.innerHTML = '<li style="color: var(--accent-red); text-align: center; padding: 10px;">Impossible de charger la liste.</li>';
+            }
+        }
+
+        let playbackInterval = null;
+
+        async function playVideo(filename) {
+            const playerCard = document.getElementById('playerCard');
+            const canvas = document.getElementById('mjpegCanvas');
+            const ctx = canvas.getContext('2d');
+            const title = document.getElementById('playingTitle');
+
+            if (title) title.innerText = `▶️ Chargement : ${filename}...`;
+            playerCard.style.display = 'block';
+            playerCard.scrollIntoView({ behavior: 'smooth' });
+
+            if (playbackInterval) clearInterval(playbackInterval);
+
+            try {
+                const response = await fetch(`/recordings/${filename}`);
+                const buffer = new Uint8Array(await response.arrayBuffer());
+
+                const frames = [];
+                let start = -1;
+                for (let i = 0; i < buffer.length - 1; i++) {
+                    if (buffer[i] === 0xFF && buffer[i + 1] === 0xD8) {
+                        start = i;
+                    } else if (buffer[i] === 0xFF && buffer[i + 1] === 0xD9 && start !== -1) {
+                        frames.push(buffer.subarray(start, i + 2));
+                        start = -1;
+                    }
+                }
+
+                if (frames.length === 0) return;
+
+                let frameIdx = 0;
+                playbackInterval = setInterval(() => {
+                    if (frameIdx >= frames.length) frameIdx = 0;
+
+                    const blob = new Blob([frames[frameIdx]], { type: 'image/jpeg' });
+                    const url = URL.createObjectURL(blob);
+                    const img = new Image();
+
+                    img.onload = () => {
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                        ctx.drawImage(img, 0, 0);
+                        URL.revokeObjectURL(url);
+                    };
+                    img.src = url;
+
+                    frameIdx++;
+                }, 33);
+            } catch (err) {
+                console.error("Erreur de lecture :", err);
+            }
+        }
+
+        connectWebSocket();
+        loadRecordings();
+    </script>
+</body>
+
+</html>
