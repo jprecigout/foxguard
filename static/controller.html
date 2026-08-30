@@ -270,7 +270,6 @@
             -webkit-mask-image: url('/static/icons/shield-off.svg');
         }
 
-
         .icon-shield-active {
             mask-image: url('/static/icons/shield-check.svg');
             -webkit-mask-image: url('/static/icons/shield-check.svg');
@@ -284,11 +283,18 @@
         .icon-refresh {
             mask-image: url('/static/icons/refresh-cw.svg');
             -webkit-mask-image: url('/static/icons/refresh-cw.svg');
+            color: var(--accent-blue);
         }
 
         .icon-clapperboard {
             mask-image: url('/static/icons/clapperboard.svg');
             -webkit-mask-image: url('/static/icons/clapperboard.svg');
+        }
+
+        .icon-close {
+            mask-image: url('/static/icons/x.svg');
+            -webkit-mask-image: url('/static/icons/x.svg');
+            color: var(--accent-blue);
         }
 
         /* Adaptations Responsive Mobile */
@@ -416,10 +422,16 @@
 
         <!-- Lecteur pour le fichier enregistré -->
         <div id="playerCard" class="player-card">
-            <h3 id="playingTitle"
-                style="margin-bottom: 12px; font-size: 1rem; color: var(--accent-blue); display: flex; align-items: center; gap: 8px;">
-                Lecteur Vidéo
-            </h3>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <h3 id="playingTitle"
+                    style="font-size: 1rem; color: var(--accent-blue); display: flex; align-items: center; gap: 8px;">
+                    Lecteur Vidéo
+                </h3>
+                <button class="refresh-btn" onclick="closePlayer()">
+                    <span class="icon icon-close"></span>
+                    <span>Fermer</span>
+                </button>
+            </div>
             <canvas id="mjpegCanvas" style="width: 100%; border-radius: 8px; background: #000;"></canvas>
         </div>
     </div>
@@ -535,6 +547,15 @@
         }
 
         let playbackInterval = null;
+
+        function closePlayer() {
+            const playerCard = document.getElementById('playerCard');
+            if (playbackInterval) {
+                clearInterval(playbackInterval);
+                playbackInterval = null;
+            }
+            playerCard.style.display = 'none';
+        }
 
         async function playVideo(filename) {
             const playerCard = document.getElementById('playerCard');
