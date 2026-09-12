@@ -4,6 +4,7 @@ use font8x8::UnicodeFonts;
 use image::{ImageFormat, Rgb, RgbImage};
 use imageproc::drawing::{draw_filled_rect_mut, draw_hollow_rect_mut};
 use imageproc::rect::Rect;
+use rayon::prelude::*;
 use std::fs::File;
 use std::io::Write;
 use std::sync::{
@@ -11,7 +12,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
-use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use v4l::buffer::Type;
@@ -75,7 +75,9 @@ pub fn start_camera_loop(config: Config, state: Arc<SharedState>) -> Result<()> 
     let last_boxes: Arc<Mutex<Vec<BoundingBox>>> = Arc::new(Mutex::new(Vec::new()));
 
     let last_boxes_worker = Arc::clone(&last_boxes);
-    thread::spawn(move || {
+
+    // Remplacement de thread::spawn par le pool de threads bloquants de Tokio
+    tokio::task::spawn_blocking(move || {
         while let Ok(img) = detect_rx.recv() {
             if let Ok(boxes) = detector.detect(&img) {
                 if let Ok(mut guard) = last_boxes_worker.lock() {
@@ -102,7 +104,7 @@ pub fn start_camera_loop(config: Config, state: Arc<SharedState>) -> Result<()> 
         let is_jpeg = buf.len() > 2 && buf[0] == 0xFF && buf[1] == 0xD8;
 
         let jpeg_bytes = if is_detection_active {
-            // Decodage de l'image source pour annotation / détection
+            // Décodage de l'image source pour annotation / détection
             let decoded_img = if is_jpeg {
                 image::load_from_memory(buf).ok().map(|i| i.to_rgb8())
             } else {
@@ -226,38 +228,35 @@ pub fn start_camera_loop(config: Config, state: Arc<SharedState>) -> Result<()> 
     }
 }
 
-// Décode un flux brut YUYV (YUY2) en RgbImage (Caméra Raspberry Pi)
+/// Décode un flux brut YUYV (YUY2) en RgbImage de manière totalement parallélisée avec Rayon
 fn decode_yuyv_to_rgb(buf: &[u8], width: u32, height: u32) -> Option<RgbImage> {
-    if buf.len() < (width * height * 2) as usize {
+    let total_pixels = (width * height) as usize;
+    if buf.len() < total_pixels * 2 {
         return None;
     }
 
-    let mut rgb_img = RgbImage::new(width, height);
+    let mut raw_rgb = vec![0u8; total_pixels * 3];
 
-    for (i, chunk) in buf.chunks_exact(4).enumerate() {
-        let y0 = chunk[0] as f32;
-        let u = chunk[1] as f32 - 128.0;
-        let y1 = chunk[2] as f32;
-        let v = chunk[3] as f32 - 128.0;
+    // Utilisation de Rayon ici pour paralléliser la conversion par paquets
+    raw_rgb
+        .par_chunks_exact_mut(6)
+        .zip(buf.par_chunks_exact(4))
+        .for_each(|(rgb_out, chunk)| {
+            let y0 = chunk[0] as f32;
+            let u = chunk[1] as f32 - 128.0;
+            let y1 = chunk[2] as f32;
+            let v = chunk[3] as f32 - 128.0;
 
-        let x = (i as u32 * 2) % width;
-        let y = (i as u32 * 2) / width;
-
-        if y < height {
             // Pixel 1
-            let r1 = (y0 + 1.402 * v).clamp(0.0, 255.0) as u8;
-            let g1 = (y0 - 0.34414 * u - 0.71414 * v).clamp(0.0, 255.0) as u8;
-            let b1 = (y0 + 1.772 * u).clamp(0.0, 255.0) as u8;
-            rgb_img.put_pixel(x, y, Rgb([r1, g1, b1]));
+            rgb_out[0] = (y0 + 1.402 * v).clamp(0.0, 255.0) as u8;
+            rgb_out[1] = (y0 - 0.34414 * u - 0.71414 * v).clamp(0.0, 255.0) as u8;
+            rgb_out[2] = (y0 + 1.772 * u).clamp(0.0, 255.0) as u8;
 
             // Pixel 2
-            if x + 1 < width {
-                let r2 = (y1 + 1.402 * v).clamp(0.0, 255.0) as u8;
-                let g2 = (y1 - 0.34414 * u - 0.71414 * v).clamp(0.0, 255.0) as u8;
-                let b2 = (y1 + 1.772 * u).clamp(0.0, 255.0) as u8;
-                rgb_img.put_pixel(x + 1, y, Rgb([r2, g2, b2]));
-            }
-        }
-    }
-    Some(rgb_img)
+            rgb_out[3] = (y1 + 1.402 * v).clamp(0.0, 255.0) as u8;
+            rgb_out[4] = (y1 - 0.34414 * u - 0.71414 * v).clamp(0.0, 255.0) as u8;
+            rgb_out[5] = (y1 + 1.772 * u).clamp(0.0, 255.0) as u8;
+        });
+
+    RgbImage::from_raw(width, height, raw_rgb)
 }

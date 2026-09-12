@@ -34,7 +34,6 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Lancement de la boucle de capture caméra dans une tâche blocking
-    // (Conserve le contexte Tokio nécessaire pour l'envoi des e-mails)
     let camera_config = config.clone();
     let camera_state = Arc::clone(&state);
 

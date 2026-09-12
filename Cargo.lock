@@ -766,6 +766,7 @@ dependencies = [
  "imageproc",
  "lettre",
  "ndarray",
+ "rayon",
  "serde",
  "serde_json",
  "tokio",
