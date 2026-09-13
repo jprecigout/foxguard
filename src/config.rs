@@ -28,7 +28,10 @@ pub struct DetectionConfig {
     #[serde(default)]
     pub enabled: bool,
     pub model_path: String,
+    pub model_detect_face_path: String,
+    pub model_face_path: String,
     pub input_size: u32,
+    pub input_face_size: u32,
     pub confidence_threshold: f32,
     pub email_cooldown_secs: u64,
 }

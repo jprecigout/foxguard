@@ -11,6 +11,8 @@ height = 480
 [detection]
 enabled = false
 model_path = "src/vision/yolov8n.onnx"
+model_detect_face_path = "src/vision/face_detection_yunet_2023mar.onnx"
+model_face_path = "src/vision/arcface-mobilefacenet.onnx"
 input_size = 320
 confidence_threshold = 0.5
 email_cooldown_secs = 60
