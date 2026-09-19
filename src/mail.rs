@@ -1,3 +1,5 @@
+//! Envoi des e-mails d'alerte (photo de détection en pièce jointe HTML).
+
 use anyhow::Result;
 use chrono::Local;
 use lettre::message::header::{ContentDisposition, ContentId, ContentType};
@@ -7,12 +9,14 @@ use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
 use crate::config::EmailConfig;
 
+/// Client d'envoi des e-mails d'alerte, construit une fois au démarrage.
 #[derive(Clone)]
 pub struct Mailer {
     config: EmailConfig,
 }
 
 impl Mailer {
+    /// Construit le mailer à partir de la configuration `[email]`.
     pub fn new(config: EmailConfig) -> Self {
         Self { config }
     }
@@ -33,6 +37,7 @@ impl Mailer {
         });
     }
 
+    // Construit et envoie effectivement l'e-mail HTML multipart (logo + photo).
     async fn dispatch_email(config: EmailConfig, image_bytes: Vec<u8>) -> Result<()> {
         let now = Local::now().format("%d/%m/%Y à %H:%M:%S").to_string();
 

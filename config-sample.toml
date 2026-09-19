@@ -5,15 +5,18 @@ api_token = "secret123"
 
 [camera]
 device_index = 0
-width = 640
-height = 480
+# Nom de la caméra, inclus dans les événements MQTT (voir [mqtt] ci-dessous)
+# pour distinguer plusieurs installations FoxGuard. Optionnel : "foxguard"
+# par défaut si absent.
+name = "foxguard"
 
 [detection]
 enabled = false
-model_path = "src/vision/yolov8n.onnx"
-model_detect_face_path = "src/vision/face_detection_yunet_2023mar.onnx"
-model_face_path = "src/vision/arcface-mobilefacenet.onnx"
+model_path = "src/vision/models/yolov8n.onnx"
+model_detect_face_path = "src/vision/models/face_detection_yunet_2023mar.onnx"
+model_face_path = "src/vision/models/arcface-mobilefacenet.onnx"
 input_size = 320
+input_face_size = 112
 confidence_threshold = 0.5
 email_cooldown_secs = 60
 
@@ -24,3 +27,20 @@ smtp_user = "XXXXXXXXXX"
 smtp_password = "XXXXXXXXXX"
 from_address = "XXXXXXXXXX"
 to_address = "XXXXXXXXXX"
+
+# Section entièrement optionnelle : un config.toml sans [mqtt] du tout
+# continue de fonctionner, avec la publication MQTT désactivée. Publie un
+# message JSON à chaque CHANGEMENT d'état de reconnaissance (personne
+# inconnue détectée, ou identifiée avec son nom), pas à chaque frame.
+[mqtt]
+enabled = false
+# Hôte du broker MQTT, ex : "192.168.1.50". Requis si enabled = true.
+broker_host = "XXXXXXXXXX"
+broker_port = 1883
+# Identifiants optionnels : laisser vide si le broker n'exige pas
+# d'authentification. Pas de TLS (connexion en clair, comme un broker sur
+# le réseau local).
+username = "XXXXXXXXXX"
+password = "XXXXXXXXXX"
+# Topic sur lequel publier chaque événement de détection.
+topic = "foxguard/detections"

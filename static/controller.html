@@ -280,6 +280,11 @@
             -webkit-mask-image: url('/static/icons/file-video-camera.svg');
         }
 
+        .icon-face-recognition {
+            mask-image: url('/static/icons/scan-face.svg');
+            -webkit-mask-image: url('/static/icons/scan-face.svg');
+        }
+
         .icon-refresh {
             mask-image: url('/static/icons/refresh-cw.svg');
             -webkit-mask-image: url('/static/icons/refresh-cw.svg');
@@ -403,6 +408,32 @@
             </button>
         </div>
 
+        <!-- Capture d'une photo de référence pour la reconnaissance faciale -->
+        <div class="controls-card">
+            <h2 style="margin-bottom: 12px;">
+                <div class="h2-title">
+                    <span class="icon icon-face-recognition"></span>
+                    <span>Reconnaissance faciale</span>
+                </div>
+            </h2>
+            <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 12px;">
+                Capture la frame actuelle de la webcam comme référence pour ce nom. Placez-vous
+                devant la caméra, surveillance activée, puis cliquez sur Capturer. Vous pouvez
+                cliquer plusieurs fois sous des angles / poses différents : chaque capture
+                s'ajoute aux précédentes pour ce nom (au lieu de les remplacer), ce qui rend
+                la reconnaissance plus fiable.
+            </p>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <input id="enrollName" type="text" value="jerome" placeholder="Nom (ex: jerome)"
+                    style="flex: 1; min-width: 160px; padding: 10px 12px; border-radius: 8px; border: 1px solid #444; background: #2a2a2a; color: var(--text-color); font-size: 0.95rem;">
+                <button id="btnCaptureReference" class="btn btn-disabled" style="width: auto; min-width: 160px;"
+                    onclick="captureReference()">
+                    <span>Capturer</span>
+                </button>
+            </div>
+            <p id="enrollStatus" style="color: var(--text-muted); font-size: 0.85rem; margin-top: 10px;"></p>
+        </div>
+
         <!-- Section Liste des Enregistrements -->
         <div class="recordings-card">
             <h2>
@@ -508,7 +539,7 @@
             if (active) {
                 btn.classList.remove('btn-disabled');
                 btn.classList.add('btn-active');
-                label.innerText = 'Surveillance active (IA + Enregistrement)';
+                label.innerText = 'Surveillance active';
                 icon.className = 'icon icon-shield-active';
             } else {
                 btn.classList.remove('btn-active');
@@ -516,6 +547,38 @@
                 label.innerText = 'Activer la surveillance';
                 icon.className = 'icon icon-shield-off';
             }
+        }
+
+        function captureReference() {
+            const nameInput = document.getElementById('enrollName');
+            const statusEl = document.getElementById('enrollStatus');
+            const name = nameInput.value.trim();
+
+            if (!name) {
+                statusEl.style.color = 'var(--accent-red)';
+                statusEl.innerText = 'Merci de saisir un nom.';
+                return;
+            }
+
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                statusEl.style.color = 'var(--accent-red)';
+                statusEl.innerText = 'Non connecté au flux caméra.';
+                return;
+            }
+
+            if (!isSystemActive) {
+                statusEl.style.color = 'var(--accent-red)';
+                statusEl.innerText = 'Activez la surveillance avant de capturer.';
+                return;
+            }
+
+            ws.send(JSON.stringify({
+                command: 'capture_reference',
+                name: name
+            }));
+
+            statusEl.style.color = 'var(--text-muted)';
+            statusEl.innerText = `Capture demandée pour "${name}"... regardez la console du serveur.`;
         }
 
         async function loadRecordings() {
@@ -546,15 +609,88 @@
             }
         }
 
-        let playbackInterval = null;
+        // --- Lecteur d'enregistrements ---------------------------------
+        //
+        // Les enregistrements récents embarquent, pour chaque frame JPEG,
+        // un horodatage réel (ms depuis le début de l'enregistrement, voir
+        // le format écrit par capture::recording côté serveur). La lecture
+        // respecte ces écarts réels plutôt qu'un débit fixe : c'est ce qui
+        // évitait auparavant une relecture accélérée / incohérente quand le
+        // FPS réel de la caméra n'était pas exactement 30 im/s (webcam UVC
+        // qui réduit son FPS en basse luminosité, par exemple).
+        //
+        // playbackToken invalide toute lecture en cours (fermeture du
+        // panel, ou nouvel enregistrement lancé pendant qu'un autre
+        // charge encore) : le fetch en vol est annulé, et le callback de
+        // fin de téléchargement comme la boucle de rendu vérifient ce
+        // jeton avant d'agir, pour ne jamais démarrer/poursuivre une
+        // lecture que personne ne regarde plus.
+        let playbackTimer = null;
+        let playbackAbort = null;
+        let playbackToken = 0;
+
+        function stopPlayback() {
+            playbackToken++;
+            if (playbackTimer) {
+                clearTimeout(playbackTimer);
+                playbackTimer = null;
+            }
+            if (playbackAbort) {
+                playbackAbort.abort();
+                playbackAbort = null;
+            }
+        }
 
         function closePlayer() {
-            const playerCard = document.getElementById('playerCard');
-            if (playbackInterval) {
-                clearInterval(playbackInterval);
-                playbackInterval = null;
+            stopPlayback();
+            document.getElementById('playerCard').style.display = 'none';
+        }
+
+        // Extrait les frames (avec horodatage réel) d'un enregistrement au
+        // format "framed" : [u32 timestamp_ms][u32 frame_len][frame JPEG].
+        // Retourne null si le fichier ne correspond pas à ce format (ancien
+        // enregistrement), pour que l'appelant retombe sur un balayage
+        // classique des marqueurs JPEG.
+        function extractFramedRecording(buffer) {
+            const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+            const frames = [];
+            let offset = 0;
+
+            while (offset + 8 <= buffer.length) {
+                const timestampMs = view.getUint32(offset, true);
+                const frameLen = view.getUint32(offset + 4, true);
+                const dataStart = offset + 8;
+                const dataEnd = dataStart + frameLen;
+
+                if (frameLen === 0 || dataEnd > buffer.length) return null;
+                if (buffer[dataStart] !== 0xFF || buffer[dataStart + 1] !== 0xD8) return null;
+
+                frames.push({ timestampMs, bytes: buffer.subarray(dataStart, dataEnd) });
+                offset = dataEnd;
             }
-            playerCard.style.display = 'none';
+
+            return frames.length > 0 ? frames : null;
+        }
+
+        // Ancien format (avant l'horodatage par frame) : simple
+        // concaténation de JPEG. Pas d'écart réel disponible, on retombe
+        // sur un cadencement fixe à 30 im/s comme avant.
+        function extractLegacyRecording(buffer) {
+            const frames = [];
+            let start = -1;
+            let index = 0;
+
+            for (let i = 0; i < buffer.length - 1; i++) {
+                if (buffer[i] === 0xFF && buffer[i + 1] === 0xD8) {
+                    start = i;
+                } else if (buffer[i] === 0xFF && buffer[i + 1] === 0xD9 && start !== -1) {
+                    frames.push({ timestampMs: index * 33, bytes: buffer.subarray(start, i + 2) });
+                    start = -1;
+                    index++;
+                }
+            }
+
+            return frames;
         }
 
         async function playVideo(filename) {
@@ -563,51 +699,76 @@
             const ctx = canvas.getContext('2d');
             const title = document.getElementById('playingTitle');
 
+            // Annule toute lecture / téléchargement en cours avant de
+            // démarrer celui-ci (et invalide son jeton).
+            stopPlayback();
+            const myToken = playbackToken;
+
             if (title) {
                 title.innerHTML = `<span class="icon icon-clapperboard"></span> Chargement : ${filename}...`;
             }
             playerCard.style.display = 'block';
             playerCard.scrollIntoView({ behavior: 'smooth' });
 
-            if (playbackInterval) clearInterval(playbackInterval);
+            const abortController = new AbortController();
+            playbackAbort = abortController;
 
             try {
-                const response = await fetch(`/recordings/${filename}`);
+                const response = await fetch(`/recordings/${filename}`, { signal: abortController.signal });
                 const buffer = new Uint8Array(await response.arrayBuffer());
 
-                const frames = [];
-                let start = -1;
-                for (let i = 0; i < buffer.length - 1; i++) {
-                    if (buffer[i] === 0xFF && buffer[i + 1] === 0xD8) {
-                        start = i;
-                    } else if (buffer[i] === 0xFF && buffer[i + 1] === 0xD9 && start !== -1) {
-                        frames.push(buffer.subarray(start, i + 2));
-                        start = -1;
-                    }
-                }
+                // Le panel a été fermé (ou une autre vidéo lancée) pendant
+                // le téléchargement : on abandonne plutôt que de démarrer
+                // une lecture que plus personne ne regarde.
+                if (myToken !== playbackToken) return;
+                playbackAbort = null;
+
+                const frames = extractFramedRecording(buffer) || extractLegacyRecording(buffer);
 
                 if (frames.length === 0) return;
 
-                let frameIdx = 0;
-                playbackInterval = setInterval(() => {
-                    if (frameIdx >= frames.length) frameIdx = 0;
+                if (title) {
+                    title.innerHTML = `<span class="icon icon-clapperboard"></span> ${filename}`;
+                }
 
-                    const blob = new Blob([frames[frameIdx]], { type: 'image/jpeg' });
+                const renderFrame = (frameIdx) => {
+                    if (myToken !== playbackToken) return; // panel fermé / autre lecture démarrée
+
+                    const frame = frames[frameIdx];
+                    const blob = new Blob([frame.bytes], { type: 'image/jpeg' });
                     const url = URL.createObjectURL(blob);
                     const img = new Image();
 
                     img.onload = () => {
-                        canvas.width = img.width;
-                        canvas.height = img.height;
-                        ctx.drawImage(img, 0, 0);
+                        if (myToken === playbackToken) {
+                            canvas.width = img.width;
+                            canvas.height = img.height;
+                            ctx.drawImage(img, 0, 0);
+                        }
                         URL.revokeObjectURL(url);
                     };
                     img.src = url;
 
-                    frameIdx++;
-                }, 33);
+                    // Délai réel jusqu'à la frame suivante (ou jusqu'au
+                    // rebouclage sur la première, à défaut d'un écart
+                    // connu après la dernière frame).
+                    const hasNext = frameIdx + 1 < frames.length;
+                    const nextIdx = hasNext ? frameIdx + 1 : 0;
+                    const fallbackDelay = frames.length > 1
+                        ? frames[1].timestampMs - frames[0].timestampMs
+                        : 33;
+                    const delay = hasNext
+                        ? frames[frameIdx + 1].timestampMs - frames[frameIdx].timestampMs
+                        : fallbackDelay;
+
+                    playbackTimer = setTimeout(() => renderFrame(nextIdx), Math.max(0, delay));
+                };
+
+                renderFrame(0);
             } catch (err) {
-                console.error("Erreur de lecture :", err);
+                if (err.name !== 'AbortError') {
+                    console.error("Erreur de lecture :", err);
+                }
             }
         }
 

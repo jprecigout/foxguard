@@ -4,11 +4,13 @@
 # pour avoir une version de rust 1.91 slim
 FROM rust:1-slim AS builder 
 
-# Dépendances nécessaires à la compilation (V4L2, C toolchain)
+# Dépendances nécessaires à la compilation (V4L2, C toolchain, TLS pour
+# l'envoi d'e-mail via lettre : libssl-dev pour openssl-sys/native-tls)
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libv4l-dev \
     libclang-dev \
+    libssl-dev \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
@@ -33,9 +35,11 @@ RUN touch src/main.rs && cargo build --release
 # ==========================================
 FROM debian:bookworm-slim
 
-# Dépendances d'exécution
+# Dépendances d'exécution (libssl3 : lib OpenSSL partagée requise par
+# native-tls, utilisé par lettre pour l'envoi d'e-mail en TLS)
 RUN apt-get update && apt-get install -y \
     libv4l-0 \
+    libssl3 \
     ca-certificates \
     tzdata \
     && rm -rf /var/lib/apt/lists/*
@@ -52,14 +56,15 @@ RUN groupadd -g 10001 foxguard && \
 WORKDIR /app
 
 # Création du répertoire d'enregistrement et attribution des permissions
-RUN mkdir -p /app/src/vision /app/output_record && \
+RUN mkdir -p /app/src/vision/models /app/output_record && \
     chown -R foxguard:foxguard /app
 
 # Copie des artefacts compilés et fichiers nécessaires depuis le stage 'builder'
 COPY --from=builder --chown=foxguard:foxguard /app/target/release/foxguard /app/foxguard
 COPY --from=builder --chown=foxguard:foxguard /app/static /app/static
 COPY --chown=foxguard:foxguard config.toml /app/config.toml
-COPY --chown=foxguard:foxguard src/vision/yolov8n.onnx /app/src/vision/yolov8n.onnx
+# Les 3 modèles ONNX (YOLOv8, YuNet, ArcFace) vivent tous dans src/vision/models/
+COPY --chown=foxguard:foxguard src/vision/models /app/src/vision/models
 
 # 🔒 BASCULEMENT SUR L'UTILISATEUR NON-ROOT
 USER foxguard

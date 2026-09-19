@@ -1,3 +1,8 @@
+//! Serveur HTTP / WebSocket (Axum) : sert l'interface de contrôle web,
+//! diffuse le flux vidéo en direct, reçoit les commandes de l'UI (activer
+//! la surveillance, capturer une photo de référence, ...) et expose la
+//! liste et la relecture des enregistrements.
+
 use axum::{
     Json, Router,
     body::Body,
@@ -16,25 +21,23 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::Duration;
-use tokio::fs::File;
-use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::time::sleep;
 use tower_http::services::ServeDir;
 
-use crate::camera::SharedState;
+use crate::capture::SharedState;
 
 // Compteur global pour attribuer un ID unique séquentiel à chaque client
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Un enregistrement vidéo disponible dans `output_record/`, tel que
+/// renvoyé par `GET /api/recordings`.
 #[derive(Serialize)]
 pub struct VideoFile {
     pub name: String,
     pub size_mb: f64,
 }
 
-// Structure pour extraire le paramètre ?token=
+/// Paramètres de requête pour l'upgrade WebSocket (`?token=...`).
 #[derive(Deserialize)]
 pub struct AuthQuery {
     pub token: Option<String>,
@@ -50,25 +53,30 @@ pub enum ClientCommand {
     SetDetection { enabled: bool },
     #[serde(rename = "set_recording")]
     SetRecording { enabled: bool },
+    /// Capture la prochaine frame caméra comme nouveau gabarit de référence
+    /// pour la reconnaissance faciale (s'ajoute aux gabarits existants pour
+    /// ce nom, voir `capture::start_camera_loop`).
+    #[serde(rename = "capture_reference")]
+    CaptureReference { name: String },
 }
 
-/// Handler pour lister les enregistrements disponibles dans output_record
+/// Handler pour lister les enregistrements disponibles dans `output_record/`
 async fn list_recordings_handler() -> Json<Vec<VideoFile>> {
     let mut files = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir("output_record") {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() {
-                if let (Some(name), Ok(metadata)) = (path.file_name(), path.metadata()) {
-                    let name_str = name.to_string_lossy().to_string();
-                    if name_str.ends_with(".mjpeg") || name_str.ends_with(".mp4") {
-                        let size_mb = (metadata.len() as f64) / (1024.0 * 1024.0);
-                        files.push(VideoFile {
-                            name: name_str,
-                            size_mb: (size_mb * 100.0).round() / 100.0,
-                        });
-                    }
+            if path.is_file()
+                && let (Some(name), Ok(metadata)) = (path.file_name(), path.metadata())
+            {
+                let name_str = name.to_string_lossy().to_string();
+                if name_str.ends_with(".mjpeg") || name_str.ends_with(".mp4") {
+                    let size_mb = (metadata.len() as f64) / (1024.0 * 1024.0);
+                    files.push(VideoFile {
+                        name: name_str,
+                        size_mb: (size_mb * 100.0).round() / 100.0,
+                    });
                 }
             }
         }
@@ -79,77 +87,38 @@ async fn list_recordings_handler() -> Json<Vec<VideoFile>> {
     Json(files)
 }
 
-// Handler qui transmet un fichier .mjpeg avec une temporisation à 30 FPS
+/// Handler qui sert le fichier d'enregistrement `.mjpeg` tel quel (format
+/// "framed" horodaté par frame, voir `crate::capture::recording`), pour
+/// téléchargement complet puis lecture côté client (voir `playVideo` dans
+/// `static/controller.html`), qui recadence la relecture d'après les
+/// horodatages réels embarqués dans le fichier plutôt qu'un débit fixe.
+///
+/// IMPORTANT : cet handler servait auparavant le fichier via un flux
+/// `multipart/x-mixed-replace` retemporisé artificiellement à 33ms/frame
+/// côté serveur — pensé pour un `<img>` affiché en direct pendant le
+/// téléchargement. Or le client télécharge le fichier en entier
+/// (`await response.arrayBuffer()`) avant d'en faire quoi que ce soit : ce
+/// retemporisage ne faisait donc que ralentir inutilement le téléchargement
+/// (jusqu'à plusieurs secondes pour un enregistrement de quelques centaines
+/// de frames) sans aucun bénéfice. On sert maintenant le fichier tel quel,
+/// aussi vite que le réseau le permet.
 async fn stream_mjpeg_handler(Path(filename): Path<String>) -> Result<Response, StatusCode> {
     if filename.contains("..") || !filename.ends_with(".mjpeg") {
         return Err(StatusCode::BAD_REQUEST);
     }
 
     let filepath = format!("output_record/{}", filename);
-    let mut file = File::open(&filepath)
+    let bytes = tokio::fs::read(&filepath)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
-    // Création d'un flux (stream) régulé frame par frame
-    let stream = async_stream::stream! {
-        let mut buffer = Vec::new();
-        let mut chunk = [0u8; 8192];
-
-        loop {
-            match file.read(&mut chunk).await {
-                Ok(0) => break, // Fin du fichier
-                Ok(n) => {
-                    buffer.extend_from_slice(&chunk[..n]);
-
-                    // Recherche des marqueurs de début (0xFF 0xD8) et de fin (0xFF 0xD9) de JPEG
-                    while let Some(start) = find_jpeg_start(&buffer) {
-                        if let Some(end) = find_jpeg_end(&buffer[start..]) {
-                            let frame_end = start + end + 2;
-                            let frame_data = buffer[start..frame_end].to_vec();
-
-                            // Envoi de l'image avec l'entête multipart MJPEG
-                            let header = format!(
-                                "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
-                                frame_data.len()
-                            );
-
-                            yield Ok::<_, std::io::Error>(bytes::Bytes::from(header));
-                            yield Ok::<_, std::io::Error>(bytes::Bytes::from(frame_data));
-                            yield Ok::<_, std::io::Error>(bytes::Bytes::from("\r\n"));
-
-                            // Réduction du buffer
-                            buffer.drain(..frame_end);
-
-                            // ⏱️ Pause de 33ms (~30 FPS) pour cadence réelle
-                            sleep(Duration::from_millis(33)).await;
-                        } else {
-                            break; // Frame incomplète, attendre plus de données
-                        }
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    };
-
-    let body = Body::from_stream(stream);
-
     let response = Response::builder()
-        .header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        .header("Content-Type", "application/octet-stream")
         .header("Cache-Control", "no-cache, no-store, must-revalidate")
-        .body(body)
+        .body(Body::from(bytes))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(response)
-}
-
-// Fonctions helpers pour localiser les marqueurs JPEG dans le buffer
-fn find_jpeg_start(buf: &[u8]) -> Option<usize> {
-    buf.windows(2).position(|w| w == [0xFF, 0xD8])
-}
-
-fn find_jpeg_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(2).position(|w| w == [0xFF, 0xD9])
 }
 
 /// Handler pour servir le fichier HTML de contrôle
@@ -185,7 +154,8 @@ pub async fn ws_handler(
         .into_response()
 }
 
-/// Handler de mise à niveau vers WebSocket
+/// Gère une connexion WebSocket déjà établie : diffuse le flux vidéo au
+/// client et traite les commandes JSON qu'il envoie (voir [`ClientCommand`]).
 pub async fn handle_socket(
     socket: WebSocket,
     state: Arc<SharedState>,
@@ -219,39 +189,48 @@ pub async fn handle_socket(
     let state_cmd = Arc::clone(&state);
     let recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
-            if let Message::Text(text) = msg {
-                if let Ok(cmd) = serde_json::from_str::<ClientCommand>(&text) {
-                    match cmd {
-                        ClientCommand::SetMonitoring { enabled } => {
-                            state_cmd
-                                .detection_enabled
-                                .store(enabled, Ordering::Relaxed);
-                            state_cmd
-                                .recording_enabled
-                                .store(enabled, Ordering::Relaxed);
-                            println!(
-                                "🛡️ [WS Client #{}] A modifié la surveillance générale : {}",
-                                client_id, enabled
-                            );
+            if let Message::Text(text) = msg
+                && let Ok(cmd) = serde_json::from_str::<ClientCommand>(&text)
+            {
+                match cmd {
+                    ClientCommand::SetMonitoring { enabled } => {
+                        state_cmd
+                            .detection_enabled
+                            .store(enabled, Ordering::Relaxed);
+                        state_cmd
+                            .recording_enabled
+                            .store(enabled, Ordering::Relaxed);
+                        println!(
+                            "🛡️ [WS Client #{}] A modifié la surveillance générale : {}",
+                            client_id, enabled
+                        );
+                    }
+                    ClientCommand::SetDetection { enabled } => {
+                        state_cmd
+                            .detection_enabled
+                            .store(enabled, Ordering::Relaxed);
+                        println!(
+                            "🔍 [WS Client #{}] A modifié la détection : {}",
+                            client_id, enabled
+                        );
+                    }
+                    ClientCommand::SetRecording { enabled } => {
+                        state_cmd
+                            .recording_enabled
+                            .store(enabled, Ordering::Relaxed);
+                        println!(
+                            "💾 [WS Client #{}] A modifié l'enregistrement : {}",
+                            client_id, enabled
+                        );
+                    }
+                    ClientCommand::CaptureReference { name } => {
+                        if let Ok(mut pending) = state_cmd.pending_enrollment.lock() {
+                            *pending = Some(name.clone());
                         }
-                        ClientCommand::SetDetection { enabled } => {
-                            state_cmd
-                                .detection_enabled
-                                .store(enabled, Ordering::Relaxed);
-                            println!(
-                                "🔍 [WS Client #{}] A modifié la détection : {}",
-                                client_id, enabled
-                            );
-                        }
-                        ClientCommand::SetRecording { enabled } => {
-                            state_cmd
-                                .recording_enabled
-                                .store(enabled, Ordering::Relaxed);
-                            println!(
-                                "💾 [WS Client #{}] A modifié l'enregistrement : {}",
-                                client_id, enabled
-                            );
-                        }
+                        println!(
+                            "📸 [WS Client #{}] Capture de photo de référence demandée pour : {}",
+                            client_id, name
+                        );
                     }
                 }
             }

@@ -13,8 +13,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "1.1.4"
 tower-http = { version = "0.7.0", features = ["fs"] }
-async-stream = "0.3"
-bytes = "1.0"
 rayon = "1.10"
 
 # Traitement image & V4L2
@@ -31,13 +29,30 @@ ndarray = "0.17.2"
 lettre = { version = "0.11", default-features = false, features = [
     "builder",
     "smtp-transport",
-    "tokio1-rustls-tls",
+    "tokio1-native-tls",
 ] }
 chrono = "0.4"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tokio-util = { version = "0.7.19", features = ["io"] }
+# Client MQTT (publication des événements de détection, voir src/mqtt.rs).
+# `default-features = false` : la connexion au broker n'utilise pas TLS
+# (voir `[mqtt]` dans config.toml), donc on désactive le backend TLS par
+# défaut de rumqttc ("use-rustls") pour éviter de tirer `rustls`/`ring` en
+# dépendance — `ring` embarque de l'assembleur par architecture qui a déjà
+# fait planter la compilation croisée ARM64 sous QEMU (voir le Dockerfile,
+# lettre/tokio1-native-tls pour le même problème côté e-mail).
+rumqttc = { version = "0.24", default-features = false }
+
+[dev-dependencies]
+# Utilisés uniquement par les tests unitaires/d'intégration (voir tests/ et
+# les modules #[cfg(test)]) : appel du routeur Axum sans ouvrir de socket
+# réseau (tower::ServiceExt::oneshot), lecture des corps de réponse HTTP, et
+# fichiers/dossiers temporaires isolés entre les tests.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3.14"
 
 [profile.release]
 opt-level = 3

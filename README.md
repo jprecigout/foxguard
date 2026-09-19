@@ -1,4 +1,4 @@
-# 🦊 FoxGuard
+# <img src="assets/logo.svg" width="40" height="40" alt="Logo FoxGuard"> FoxGuard
 
 **FoxGuard** est un système de vidéosurveillance intelligent propulsé par l'IA et développé en Rust.
 
@@ -6,22 +6,66 @@
 
 ## 🚀 Fonctionnalités Principales
 
-* **Détection d'objets par IA** : Analyse des flux vidéo en temps réel à l'aide de modèles YOLOv8 via la bibliothèque `tract-onnx`.
-* **Interface Web de Contrôle** : Panneau de contrôle moderne intégré et servi via le framework web Axum (`static/controler.html`).
+* **Détection d'objets par IA** : Analyse des flux vidéo en temps réel à l'aide d'un modèle YOLOv8 (via `tract-onnx`), restreint aux classes personne / chat / chien.
+* **Tracking des personnes** : Suivi de chaque personne détectée d'une frame à l'autre (association par IoU), pour ne relancer la reconnaissance faciale que lorsque c'est nécessaire (nouvelle personne, déplacement significatif, ou périodiquement).
+* **Reconnaissance faciale** : Détection et alignement du visage (YuNet, recadré en 112x112) puis extraction d'une empreinte faciale (ArcFace / MobileFaceNet), comparée par similarité cosinus à une base de visages connus.
+* **Capture de photo de référence depuis l'interface web** : Un bouton « Capturer » enregistre la frame webcam courante comme nouveau gabarit de référence pour un nom donné. Plusieurs captures (angles/poses différents) s'accumulent pour la même personne au lieu de se remplacer, ce qui rend la reconnaissance plus fiable (voir `known_faces/`).
+* **Interface Web de Contrôle** : Panneau de contrôle moderne intégré et servi via le framework web Axum (`static/controller.html`).
 * **Streaming Vidéo en Direct** : Diffusion par WebSockets (`/ws`) avec une optimisation de type *pass-through* (transmission directe du buffer MJPEG sans décodage/ré-encodage CPU superflu lorsque la détection est inactive).
-* **Enregistrement Vidéo** : Sauvegarde des flux en fichiers `.mjpeg` activable dynamiquement depuis l'interface web.
-* **Alertes par E-mail** : Notification automatique d'événements gérée par un module d'e-mail avec gestion de délai (*cooldown*).
+* **Enregistrement Vidéo** : Sauvegarde des flux en fichiers `.mjpeg` (dossier `output_record/`), activable dynamiquement depuis l'interface web, avec liste et relecture des enregistrements directement dans l'UI. Chaque frame est horodatée à l'enregistrement, pour une relecture fidèle au FPS réel de capture (qui peut varier, par exemple en basse luminosité) plutôt qu'à un débit fixe supposé.
+* **Alertes par E-mail** : Notification HTML automatique (avec logo et photo de la détection en pièces jointes inline) en cas de détection, avec gestion de délai (*cooldown*) pour éviter le spam.
+* **Publication MQTT (optionnelle)** : Publie un message JSON sur un broker MQTT à chaque *changement* d'état de reconnaissance d'une personne suivie (nouvelle personne inconnue, ou identification/perte d'identification), avec le nom de la caméra, l'horodatage et, si connue, le nom de la personne. Désactivée par défaut, activable via `[mqtt] enabled = true` (voir Configuration ci-dessous).
 * **Overlay Graphique Natif** : Dessin de boîtes englobantes (*bounding boxes*) et de libellés textuels optimisés grâce à la police bitmap `font8x8`.
 
 ---
 
 ## 📂 Structure du Projet
 
-* **`src/main.rs`** : Point d'entrée de l'application, affichage de la bannière de démarrage et initialisation des services.
-* **`src/camera.rs`** : Gestion de la boucle de capture V4L2, application du saut de frames (*frame skipping*), gestion de l'overlay d'IA et diffusion WebSocket.
-* **`src/api.rs`** : Configuration du routage Axum, service de la page HTML de contrôle et gestion des commandes JSON entrantes.
-* **`src/vision/`** : Module d'IA gérant le chargement du modèle ONNX, le prétraitement et l'inférence des objets.
-* **`static/controler.html`** : Interface utilisateur web avec affichage vidéo et interrupteurs interactifs.
+* **`src/main.rs`** : Point d'entrée de l'application — bannière de démarrage, chargement de `config.toml`, initialisation de l'état partagé, lancement de la boucle caméra (tâche bloquante) et du serveur Axum.
+* **`src/capture/`** : Capture caméra (V4L2) et pipeline de traitement, découpé par responsabilité (chaque étape a son propre fichier ; c'est `mod.rs` qui les enchaîne).
+  * **`mod.rs`** : `start_camera_loop` — ouverture du périphérique V4L2, chargement des modèles et de la base de visages connus, démarrage du worker de reconnaissance, puis boucle de capture.
+  * **`state.rs`** : `SharedState`, état partagé avec le serveur HTTP/WebSocket (surveillance/enregistrement actifs, jeton API, canal de diffusion, capture de référence en attente).
+  * **`models.rs`** : Chargement des modèles IA (YOLO, YuNet, ArcFace) et de la base de visages connus au démarrage (`Models`).
+  * **`tracking.rs`** : Suivi des personnes d'une frame à l'autre par IoU (`PersonTracker`) et reconnaissance faciale parallèle (YuNet + ArcFace, parallélisée avec Rayon). Détecte aussi, sans effet de bord, les *changements* d'état de reconnaissance de chaque personne suivie (inconnue ↔ identifiée), pour piloter la publication MQTT (voir `worker.rs` et `src/mqtt.rs`).
+  * **`known_faces.rs`** : Chargement (parallélisé avec Rayon) et rechargement à chaud du dossier `known_faces/`, et capture de photo de référence depuis l'UI web (rechargement en tâche de fond via `tokio::task::spawn_blocking`).
+  * **`worker.rs`** : Thread d'arrière-plan (`tokio::task::spawn_blocking`) qui exécute le pipeline YOLO → tracking → reconnaissance, et publie sur MQTT (si activé) les changements d'état retournés par `tracking.rs`.
+  * **`overlay.rs`** : Incrustation des bounding-box et de leur légende sur la frame vidéo.
+  * **`codec.rs`** : Décodage YUYV → RGB, parallélisé avec Rayon.
+  * **`recording.rs`** : Écriture des enregistrements `output_record/*.mjpeg`, avec un horodatage réel par frame pour une relecture fidèle à la vitesse de capture (au lieu d'un débit fixe supposé).
+  * **`capture_loop.rs`** : Boucle principale de lecture V4L2 — incrustation des boîtes, alerte e-mail, enregistrement disque et diffusion WebSocket.
+* **`src/api.rs`** : Routage Axum, page de contrôle (`GET /`), upgrade WebSocket authentifié par jeton (`GET /ws?token=...`), commandes JSON entrantes (`set_monitoring`, `set_detection`, `set_recording`, `capture_reference`), liste (`GET /api/recordings`) et téléchargement (`GET /recordings/{filename}`) des enregistrements (le fichier `.mjpeg` est servi tel quel ; la relecture, avec son cadencement réel, se fait côté client).
+* **`src/vision/`** : Pipeline de vision par ordinateur, un fichier par étape.
+  * **`object_detector.rs`** : `ObjectDetector` (YOLOv8), restreint aux classes personne / chat / chien.
+  * **`face_detector.rs`** : `FaceDetectorYuNet`, détection et alignement de visage (recadré en 112x112).
+  * **`face_recognition.rs`** : `FaceEmbedder`, empreinte ArcFace / MobileFaceNet et comparaison des identités par similarité cosinus.
+  * **`model.rs`** : Chargement ONNX mutualisé par les trois modèles ci-dessus.
+  * **`types.rs`** : Types partagés du pipeline (`BoundingBox`, `KnownPerson`).
+  * **`models/`** : Les 3 modèles ONNX embarqués (`yolov8n.onnx`, `face_detection_yunet_2023mar.onnx`, `arcface-mobilefacenet.onnx`).
+* **`src/geometry.rs`** : Calcul d'intersection sur union (IoU), utilitaire partagé entre le tracking (`capture/tracking.rs`) et la détection d'objets/visages (`vision/object_detector.rs`, `vision/face_detector.rs`), pour éviter de dupliquer ce calcul.
+* **`src/config.rs`** : Chargement et structures de `config.toml` (serveur, caméra, détection, e-mail, MQTT).
+* **`src/mail.rs`** : Construction et envoi des alertes e-mail (HTML multipart avec logo et photo de la détection).
+* **`src/mqtt.rs`** : Connexion à un broker MQTT et publication des événements de détection (nom de caméra, horodatage, statut connu/inconnu) à chaque changement d'état ; fonctionnalité optionnelle (voir `[mqtt]` dans `config.toml`).
+* **`src/util.rs`** : Petits utilitaires transverses (verrouillage de mutex tolérant à l'empoisonnement).
+* **`static/controller.html`** : Interface utilisateur web — flux vidéo, interrupteurs, capture de photo de référence, liste et lecture des enregistrements (relecture calée sur l'horodatage réel des frames).
+* **`assets/logo.svg`** : Logo FoxGuard — affiché dans ce README et embarqué dans le binaire (`include_bytes!`) pour les e-mails d'alerte.
+* **`known_faces/`** : Photos de référence pour la reconnaissance faciale, nommées `<nom>_<horodatage>.jpg` (plusieurs fichiers possibles par personne).
+* **`output_record/`** : Enregistrements vidéo `.mjpeg` générés par l'application.
+
+---
+
+## ⚙️ Configuration (`config.toml`)
+
+Partez de `config-sample.toml` pour créer votre propre `config.toml`.
+
+* **`[server]`** : `host`, `port`, `api_token` (jeton exigé en paramètre `?token=` pour se connecter au WebSocket).
+* **`[camera]`** : `device_index` (index du périphérique V4L2, ex. `0` pour `/dev/video0`), `name` (nom de la caméra inclus dans les événements MQTT, optionnel — `"foxguard"` par défaut).
+* **`[detection]`** : `enabled` (surveillance active au démarrage), chemins des 3 modèles ONNX (`model_path`, `model_detect_face_path`, `model_face_path`, tous dans `src/vision/models/`), tailles d'entrée (`input_size` pour YOLO, `input_face_size` pour ArcFace), `confidence_threshold` (seuil de détection YOLO) et `email_cooldown_secs`.
+* **`[email]`** : `enabled`, identifiants SMTP (`smtp_server`, `smtp_user`, `smtp_password`), `from_address`, `to_address`.
+* **`[mqtt]`** *(optionnel, section entière absente = désactivé)* : `enabled`, `broker_host`, `broker_port` (`1883` par défaut), `username`/`password` (authentification optionnelle, pas de TLS), `topic` (`"foxguard/detections"` par défaut). Publie un message JSON à chaque changement d'état de reconnaissance, par exemple :
+  ```json
+  {"camera": "salon", "timestamp": "2026-09-18T15:42:07+02:00", "status": "known", "name": "jerome"}
+  {"camera": "salon", "timestamp": "2026-09-18T15:45:12+02:00", "status": "unknown"}
+  ```
 
 ---
 
@@ -207,11 +251,11 @@ Ouvrez votre navigateur web et rendez-vous sur l'adresse du serveur (par exemple
 
 Le flux vidéo s'établit automatiquement via WebSocket.
 
-Utilisez les interrupteurs interactifs pour :
+Utilisez l'interface pour :
 
-Activer ou désactiver la Détection IA en temps réel.
-
-Démarrer ou arrêter l'Enregistrement Vidéo local.
+* Activer ou désactiver la surveillance (détection IA + enregistrement).
+* Capturer une photo de référence webcam pour la reconnaissance faciale (carte « 📸 Photo de référence »), pour un nom donné ; chaque capture s'ajoute aux précédentes pour ce nom.
+* Consulter, actualiser et relire les enregistrements vidéo sauvegardés.
 
 ---
 
