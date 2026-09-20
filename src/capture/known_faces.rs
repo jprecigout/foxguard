@@ -17,7 +17,7 @@ use super::state::SharedState;
 /// Détecte un visage dans une image potentiellement bien plus grande que
 /// 640x640 (cas des photos de `known_faces/`), sans jamais RÉDUIRE l'image.
 ///
-/// IMPORTANT (diagnostiqué expérimentalement, cf. discussion) :
+/// IMPORTANT  :
 /// la tête de régression bbox de ce modèle YuNet régresse correctement
 /// quand elle reçoit des pixels à résolution NATIVE (même si le visage
 /// occupe une grande partie du canevas 640x640), mais devient très
