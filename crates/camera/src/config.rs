@@ -6,6 +6,11 @@ use serde::Deserialize;
 /// travail. Surchargeable par `[recording] dir` (voir [`RecordingConfig`]).
 pub const DEFAULT_RECORDINGS_DIR: &str = "output_record";
 
+/// Dossier des photos de référence de la reconnaissance faciale par défaut,
+/// relatif au répertoire de travail. Surchargeable par
+/// `[detection] known_faces_dir` (voir [`DetectionConfig`]).
+pub const DEFAULT_KNOWN_FACES_DIR: &str = "known_faces";
+
 /// Racine de la configuration, telle que lue depuis `camera-config.toml`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -68,6 +73,10 @@ impl Default for RecordingConfig {
     }
 }
 
+fn default_known_faces_dir() -> String {
+    DEFAULT_KNOWN_FACES_DIR.to_string()
+}
+
 fn default_retention_days() -> u64 {
     7
 }
@@ -117,6 +126,14 @@ pub struct DetectionConfig {
     pub model_detect_face_path: String,
     // Chemin du modèle ONNX ArcFace / MobileFaceNet (empreinte faciale)
     pub model_face_path: String,
+    // Dossier des photos de référence de la reconnaissance faciale, où sont
+    // aussi écrites les captures déclenchées depuis l'interface web.
+    //
+    // Relatif au répertoire de travail par défaut. Le renseigner en ABSOLU
+    // est recommandé pour un déploiement en conteneur ou en service systemd,
+    // où ce répertoire n'est pas celui du dépôt.
+    #[serde(default = "default_known_faces_dir")]
+    pub known_faces_dir: String,
     // Taille d'entrée (carrée) du modèle YOLO, en pixels
     pub input_size: u32,
     // Taille d'entrée (carrée) du modèle ArcFace, en pixels (112 attendu)
@@ -241,6 +258,35 @@ mod tests {
         file.write_all(content.as_bytes())
             .expect("écriture du TOML temporaire");
         file
+    }
+
+    #[test]
+    fn data_directories_fall_back_to_their_historical_defaults() {
+        // Un `camera-config.toml` antérieur à l'ajout de ces réglages doit
+        // continuer d'écrire exactement où il écrivait avant.
+        let file = write_temp_toml(VALID_TOML);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert_eq!(config.detection.known_faces_dir, "known_faces");
+        assert_eq!(config.recording.dir, "output_record");
+    }
+
+    #[test]
+    fn data_directories_can_be_pointed_elsewhere() {
+        // Cas d'un déploiement où les données vivent hors du dossier du
+        // binaire (conteneur, service systemd).
+        let toml = VALID_TOML.replace(
+            "email_cooldown_secs = 60",
+            "email_cooldown_secs = 60\n        known_faces_dir = \"/var/lib/foxguard/visages\"",
+        ) + "\n[recording]\ndir = \"/var/lib/foxguard/videos\"\n";
+        let file = write_temp_toml(&toml);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert_eq!(
+            config.detection.known_faces_dir,
+            "/var/lib/foxguard/visages"
+        );
+        assert_eq!(config.recording.dir, "/var/lib/foxguard/videos");
     }
 
     #[test]

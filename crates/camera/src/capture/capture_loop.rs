@@ -37,6 +37,7 @@ pub(super) fn run(
     face_detector: Arc<Option<FaceDetectorYuNet>>,
     face_embedder: Arc<Option<FaceEmbedder>>,
     known_people: Arc<Mutex<Vec<KnownPerson>>>,
+    known_faces_dir: String,
 ) -> Result<()> {
     let mut recording: Option<RecordingWriter> = None;
     let mut last_email_time = Instant::now() - Duration::from_secs(email_cooldown_secs);
@@ -63,7 +64,14 @@ pub(super) fn run(
             if let Some(mut img) = decoded_img {
                 // Capture de photo de référence (enrôlement à chaud), voir
                 // `try_capture_reference`.
-                try_capture_reference(&state, &img, &face_detector, &face_embedder, &known_people);
+                try_capture_reference(
+                    &state,
+                    &img,
+                    &face_detector,
+                    &face_embedder,
+                    &known_people,
+                    &known_faces_dir,
+                );
 
                 let _ = detect_tx.try_send(img.clone());
 

@@ -62,7 +62,7 @@ impl Models {
                 Arc::new(Mutex::new(load_known_faces(
                     detector,
                     embedder,
-                    "known_faces",
+                    &config.detection.known_faces_dir,
                 )))
             } else {
                 warn!("⚠️ YuNet ou ArcFace indisponible.");

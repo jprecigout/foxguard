@@ -333,6 +333,7 @@ pub(super) fn try_capture_reference(
     face_detector: &Arc<Option<FaceDetectorYuNet>>,
     face_embedder: &Arc<Option<FaceEmbedder>>,
     known_people: &Arc<Mutex<Vec<KnownPerson>>>,
+    known_faces_dir: &str,
 ) {
     let Some(name) = state.pending_enrollment.lock_or_recover().take() else {
         return;
@@ -352,7 +353,7 @@ pub(super) fn try_capture_reference(
         return;
     }
 
-    let _ = std::fs::create_dir_all("known_faces");
+    let _ = std::fs::create_dir_all(known_faces_dir);
 
     // Suffixe temporel : chaque capture s'ajoute comme un nouveau
     // "gabarit" pour cette personne au lieu d'écraser les
@@ -361,7 +362,7 @@ pub(super) fn try_capture_reference(
     // qu'une seule photo (voir load_known_faces, qui regroupe
     // tous les fichiers "<nom>_<horodatage>.jpg" sous <nom>).
     let timestamp = Local::now().format("%Y%m%d%H%M%S%3f");
-    let path = format!("known_faces/{}_{}.jpg", safe_name, timestamp);
+    let path = Path::new(known_faces_dir).join(format!("{}_{}.jpg", safe_name, timestamp));
 
     let mut encoded = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut encoded);
@@ -370,7 +371,8 @@ pub(super) fn try_capture_reference(
     {
         info!(
             "📸 Photo de référence capturée depuis la webcam pour '{}' → {}",
-            safe_name, path
+            safe_name,
+            path.display()
         );
 
         // Rechargement en arrière-plan pour ne pas bloquer le flux caméra
@@ -380,12 +382,13 @@ pub(super) fn try_capture_reference(
         // brut) confie ce travail bloquant/CPU-bound au pool de threads
         // dédié de Tokio, cohérent avec le reste du pipeline (voir
         // `super::worker::spawn_recognition_worker`).
+        let dir_reload = known_faces_dir.to_string();
         let detector_reload = Arc::clone(face_detector);
         let embedder_reload = Arc::clone(face_embedder);
         let known_people_reload = Arc::clone(known_people);
         tokio::task::spawn_blocking(move || {
             if let (Some(det), Some(emb)) = (&*detector_reload, &*embedder_reload) {
-                let fresh = load_known_faces(det, emb, "known_faces");
+                let fresh = load_known_faces(det, emb, &dir_reload);
                 let distinct = fresh
                     .iter()
                     .map(|p| p.name.as_str())

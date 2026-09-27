@@ -96,5 +96,6 @@ pub fn start_camera_loop(config: Config, state: Arc<SharedState>) -> Result<()> 
         models.face_detector,
         models.face_embedder,
         models.known_people,
+        config.detection.known_faces_dir.clone(),
     )
 }

@@ -19,6 +19,11 @@ input_size = 320
 input_face_size = 112
 confidence_threshold = 0.5
 email_cooldown_secs = 60
+# Dossier des photos de référence de la reconnaissance faciale, où sont aussi
+# écrites les captures déclenchées depuis l'interface web. Relatif au
+# répertoire de travail par défaut ; à renseigner en ABSOLU pour un
+# déploiement en conteneur ou en service systemd.
+known_faces_dir = "known_faces"
 
 [email]
 enabled = true
