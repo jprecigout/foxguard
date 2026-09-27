@@ -2,6 +2,8 @@
 /output_record
 .vscode
 camera-config.toml
+# Archives d'images Docker (foxguard_rpi4.tar, foxguard_manager.tar, ...).
+# Note : .gitignore n'accepte PAS de commentaire en fin de ligne de motif.
 *.tar
 # Photos de référence de la reconnaissance faciale : données personnelles
 # (visages de personnes identifiables), à ne pas versionner.

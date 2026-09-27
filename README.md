@@ -209,6 +209,73 @@ Le journal doit afficher `✅ Connecté au broker MQTT.` puis :
 curl http://localhost:8090/api/events
 ```
 
+### Déployer sur un serveur distant (archive `.tar`)
+
+Quand le serveur n'a ni le dépôt ni de chaîne de compilation, on lui livre une
+image déjà construite — même principe que pour le Raspberry Pi.
+
+**1. Vérifier l'architecture du serveur**, c'est elle qui décide de la
+commande de construction :
+
+```bash
+ssh mon-serveur uname -m
+```
+
+**2. Construire l'image.** Si le serveur a la même architecture que votre
+poste (`x86_64` des deux côtés) :
+
+```bash
+docker build -f deploy/server/Dockerfile -t foxguard-manager:latest .
+```
+
+Si le serveur est en ARM64 (un autre Raspberry Pi, un NAS ARM) :
+
+```bash
+docker buildx build --platform linux/arm64 \
+  -f deploy/server/Dockerfile \
+  -t foxguard-manager:latest \
+  --load .
+```
+
+**3. Produire l'archive.** Seul le manager est construit par vous ; PostgreSQL
+et Mosquitto seront téléchargés par le serveur. S'il n'a pas Internet,
+ajoutez-les à l'archive :
+
+```bash
+docker save -o foxguard_manager.tar foxguard-manager:latest
+```
+
+```bash
+docker save -o foxguard_serveur.tar foxguard-manager:latest postgres:16-alpine eclipse-mosquitto:2
+```
+
+**4. Copier sur le serveur** l'archive et les quatre fichiers de déploiement :
+
+```bash
+scp foxguard_manager.tar deploy/server/compose.deploy.yml deploy/server/mosquitto.conf deploy/server/.env manager-config.toml mon-serveur:~/foxguard/
+```
+
+**5. Sur le serveur**, charger l'image et démarrer :
+
+```bash
+docker load -i foxguard_manager.tar
+```
+
+```bash
+docker compose -f compose.deploy.yml up -d
+```
+
+Ajoutez `--profile broker` si le serveur n'a pas déjà un broker MQTT.
+
+`compose.deploy.yml` se distingue de `compose.yml` sur deux points : il ne
+contient **aucune section `build:`** (le serveur n'a pas les sources) et
+n'utilise que des chemins relatifs à lui-même, la configuration étant copiée à
+côté de lui plutôt qu'à la racine d'un dépôt.
+
+> ⚠️ `manager-config.toml` doit pointer vers le bon broker : `mosquitto` si
+> vous utilisez `--profile broker`, sinon l'adresse du broker existant (voir
+> le tableau plus haut).
+
 ### Brancher les caméras dessus
 
 Rien n'arrive tant que les caméras ne publient pas : dans le `camera-config.toml` de

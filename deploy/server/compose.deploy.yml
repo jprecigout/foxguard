@@ -1,0 +1,68 @@
+# Pile du serveur, à partir d'IMAGES DÉJÀ CONSTRUITES.
+#
+# Contrairement à `compose.yml`, ce fichier ne contient aucune section
+# `build:` et n'utilise que des chemins relatifs à LUI-MÊME : il fonctionne
+# sur un serveur où le dépôt n'est pas cloné.
+#
+# Les quatre fichiers à copier sur le serveur, dans un même dossier :
+#
+#   compose.deploy.yml      ce fichier
+#   mosquitto.conf          configuration du broker
+#   manager-config.toml     configuration du manager
+#   .env                    POSTGRES_PASSWORD=...
+#
+# Puis, après avoir chargé l'image (voir le README) :
+#
+#   docker compose -f compose.deploy.yml up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: foxguard
+      POSTGRES_DB: foxguard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?mot de passe PostgreSQL requis}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U foxguard -d foxguard"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Broker MQTT, derrière un profil comme dans `compose.yml` : à n'activer que
+  # si le serveur n'en a pas déjà un (`--profile broker`).
+  mosquitto:
+    profiles: ["broker"]
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+
+  manager:
+    # Aucune section `build:` : l'image est chargée depuis une archive
+    # (`docker load`), le serveur n'a donc besoin ni des sources ni d'une
+    # chaîne de compilation Rust ou Node.
+    image: foxguard-manager:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8090:8090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DATABASE_URL: postgres://foxguard:${POSTGRES_PASSWORD:?mot de passe PostgreSQL requis}@postgres:5432/foxguard
+    volumes:
+      # Chemin relatif à CE fichier : la configuration est copiée à côté de
+      # lui sur le serveur, et non à la racine d'un dépôt cloné.
+      - ./manager-config.toml:/app/manager-config.toml:ro
+
+volumes:
+  mosquitto_data:
+  postgres_data:
