@@ -17,6 +17,7 @@ use tokio::sync::broadcast;
 use foxguard::api;
 use foxguard::capture::{self, SharedState};
 use foxguard::config::Config;
+use foxguard::retention;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -49,6 +50,12 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("❌ Erreur critique dans la caméra : {}", e);
         }
     });
+
+    // Nettoyage automatique des enregistrements trop anciens (voir
+    // `[recording]` dans config.toml). Démarré avant le serveur pour qu'un
+    // premier passage ait lieu dès le lancement : après un arrêt prolongé,
+    // les fichiers périmés sont purgés sans attendre le premier intervalle.
+    retention::spawn_cleanup_task(config.recording.clone());
 
     // Configuration et lancement du serveur HTTP / WebSocket (Axum)
     let app = api::create_router(Arc::clone(&state));

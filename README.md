@@ -12,6 +12,7 @@
 * **Capture de photo de référence depuis l'interface web** : Un bouton « Capturer » enregistre la frame webcam courante comme nouveau gabarit de référence pour un nom donné. Plusieurs captures (angles/poses différents) s'accumulent pour la même personne au lieu de se remplacer, ce qui rend la reconnaissance plus fiable (voir `known_faces/`).
 * **Interface Web de Contrôle** : Panneau de contrôle moderne intégré et servi via le framework web Axum (`static/controller.html`).
 * **Streaming Vidéo en Direct** : Diffusion par WebSockets (`/ws`) avec une optimisation de type *pass-through* (transmission directe du buffer MJPEG sans décodage/ré-encodage CPU superflu lorsque la détection est inactive).
+* **Gestion des enregistrements** : Suppression manuelle depuis l'interface web (bouton par enregistrement, avec confirmation), et purge automatique des enregistrements dépassant la durée de conservation configurée (voir `[recording]`).
 * **Enregistrement Vidéo** : Sauvegarde des flux en fichiers `.mjpeg` (dossier `output_record/`), activable dynamiquement depuis l'interface web, avec liste et relecture des enregistrements directement dans l'UI. Chaque frame est horodatée à l'enregistrement, pour une relecture fidèle au FPS réel de capture (qui peut varier, par exemple en basse luminosité) plutôt qu'à un débit fixe supposé.
 * **Alertes par E-mail** : Notification HTML automatique (avec logo et photo de la détection en pièces jointes inline) en cas de détection, avec gestion de délai (*cooldown*) pour éviter le spam.
 * **Publication MQTT (optionnelle)** : Publie un message JSON sur un broker MQTT à chaque *changement* d'état de reconnaissance d'une personne suivie (nouvelle personne inconnue, ou identification/perte d'identification), avec le nom de la caméra, l'horodatage et, si connue, le nom de la personne. Désactivée par défaut, activable via `[mqtt] enabled = true` (voir Configuration ci-dessous).
@@ -33,7 +34,7 @@
   * **`codec.rs`** : Décodage YUYV → RGB, parallélisé avec Rayon.
   * **`recording.rs`** : Écriture des enregistrements `output_record/*.mjpeg`, avec un horodatage réel par frame pour une relecture fidèle à la vitesse de capture (au lieu d'un débit fixe supposé).
   * **`capture_loop.rs`** : Boucle principale de lecture V4L2 — incrustation des boîtes, alerte e-mail, enregistrement disque et diffusion WebSocket.
-* **`src/api.rs`** : Routage Axum, page de contrôle (`GET /`), upgrade WebSocket authentifié par jeton (`GET /ws?token=...`), commandes JSON entrantes (`set_monitoring`, `set_detection`, `set_recording`, `capture_reference`), liste (`GET /api/recordings`) et téléchargement (`GET /recordings/{filename}`) des enregistrements (le fichier `.mjpeg` est servi tel quel ; la relecture, avec son cadencement réel, se fait côté client).
+* **`src/api.rs`** : Routage Axum, page de contrôle (`GET /`), upgrade WebSocket authentifié par jeton (`GET /ws?token=...`), commandes JSON entrantes (`set_monitoring`, `set_detection`, `set_recording`, `capture_reference`), liste (`GET /api/recordings`), téléchargement (`GET /recordings/{filename}`) et suppression (`DELETE /api/recordings/{filename}?token=...`, seule route destructive, authentifiée par le même jeton que le WebSocket) des enregistrements (le fichier `.mjpeg` est servi tel quel ; la relecture, avec son cadencement réel, se fait côté client).
 * **`src/vision/`** : Pipeline de vision par ordinateur, un fichier par étape.
   * **`object_detector.rs`** : `ObjectDetector` (YOLOv8), restreint aux classes personne / chat / chien.
   * **`face_detector.rs`** : `FaceDetectorYuNet`, détection et alignement de visage (recadré en 112x112).
@@ -44,6 +45,7 @@
 * **`src/geometry.rs`** : Calcul d'intersection sur union (IoU), utilitaire partagé entre le tracking (`capture/tracking.rs`) et la détection d'objets/visages (`vision/object_detector.rs`, `vision/face_detector.rs`), pour éviter de dupliquer ce calcul.
 * **`src/config.rs`** : Chargement et structures de `config.toml` (serveur, caméra, détection, e-mail, MQTT).
 * **`src/mail.rs`** : Construction et envoi des alertes e-mail (HTML multipart avec logo et photo de la détection).
+* **`src/retention.rs`** : Tâche de fond qui supprime les enregistrements dépassant la durée de conservation configurée (`[recording] retention_days`), et prédicat partagé `is_recording_file` qui définit ce qui est un enregistrement pour la liste, le téléchargement, la suppression et la purge.
 * **`src/mqtt.rs`** : Connexion à un broker MQTT et publication des événements de détection (nom de caméra, horodatage, statut connu/inconnu) à chaque changement d'état ; fonctionnalité optionnelle (voir `[mqtt]` dans `config.toml`).
 * **`src/util.rs`** : Petits utilitaires transverses (verrouillage de mutex tolérant à l'empoisonnement).
 * **`static/controller.html`** : Interface utilisateur web — flux vidéo, interrupteurs, capture de photo de référence, liste et lecture des enregistrements (relecture calée sur l'horodatage réel des frames).
@@ -61,6 +63,7 @@ Partez de `config-sample.toml` pour créer votre propre `config.toml`.
 * **`[camera]`** : `device_index` (index du périphérique V4L2, ex. `0` pour `/dev/video0`), `name` (nom de la caméra inclus dans les événements MQTT, optionnel — `"foxguard"` par défaut).
 * **`[detection]`** : `enabled` (surveillance active au démarrage), chemins des 3 modèles ONNX (`model_path`, `model_detect_face_path`, `model_face_path`, tous dans `src/vision/models/`), tailles d'entrée (`input_size` pour YOLO, `input_face_size` pour ArcFace), `confidence_threshold` (seuil de détection YOLO) et `email_cooldown_secs`.
 * **`[email]`** : `enabled`, identifiants SMTP (`smtp_server`, `smtp_user`, `smtp_password`), `from_address`, `to_address`.
+* **`[recording]`** *(optionnel, section entière absente = 7 jours)* : `retention_days` (durée de conservation des enregistrements, en jours — **`0` désactive entièrement la suppression automatique**) et `cleanup_interval_secs` (intervalle entre deux passages, `3600` par défaut). Un passage a aussi lieu au démarrage, pour purger ce qui a expiré pendant un arrêt prolongé. L'âge est déterminé par la date de dernière modification du fichier, jamais par son nom : un enregistrement en cours d'écriture ne peut donc pas être supprimé sous la caméra.
 * **`[mqtt]`** *(optionnel, section entière absente = désactivé)* : `enabled`, `broker_host`, `broker_port` (`1883` par défaut), `username`/`password` (authentification optionnelle, pas de TLS), `topic` (`"foxguard/detections"` par défaut). Publie un message JSON à chaque changement d'état de reconnaissance, par exemple :
   ```json
   {"camera": "salon", "timestamp": "2026-09-18T15:42:07+02:00", "status": "known", "name": "jerome"}
@@ -236,7 +239,7 @@ Une fois l'image disponible sur le Raspberry Pi (via docker build local, docker 
 ```bash
 docker run -d \
   --name foxguard \
-  --restart unless-stopped \
+  --restart=always \
   --privileged \
   -v /dev:/dev \
   -p 8080:8080 \
@@ -255,7 +258,7 @@ Utilisez l'interface pour :
 
 * Activer ou désactiver la surveillance (détection IA + enregistrement).
 * Capturer une photo de référence webcam pour la reconnaissance faciale (carte « 📸 Photo de référence »), pour un nom donné ; chaque capture s'ajoute aux précédentes pour ce nom.
-* Consulter, actualiser et relire les enregistrements vidéo sauvegardés.
+* Consulter, actualiser, relire et supprimer les enregistrements vidéo sauvegardés.
 
 ---
 

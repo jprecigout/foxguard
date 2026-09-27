@@ -2,6 +2,12 @@
 
 use serde::Deserialize;
 
+/// Dossier des enregistrements vidéo, partagé par le serveur HTTP
+/// (`crate::api`), l'écriture des enregistrements
+/// (`crate::capture::recording`) et le nettoyage automatique
+/// (`crate::retention`).
+pub const RECORDINGS_DIR: &str = "output_record";
+
 /// Racine de la configuration, telle que lue depuis `config.toml`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -13,6 +19,52 @@ pub struct Config {
     // continue de charger tel quel, avec la publication MQTT désactivée.
     #[serde(default)]
     pub mqtt: MqttConfig,
+    // Section entière optionnelle : rétention des enregistrements.
+    #[serde(default)]
+    pub recording: RecordingConfig,
+}
+
+/// Paramètres des enregistrements vidéo : durée de conservation et fréquence
+/// du nettoyage automatique (voir [`crate::retention`]). Section entièrement
+/// optionnelle, pour qu'un `config.toml` existant reste valide tel quel.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RecordingConfig {
+    /// Durée de conservation des enregistrements, en jours. Au-delà, ils sont
+    /// supprimés automatiquement par la tâche de nettoyage.
+    ///
+    /// **`0` désactive entièrement la suppression automatique** : aucun
+    /// fichier n'est alors jamais effacé. C'est la valeur à mettre pour gérer
+    /// la rétention soi-même (script externe, politique de sauvegarde), et
+    /// c'est aussi le garde-fou qui évite qu'une valeur mal saisie soit
+    /// interprétée comme « tout supprimer immédiatement ».
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u64,
+
+    /// Intervalle entre deux passages de nettoyage, en secondes. Un passage a
+    /// aussi lieu au démarrage de l'application, pour que les fichiers
+    /// périmés accumulés pendant un arrêt prolongé soient traités sans
+    /// attendre le premier intervalle.
+    #[serde(default = "default_cleanup_interval_secs")]
+    pub cleanup_interval_secs: u64,
+}
+
+impl Default for RecordingConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: default_retention_days(),
+            cleanup_interval_secs: default_cleanup_interval_secs(),
+        }
+    }
+}
+
+fn default_retention_days() -> u64 {
+    7
+}
+
+fn default_cleanup_interval_secs() -> u64 {
+    // Une heure : la rétention se compte en jours, inutile de balayer le
+    // dossier plus souvent.
+    3600
 }
 
 /// Paramètres du serveur HTTP / WebSocket (Axum).
@@ -178,6 +230,40 @@ mod tests {
         file.write_all(content.as_bytes())
             .expect("écriture du TOML temporaire");
         file
+    }
+
+    #[test]
+    fn recording_section_is_optional_and_defaults_to_seven_days() {
+        // Un `config.toml` antérieur à l'ajout de `[recording]` doit rester
+        // valide et bénéficier de la rétention par défaut.
+        let file = write_temp_toml(VALID_TOML);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert_eq!(config.recording.retention_days, 7);
+        assert_eq!(config.recording.cleanup_interval_secs, 3600);
+    }
+
+    #[test]
+    fn recording_retention_can_be_overridden() {
+        let toml = format!("{VALID_TOML}\n[recording]\nretention_days = 30\n");
+        let file = write_temp_toml(&toml);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert_eq!(config.recording.retention_days, 30);
+        // Le champ non renseigné garde son défaut.
+        assert_eq!(config.recording.cleanup_interval_secs, 3600);
+    }
+
+    #[test]
+    fn a_retention_of_zero_is_accepted_and_means_disabled() {
+        // `0` est une valeur VALIDE et significative : elle désactive la
+        // suppression automatique (voir `crate::retention`). Elle ne doit
+        // donc pas être rejetée ni remplacée par le défaut.
+        let toml = format!("{VALID_TOML}\n[recording]\nretention_days = 0\n");
+        let file = write_temp_toml(&toml);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert_eq!(config.recording.retention_days, 0);
     }
 
     #[test]

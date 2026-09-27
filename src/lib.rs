@@ -13,5 +13,6 @@ pub mod config;
 pub mod geometry;
 pub mod mail;
 pub mod mqtt;
+pub mod retention;
 pub mod util;
 pub mod vision;

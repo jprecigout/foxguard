@@ -241,6 +241,38 @@
             color: var(--text-muted);
         }
 
+        .recording-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .delete-btn {
+            background: transparent;
+            border: 1px solid #444;
+            color: var(--text-muted);
+            width: 28px;
+            height: 28px;
+            border-radius: 6px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+            transition: background 0.2s, color 0.2s, border-color 0.2s;
+        }
+
+        .delete-btn:hover {
+            background: var(--accent-red);
+            border-color: var(--accent-red);
+            color: #fff;
+        }
+
+        .delete-btn:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+
         .player-card {
             display: none;
         }
@@ -300,6 +332,11 @@
             mask-image: url('/static/icons/x.svg');
             -webkit-mask-image: url('/static/icons/x.svg');
             color: var(--accent-blue);
+        }
+
+        .icon-x {
+            mask-image: url('/static/icons/x.svg');
+            -webkit-mask-image: url('/static/icons/x.svg');
         }
 
         /* Adaptations Responsive Mobile */
@@ -468,8 +505,14 @@
     </div>
 
     <script>
+        const API_TOKEN = "secret123";
+
         let ws;
         let isSystemActive = false;
+
+        // Nom de l'enregistrement en cours de lecture, pour fermer le
+        // lecteur si c'est justement celui qu'on supprime.
+        let currentlyPlaying = null;
 
         const streamImg = document.getElementById('videoStream');
         const placeholder = document.getElementById('placeholder');
@@ -478,7 +521,6 @@
 
         function connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const API_TOKEN = "secret123";
             const wsUrl = `${protocol}//${window.location.host}/ws?token=${API_TOKEN}`;
 
             ws = new WebSocket(wsUrl);
@@ -600,12 +642,68 @@
                             <span class="icon icon-clapperboard"></span> 
                             ${f.name}
                         </span>
-                        <span class="recording-size">${f.size_mb} MB</span>
+                        <span class="recording-actions">
+                            <span class="recording-size">${f.size_mb} MB</span>
+                            <button class="delete-btn"
+                                    title="Supprimer cet enregistrement"
+                                    aria-label="Supprimer ${f.name}"
+                                    onclick="deleteRecording(event, '${f.name}')">
+                                <span class="icon icon-x"></span>
+                            </button>
+                        </span>
                     </li>
                 `).join('');
             } catch (err) {
                 console.error("Erreur de chargement des enregistrements:", err);
                 listEl.innerHTML = '<li style="color: var(--accent-red); text-align: center; padding: 10px;">Impossible de charger la liste.</li>';
+            }
+        }
+
+        // Supprime définitivement un enregistrement du serveur.
+        //
+        // `stopPropagation` est indispensable : le bouton vit à l'intérieur
+        // d'un <li> dont le clic lance la lecture. Sans ça, supprimer une
+        // vidéo déclencherait aussi son téléchargement.
+        async function deleteRecording(event, filename) {
+            event.stopPropagation();
+
+            if (!confirm(`Supprimer définitivement l'enregistrement "${filename}" ?\n\nCette action est irréversible.`)) {
+                return;
+            }
+
+            const button = event.currentTarget;
+            button.disabled = true;
+
+            try {
+                const res = await fetch(
+                    `/api/recordings/${encodeURIComponent(filename)}?token=${encodeURIComponent(API_TOKEN)}`,
+                    { method: 'DELETE' }
+                );
+
+                if (res.status === 401) {
+                    alert("Suppression refusée : jeton d'API invalide.");
+                    button.disabled = false;
+                    return;
+                }
+
+                // 404 : le fichier n'existe plus (déjà supprimé, ou purgé
+                // entre-temps par la rétention automatique). L'objectif de
+                // l'utilisateur est atteint, on rafraîchit simplement.
+                if (!res.ok && res.status !== 404) {
+                    throw new Error('Erreur HTTP ' + res.status);
+                }
+
+                // Le lecteur affiche justement cette vidéo : le fermer, sinon
+                // il continuerait de jouer un fichier qui n'existe plus.
+                if (currentlyPlaying === filename) {
+                    closePlayer();
+                }
+
+                loadRecordings();
+            } catch (err) {
+                console.error("Erreur de suppression:", err);
+                alert(`Impossible de supprimer "${filename}".`);
+                button.disabled = false;
             }
         }
 
@@ -643,6 +741,7 @@
 
         function closePlayer() {
             stopPlayback();
+            currentlyPlaying = null;
             document.getElementById('playerCard').style.display = 'none';
         }
 
@@ -709,6 +808,7 @@
             }
             playerCard.style.display = 'block';
             playerCard.scrollIntoView({ behavior: 'smooth' });
+            currentlyPlaying = filename;
 
             const abortController = new AbortController();
             playbackAbort = abortController;

@@ -39,6 +39,15 @@ fn get(uri: &str) -> Request<Body> {
         .expect("requête GET valide")
 }
 
+/// Requête DELETE simple, sans corps.
+fn delete(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .body(Body::empty())
+        .expect("requête DELETE valide")
+}
+
 #[tokio::test]
 async fn index_route_serves_the_control_html_page() {
     let app = create_router(test_state("secret"));
@@ -228,4 +237,103 @@ async fn unknown_route_returns_404() {
         .expect("réponse HTTP");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// --- Suppression d'un enregistrement (DELETE /api/recordings/{filename}) ---
+//
+// C'est la seule route DESTRUCTIVE du serveur : ces tests vérifient d'abord
+// qu'elle refuse tout ce qui n'est pas explicitement autorisé, avant de
+// vérifier qu'elle fonctionne.
+
+#[tokio::test]
+async fn recording_delete_is_rejected_without_a_token() {
+    let app = create_router(test_state("secret"));
+
+    let response = app
+        .oneshot(delete("/api/recordings/rec_20260918_120854.mjpeg"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn recording_delete_is_rejected_with_the_wrong_token() {
+    let app = create_router(test_state("secret"));
+
+    let response = app
+        .oneshot(delete(
+            "/api/recordings/rec_20260918_120854.mjpeg?token=mauvais-jeton",
+        ))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn recording_delete_rejects_path_traversal_even_with_a_valid_token() {
+    // Un jeton valide ne doit PAS permettre de sortir du dossier des
+    // enregistrements : la validation du nom est une seconde barrière,
+    // indépendante de l'authentification.
+    let app = create_router(test_state("secret"));
+
+    let response = app
+        .oneshot(delete("/api/recordings/..evil.mjpeg?token=secret"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn recording_delete_rejects_non_recording_extensions() {
+    let app = create_router(test_state("secret"));
+
+    let response = app
+        .oneshot(delete("/api/recordings/config.toml?token=secret"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn recording_delete_returns_404_for_a_legit_but_missing_file() {
+    let app = create_router(test_state("secret"));
+
+    let response = app
+        .oneshot(delete(
+            "/api/recordings/rec_ne_existe_pas.mjpeg?token=secret",
+        ))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn recording_delete_removes_an_existing_file() {
+    // `create_router` crée le dossier `output_record/` s'il n'existe pas, et
+    // les handlers y travaillent en chemin relatif : ce test écrit donc un
+    // vrai fichier, sous un nom qui lui est propre pour ne pas interférer
+    // avec les autres tests exécutés en parallèle.
+    let app = create_router(test_state("secret"));
+
+    let name = "rec_test_suppression_20260101_000000.mjpeg";
+    let path = std::path::Path::new("output_record").join(name);
+    std::fs::create_dir_all("output_record").expect("dossier des enregistrements");
+    std::fs::write(&path, b"contenu de test").expect("écriture du fichier de test");
+    assert!(path.exists());
+
+    let response = app
+        .oneshot(delete(&format!("/api/recordings/{name}?token=secret")))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        !path.exists(),
+        "le fichier doit avoir été supprimé du disque"
+    );
 }

@@ -44,3 +44,16 @@ username = "XXXXXXXXXX"
 password = "XXXXXXXXXX"
 # Topic sur lequel publier chaque événement de détection.
 topic = "foxguard/detections"
+
+# Section entièrement optionnelle : un config.toml sans [recording] du tout
+# continue de fonctionner, avec 7 jours de conservation.
+[recording]
+# Durée de conservation des enregistrements, en jours. Au-delà, les fichiers
+# de output_record/ sont supprimés automatiquement par une tâche de fond.
+#
+# 0 DÉSACTIVE entièrement la suppression automatique : aucun fichier n'est
+# alors jamais effacé. À utiliser pour gérer la rétention soi-même.
+retention_days = 7
+# Intervalle entre deux passages de nettoyage, en secondes. Un passage a aussi
+# lieu au démarrage de l'application.
+cleanup_interval_secs = 3600

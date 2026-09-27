@@ -12,7 +12,7 @@ use axum::{
     },
     http::StatusCode,
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{delete, get},
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,8 @@ use tokio::sync::broadcast::error::RecvError;
 use tower_http::services::ServeDir;
 
 use crate::capture::SharedState;
+use crate::config::RECORDINGS_DIR;
+use crate::retention::is_recording_file;
 
 // Compteur global pour attribuer un ID unique séquentiel à chaque client
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
@@ -64,20 +66,18 @@ pub enum ClientCommand {
 async fn list_recordings_handler() -> Json<Vec<VideoFile>> {
     let mut files = Vec::new();
 
-    if let Ok(entries) = std::fs::read_dir("output_record") {
+    if let Ok(entries) = std::fs::read_dir(RECORDINGS_DIR) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file()
+                && is_recording_file(&path)
                 && let (Some(name), Ok(metadata)) = (path.file_name(), path.metadata())
             {
-                let name_str = name.to_string_lossy().to_string();
-                if name_str.ends_with(".mjpeg") || name_str.ends_with(".mp4") {
-                    let size_mb = (metadata.len() as f64) / (1024.0 * 1024.0);
-                    files.push(VideoFile {
-                        name: name_str,
-                        size_mb: (size_mb * 100.0).round() / 100.0,
-                    });
-                }
+                let size_mb = (metadata.len() as f64) / (1024.0 * 1024.0);
+                files.push(VideoFile {
+                    name: name.to_string_lossy().to_string(),
+                    size_mb: (size_mb * 100.0).round() / 100.0,
+                });
             }
         }
     }
@@ -103,11 +103,11 @@ async fn list_recordings_handler() -> Json<Vec<VideoFile>> {
 /// de frames) sans aucun bénéfice. On sert maintenant le fichier tel quel,
 /// aussi vite que le réseau le permet.
 async fn stream_mjpeg_handler(Path(filename): Path<String>) -> Result<Response, StatusCode> {
-    if filename.contains("..") || !filename.ends_with(".mjpeg") {
+    if !is_safe_recording_name(&filename) {
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let filepath = format!("output_record/{}", filename);
+    let filepath = format!("{}/{}", RECORDINGS_DIR, filename);
     let bytes = tokio::fs::read(&filepath)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
@@ -119,6 +119,66 @@ async fn stream_mjpeg_handler(Path(filename): Path<String>) -> Result<Response, 
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(response)
+}
+
+/// Valide un nom d'enregistrement reçu du client avant tout accès disque.
+///
+/// N'accepte qu'un nom de fichier SIMPLE portant une extension
+/// d'enregistrement : ni chemin, ni remontée de répertoire. Sans cette
+/// vérification, `GET /recordings/..%2F..%2Fetc%2Fpasswd` ou un `DELETE` du
+/// même acabit sortiraient du dossier des enregistrements.
+///
+/// Partagée par le téléchargement et la suppression : une vérification plus
+/// laxiste d'un côté que de l'autre serait une faille, d'autant que le
+/// second est destructif.
+fn is_safe_recording_name(filename: &str) -> bool {
+    !filename.is_empty()
+        && !filename.contains("..")
+        && !filename.contains('/')
+        && !filename.contains('\\')
+        && is_recording_file(std::path::Path::new(filename))
+}
+
+/// Handler de suppression d'un enregistrement, déclenché depuis l'interface
+/// web (`DELETE /api/recordings/{filename}?token=...`).
+///
+/// AUTHENTIFIÉ par le même jeton que le WebSocket : c'est la seule route
+/// destructive du serveur, elle ne peut pas rester ouverte à quiconque
+/// atteint le port. (Les routes de LECTURE, elles, restent non
+/// authentifiées, comme avant — voir la note dans le README.)
+async fn delete_recording_handler(
+    Path(filename): Path<String>,
+    Query(auth): Query<AuthQuery>,
+    State(state): State<Arc<SharedState>>,
+) -> StatusCode {
+    let is_authorized = auth.token.as_deref() == Some(state.api_token.as_str());
+
+    if !is_authorized {
+        println!("⚠️ Tentative de suppression d'enregistrement rejetée (Token invalide).");
+        return StatusCode::UNAUTHORIZED;
+    }
+
+    if !is_safe_recording_name(&filename) {
+        return StatusCode::BAD_REQUEST;
+    }
+
+    let filepath = std::path::Path::new(RECORDINGS_DIR).join(&filename);
+
+    match std::fs::remove_file(&filepath) {
+        Ok(()) => {
+            println!("🗑️ Enregistrement supprimé : {}", filepath.display());
+            StatusCode::NO_CONTENT
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+        Err(e) => {
+            eprintln!(
+                "❌ Suppression impossible pour {} : {}",
+                filepath.display(),
+                e
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
 }
 
 /// Handler pour servir le fichier HTML de contrôle
@@ -257,6 +317,10 @@ pub fn create_router(state: Arc<SharedState>) -> Router {
         .route("/ws", get(ws_handler))
         .route("/api/recordings", get(list_recordings_handler)) // API Liste des vidéos
         .route("/recordings/{filename}", get(stream_mjpeg_handler))
+        .route(
+            "/api/recordings/{filename}",
+            delete(delete_recording_handler),
+        )
         .nest_service("/static", ServeDir::new("static"))
         .with_state(state)
 }

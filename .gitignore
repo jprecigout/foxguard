@@ -3,3 +3,6 @@
 .vscode
 config.toml
 *.tar
+# Photos de référence de la reconnaissance faciale : données personnelles
+# (visages de personnes identifiables), à ne pas versionner.
+/known_faces
