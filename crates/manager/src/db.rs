@@ -9,6 +9,7 @@
 //! étape manuelle à la première installation ni après une mise à jour.
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Local, NaiveDate, TimeZone};
 use foxguard_protocol::{DetectionEvent, PersonStatus};
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
@@ -85,6 +86,34 @@ impl EventRepository {
         rows.iter().map(row_to_event).collect()
     }
 
+    /// Tous les événements d'une JOURNÉE, du plus récent au plus ancien.
+    ///
+    /// Les bornes sont calculées dans le fuseau LOCAL du serveur : « le
+    /// 27 septembre » désigne la journée telle que la vit l'utilisateur, pas
+    /// une fenêtre UTC décalée de deux heures en été.
+    ///
+    /// `limit` plafonne le résultat pour qu'une journée anormalement chargée
+    /// (caméra en boucle sur une détection) ne fasse pas sérialiser des
+    /// centaines de milliers de lignes d'un coup. L'appelant sait que le
+    /// résultat est tronqué s'il atteint exactement cette limite.
+    pub async fn events_for_day(&self, day: NaiveDate, limit: i64) -> Result<Vec<DetectionEvent>> {
+        let (start, end) = local_day_bounds(day)?;
+
+        let rows = sqlx::query(
+            "SELECT camera, occurred_at, status, person_name FROM detection_events \
+             WHERE occurred_at >= $1 AND occurred_at < $2 \
+             ORDER BY occurred_at DESC, id DESC LIMIT $3",
+        )
+        .bind(start)
+        .bind(end)
+        .bind(limit.max(1))
+        .fetch_all(&self.pool)
+        .await
+        .context("lecture des événements du jour impossible")?;
+
+        rows.iter().map(row_to_event).collect()
+    }
+
     /// Nombre total d'événements conservés.
     pub async fn count(&self) -> Result<i64> {
         let row = sqlx::query("SELECT count(*) AS n FROM detection_events")
@@ -131,6 +160,32 @@ impl EventRepository {
     }
 }
 
+/// Premier instant de `day` et premier instant du lendemain, dans le fuseau
+/// LOCAL du serveur.
+///
+/// Extrait pour être testable sans base : c'est le seul calcul non trivial de
+/// la requête par journée, et celui où une erreur de fuseau passerait
+/// inaperçue le reste de l'année.
+fn local_day_bounds(day: NaiveDate) -> Result<(DateTime<Local>, DateTime<Local>)> {
+    let next = day
+        .succ_opt()
+        .context("date hors des bornes représentables")?;
+
+    // `earliest()` tranche le cas d'un passage à l'heure d'été où minuit
+    // local n'existe pas : on prend le premier instant réellement valide.
+    let start = day
+        .and_hms_opt(0, 0, 0)
+        .and_then(|naive| Local.from_local_datetime(&naive).earliest())
+        .context("minuit local introuvable pour cette date")?;
+
+    let end = next
+        .and_hms_opt(0, 0, 0)
+        .and_then(|naive| Local.from_local_datetime(&naive).earliest())
+        .context("minuit local introuvable pour le lendemain")?;
+
+    Ok((start, end))
+}
+
 /// Traduit un statut de reconnaissance vers les colonnes `status` et
 /// `person_name`.
 ///
@@ -171,6 +226,48 @@ fn row_to_event(row: &PgRow) -> Result<DetectionEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- local_day_bounds ---
+
+    #[test]
+    fn a_day_spans_exactly_twenty_four_hours_in_a_normal_week() {
+        let day = NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
+        let (start, end) = local_day_bounds(day).expect("bornes");
+
+        assert_eq!((end - start).num_hours(), 24);
+    }
+
+    #[test]
+    fn the_bounds_start_at_local_midnight() {
+        use chrono::Timelike;
+
+        let day = NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
+        let (start, _) = local_day_bounds(day).expect("bornes");
+
+        assert_eq!((start.hour(), start.minute(), start.second()), (0, 0, 0));
+    }
+
+    #[test]
+    fn the_end_bound_is_the_next_day() {
+        use chrono::Datelike;
+
+        let day = NaiveDate::from_ymd_opt(2026, 9, 30).unwrap();
+        let (_, end) = local_day_bounds(day).expect("bornes");
+
+        // Passage de mois : l'incrément ne doit pas se contenter d'ajouter 1
+        // au numéro du jour.
+        assert_eq!((end.day(), end.month()), (1, 10));
+    }
+
+    #[test]
+    fn a_leap_day_is_handled() {
+        use chrono::Datelike;
+
+        let day = NaiveDate::from_ymd_opt(2028, 2, 29).unwrap();
+        let (_, end) = local_day_bounds(day).expect("bornes");
+
+        assert_eq!((end.day(), end.month()), (1, 3));
+    }
 
     // --- status_to_columns ---
 

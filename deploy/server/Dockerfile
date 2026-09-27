@@ -8,7 +8,24 @@
 # contrainte sur les dépendances contenant de l'assembleur.
 
 # ==========================================
-# 1. STAGE DE COMPILATION (BUILD)
+# 1a. CONSTRUCTION DE L'INTERFACE REACT
+# ==========================================
+# Étape séparée : elle ne dépend que de `ui/`, donc un changement de code Rust
+# ne la réexécute pas, et inversement.
+FROM node:22-alpine AS ui-builder
+
+WORKDIR /ui
+
+# Les dépendances d'abord : cette couche n'est invalidée que par un changement
+# de `package.json` / `package-lock.json`, pas par le code de l'interface.
+COPY ui/package.json ui/package-lock.json* ./
+RUN npm ci --no-audit --no-fund
+
+COPY ui/ ./
+RUN npm run build
+
+# ==========================================
+# 1b. STAGE DE COMPILATION (BUILD) RUST
 # ==========================================
 FROM rust:1-slim AS builder
 
@@ -69,11 +86,10 @@ RUN mkdir -p /app/ui/dist && chown -R foxguard:foxguard /app
 
 COPY --from=builder --chown=foxguard:foxguard /app/target/release/foxguard-manager /app/foxguard-manager
 
-# Le dossier de l'interface est créé VIDE ci-dessus : le manager se contente
-# alors de servir son API, `/` retournant 404. Quand `ui/` existera, c'est une
-# étape de build Node qui produira le bundle et le copiera ici — pas un `COPY`
-# depuis l'hôte, qui dépendrait d'un `npm run build` lancé à la main (et que
-# le `.dockerignore` exclut volontairement du contexte).
+# Bundle de l'interface, produit par l'étape Node ci-dessus. Il vient du
+# BUILD et non de l'hôte : l'image ne dépend donc pas d'un `npm run build`
+# lancé à la main (que le `.dockerignore` exclut d'ailleurs du contexte).
+COPY --from=ui-builder --chown=foxguard:foxguard /ui/dist /app/ui/dist
 
 USER foxguard
 

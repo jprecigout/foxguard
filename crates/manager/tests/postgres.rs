@@ -23,7 +23,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use chrono::{Duration, Local};
+use chrono::{Duration, Local, NaiveDate};
 use foxguard_manager::db::EventRepository;
 use foxguard_protocol::{DetectionEvent, PersonStatus};
 
@@ -193,6 +193,74 @@ async fn cameras_are_listed_once_each_and_sorted() {
     assert_eq!(
         repo.cameras().await.expect("caméras"),
         vec!["entree", "salon"]
+    );
+}
+
+// --- events_for_day ---
+
+#[tokio::test]
+async fn a_day_query_returns_only_that_day() {
+    let repo = repo_or_skip!();
+
+    let today = Local::now().date_naive();
+
+    repo.record(&event("aujourdhui", None, 60)).await.unwrap();
+    // 25 h en arrière : la veille, quelle que soit l'heure d'exécution du
+    // test — un décalage de 24 h exactement serait ambigu à minuit.
+    repo.record(&event("hier", None, 25 * 60)).await.unwrap();
+
+    let events = repo.events_for_day(today, 100).await.expect("journée");
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].camera, "aujourdhui");
+}
+
+#[tokio::test]
+async fn a_day_query_returns_events_most_recent_first() {
+    let repo = repo_or_skip!();
+
+    let today = Local::now().date_naive();
+    repo.record(&event("matin", None, 600)).await.unwrap();
+    repo.record(&event("midi", None, 300)).await.unwrap();
+    repo.record(&event("apres_midi", None, 60)).await.unwrap();
+
+    let events = repo.events_for_day(today, 100).await.expect("journée");
+    let ordre: Vec<&str> = events.iter().map(|e| e.camera.as_str()).collect();
+
+    assert_eq!(ordre, vec!["apres_midi", "midi", "matin"]);
+}
+
+#[tokio::test]
+async fn a_day_without_events_returns_nothing() {
+    let repo = repo_or_skip!();
+
+    repo.record(&event("salon", None, 0)).await.unwrap();
+
+    // Une date arbitrairement lointaine dans le passé.
+    let empty_day = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+
+    assert!(
+        repo.events_for_day(empty_day, 100)
+            .await
+            .expect("journée")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_day_query_is_capped_by_its_limit() {
+    // Le plafond protège du cas dégénéré (caméra bloquée en boucle) : il doit
+    // s'appliquer réellement.
+    let repo = repo_or_skip!();
+
+    let today = Local::now().date_naive();
+    for i in 0..10 {
+        repo.record(&event("salon", None, i)).await.unwrap();
+    }
+
+    assert_eq!(
+        repo.events_for_day(today, 4).await.expect("journée").len(),
+        4
     );
 }
 

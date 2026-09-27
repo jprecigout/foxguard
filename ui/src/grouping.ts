@@ -1,0 +1,56 @@
+// Regroupement des détections par caméra.
+//
+// Volontairement séparé des composants : c'est la seule logique métier de
+// l'interface, et la seule chose qui mérite d'être relue attentivement.
+
+import type { DetectionEvent } from "./api";
+
+export interface CameraDay {
+  camera: string;
+  /** Du plus récent au plus ancien. */
+  events: DetectionEvent[];
+  /** Détections dont le visage n'a PAS été reconnu. */
+  unknownCount: number;
+  /** Personnes distinctes identifiées ce jour-là, triées. */
+  people: string[];
+}
+
+/**
+ * Regroupe les événements d'une journée par caméra.
+ *
+ * `knownCameras` sert à faire apparaître les caméras SANS détection ce
+ * jour-là : « rien à signaler » et « caméra hors service » se ressemblent
+ * beaucoup sur un écran, mais une caméra absente de la liste passerait
+ * totalement inaperçue.
+ *
+ * Les caméras présentes dans les événements mais absentes de `knownCameras`
+ * sont ajoutées malgré tout — une caméra branchée aujourd'hui ne doit pas
+ * être invisible en attendant le rafraîchissement de la liste.
+ */
+export function groupByCamera(events: DetectionEvent[], knownCameras: string[]): CameraDay[] {
+  const byCamera = new Map<string, DetectionEvent[]>();
+
+  for (const camera of knownCameras) {
+    byCamera.set(camera, []);
+  }
+
+  for (const event of events) {
+    const existing = byCamera.get(event.camera);
+    if (existing) {
+      existing.push(event);
+    } else {
+      byCamera.set(event.camera, [event]);
+    }
+  }
+
+  return [...byCamera.entries()]
+    .map(([camera, cameraEvents]) => ({
+      camera,
+      events: cameraEvents,
+      unknownCount: cameraEvents.filter((e) => e.status === "unknown").length,
+      people: [
+        ...new Set(cameraEvents.flatMap((e) => (e.name ? [e.name] : []))),
+      ].sort((a, b) => a.localeCompare(b, "fr")),
+    }))
+    .sort((a, b) => a.camera.localeCompare(b.camera, "fr"));
+}

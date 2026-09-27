@@ -127,9 +127,10 @@ caméras publient et expose leur historique :
 | Route | Contenu |
 | --- | --- |
 | `GET /api/health` | sonde de disponibilité |
-| `GET /api/events` | événements récents lus en base, du plus récent au plus ancien (`?limit=`, 100 par défaut, 1000 max) |
+| `GET /api/events` | événements récents lus en base (`?limit=`, 100 par défaut, 1000 max) |
+| `GET /api/events?date=AAAA-MM-JJ` | **toute** une journée, bornes calculées dans le fuseau du serveur (plafond 5000, signalé par `truncated`) |
 | `GET /api/cameras` | caméras ayant émis au moins un événement encore en mémoire |
-| `GET /` | bundle de l'interface React (`[server] ui_dir`) |
+| `GET /` | interface React (`[server] ui_dir`) |
 
 ### Persistance
 
@@ -232,6 +233,33 @@ Vérification une fois les deux côtés démarrés :
 ```bash
 curl http://<serveur>:8090/api/events
 ```
+
+### L'interface (`ui/`)
+
+React + TypeScript, construite avec Vite. Elle affiche, **pour une journée
+donnée, les détections de chaque caméra connue** — y compris celles sans
+aucune détection ce jour-là, car « rien à signaler » et « caméra en panne » se
+ressemblent trop sur un écran pour qu'une caméra absente de la liste soit
+acceptable.
+
+Le bundle est produit par une étape Node du `Dockerfile` du manager : l'image
+ne dépend d'aucun `npm run build` lancé à la main.
+
+En développement, avec le manager déjà démarré :
+
+```bash
+cd ui && npm install && npm run dev
+```
+
+Vite sert alors l'interface sur son propre port en relayant `/api` vers
+`http://localhost:8090` (réglable par `FOXGUARD_API`), ce qui reproduit
+l'origine unique de la production : le code d'appel est identique dans les
+deux cas, sans CORS ni URL d'API à injecter.
+
+> ⚠️ Les types TypeScript de `ui/src/api.ts` sont écrits À LA MAIN et doivent
+> rester alignés sur `crates/manager/src/api.rs`. C'est la seule frontière du
+> projet où une dérive de contrat n'est pas détectée à la compilation — voir la
+> note sur `ts-rs` dans `ui/README.md`.
 
 ### Tests
 

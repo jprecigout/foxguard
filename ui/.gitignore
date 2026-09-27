@@ -1,0 +1,5 @@
+node_modules/
+dist/
+
+# Cache incrémental de tsc, régénéré à chaque build.
+*.tsbuildinfo
