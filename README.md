@@ -20,13 +20,56 @@
 
 ---
 
-## 📦 Workspace Cargo
+## 🏗️ Architecture du dépôt
 
-Le dépôt est un **workspace Cargo**. La caméra vit dans `crates/camera/` :
+FoxGuard est un **monorepo** regroupant trois composants déployés sur des
+machines différentes.
+
+| Composant | Emplacement | Tourne sur | Rôle |
+| --- | --- | --- | --- |
+| `foxguard-camera` | `crates/camera/` | **Raspberry Pi**, près de la caméra | Capture V4L2, détection YOLO, reconnaissance faciale, alertes, enregistrement |
+| `foxguard-manager` | `crates/manager/` | **Serveur annexe** | Agrège les événements de plusieurs caméras, expose une API HTTP |
+| `foxguard-protocol` | `crates/protocol/` | *(bibliothèque partagée)* | Le format des messages qui transitent sur MQTT |
+| `foxguard-ui` | `ui/` | **Serveur annexe** | Interface React *(à venir, voir `ui/README.md`)* |
+
+```
+caméra (Raspberry Pi) ──MQTT──▶ broker ──▶ manager (serveur) ──HTTP──▶ ui
+   crates/camera                          crates/manager              ui/
+        └──────────── crates/protocol ────────────┘
+```
+
+### Pourquoi un monorepo
+
+`foxguard-protocol` est le **contrat de fil** entre la caméra et le manager.
+Dans des dépôts séparés, le manager redéclarerait les structures à la main :
+le jour où un champ change, ça compilerait des deux côtés et ça casserait
+silencieusement à l'exécution. Ici, rompre le contrat est une erreur de
+**compilation**.
+
+### Compatibilité entre versions déployées
+
+Le crate partagé garantit la cohérence des *sources*, pas celle des *binaires
+déployés* : caméra et manager étant mis à jour indépendamment, une caméra en
+v1.2 parlera tôt ou tard à un manager en v1.4. Toute évolution de
+`DetectionEvent` doit donc rester rétrocompatible — champs nouveaux toujours
+optionnels, aucun champ existant renommé ni supprimé. C'est la discipline déjà
+appliquée au fichier de configuration, transposée au fil MQTT.
+
+### Compilation croisée ARM64
+
+Le `Cargo.lock` est commun, mais **la compilation ne l'est pas** :
+`cargo build -p foxguard-camera` ne construit que le sous-graphe de
+dépendances de la caméra. Les dépendances propres au manager (et leur
+éventuel `ring`, dont l'assembleur par architecture a déjà fait échouer la
+compilation croisée sous QEMU) apparaissent dans le lock sans jamais être
+compilées pour le Raspberry Pi.
+
+### Commandes utiles
 
 ```bash
 cargo test --workspace                  # toute la suite
-cargo run -p foxguard-camera            # depuis la RACINE du dépôt
+cargo run -p foxguard-camera            # caméra (depuis la RACINE du dépôt)
+cargo run -p foxguard-manager           # manager
 cargo clippy --workspace --all-targets  # analyse statique
 ```
 
@@ -69,7 +112,40 @@ de travail.
 * **`crates/camera/assets/logo.svg`** : Logo FoxGuard — affiché dans ce README et embarqué dans le binaire (`include_bytes!`) pour les e-mails d'alerte.
 * **`known_faces/`** : Photos de référence pour la reconnaissance faciale, nommées `<nom>_<horodatage>.jpg` (plusieurs fichiers possibles par personne).
 * **`output_record/`** : Enregistrements vidéo `.mjpeg` générés par l'application.
+* **`crates/manager/`** : Le manager — `config.rs` (sa configuration `manager.toml`), `ingest.rs` (abonnement MQTT et décodage des événements), `store.rs` (historique en mémoire, borné et **volatile**), `api.rs` (API HTTP de consultation et service du bundle de l'interface).
+* **`crates/protocol/`** : `DetectionEvent` et `PersonStatus`, le contrat partagé entre la caméra et le manager.
+* **`ui/`** : Interface React du manager (à venir — voir `ui/README.md`).
 * **`deploy/camera/`** : `Dockerfile` de l'image Raspberry Pi.
+* **`deploy/server/`** : `Dockerfile` du manager, `compose.yml` (manager + broker MQTT) et `mosquitto.conf`.
+
+---
+
+## 🖥️ Le manager (`crates/manager/`)
+
+Déployé sur le serveur annexe, il s'abonne au broker MQTT sur lequel les
+caméras publient et expose leur historique :
+
+| Route | Contenu |
+| --- | --- |
+| `GET /api/health` | sonde de disponibilité |
+| `GET /api/events` | événements récents, du plus récent au plus ancien (`?limit=`, 100 par défaut, 1000 max) |
+| `GET /api/cameras` | caméras ayant émis au moins un événement encore en mémoire |
+| `GET /` | bundle de l'interface React (`[server] ui_dir`) |
+
+Configuration : copier `manager-sample.toml` en `manager.toml`. Seul
+`[mqtt] broker_host` est obligatoire.
+
+```bash
+docker compose -f deploy/server/compose.yml up -d
+```
+
+Le `compose.yml` démarre aussi un broker Mosquitto ; retirez ce service si
+vous en avez déjà un sur le réseau.
+
+> **État actuel** : squelette fonctionnel. La chaîne caméra → MQTT → manager →
+> HTTP marche de bout en bout, mais l'historique est **volatile** (perdu au
+> redémarrage) et l'API se limite à la consultation. La persistance et les
+> notifications restent à construire.
 
 ---
 

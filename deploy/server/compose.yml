@@ -1,0 +1,40 @@
+# Pile du SERVEUR ANNEXE : manager + broker MQTT.
+#
+# La caméra, elle, tourne sur le Raspberry Pi avec sa propre image (voir
+# deploy/camera/Dockerfile et le README) : elle n'apparaît pas ici.
+#
+#   docker compose -f deploy/server/compose.yml up -d
+#
+# Les chemins relatifs sont résolus depuis ce dossier : lancez la commande
+# depuis la racine du dépôt avec `-f`, ou ajustez `context`.
+
+services:
+  # Broker MQTT partagé : les caméras y publient, le manager y lit.
+  #
+  # À retirer si vous disposez déjà d'un broker sur le réseau (dans ce cas,
+  # renseignez simplement son adresse dans `broker_host` de manager.toml).
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+
+  manager:
+    build:
+      context: ../..
+      dockerfile: deploy/server/Dockerfile
+    image: foxguard-manager:latest
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+    ports:
+      - "8090:8090"
+    volumes:
+      # Configuration du manager, montée en lecture seule.
+      - ../../manager.toml:/app/manager.toml:ro
+
+volumes:
+  mosquitto_data:

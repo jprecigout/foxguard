@@ -1,0 +1,30 @@
+# Configuration de foxguard-manager (à copier en `manager.toml`).
+#
+# Le manager tourne sur le serveur annexe : il s'abonne au broker MQTT sur
+# lequel les caméras publient, et expose leur historique par HTTP.
+
+[server]
+host = "0.0.0.0"
+port = 8090
+# Dossier statique servi à la racine : le bundle produit par `ui/`.
+# Tant que l'interface React n'existe pas, ce dossier est absent et seules
+# les routes /api/* répondent.
+ui_dir = "ui/dist"
+
+# SEULE SECTION OBLIGATOIRE : sans broker, le manager n'a rien à agréger.
+[mqtt]
+broker_host = "mosquitto"
+broker_port = 1883
+# Identifiants optionnels : laisser vide si le broker n'exige pas
+# d'authentification.
+username = ""
+password = ""
+# Doit correspondre au `topic` configuré sur les caméras. Un motif comme
+# "foxguard/+/detections" permet d'écouter plusieurs topics à la fois.
+topic = "foxguard/detections"
+
+[store]
+# Nombre maximal d'événements conservés EN MÉMOIRE. Au-delà, les plus anciens
+# sont oubliés. Attention : l'historique est volatile, tout est perdu au
+# redémarrage du manager (voir crates/manager/src/store.rs).
+capacity = 1000

@@ -1,0 +1,19 @@
+[package]
+name = "foxguard-protocol"
+version = "0.1.0"
+edition = "2024"
+description = "Contrat de messages entre foxguard-camera et foxguard-manager"
+
+# VOLONTAIREMENT MINIMAL.
+#
+# Ce crate est compilé À LA FOIS sur le Raspberry Pi (dans foxguard-camera) et
+# sur le serveur (dans foxguard-manager). Toute dépendance ajoutée ici est
+# payée par les deux, et doit compiler en croisé pour ARM64 sous QEMU. On s'en
+# tient donc à la sérialisation et aux dates : rien qui touche au réseau, au
+# TLS, à l'image ou à l'inférence.
+[dependencies]
+serde = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

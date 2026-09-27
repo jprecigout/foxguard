@@ -12,52 +12,17 @@
 use std::time::Duration;
 
 use rumqttc::{AsyncClient, MqttOptions, QoS};
-use serde::Serialize;
 
 use crate::config::MqttConfig;
 
-/// Statut de reconnaissance d'une personne suivie, tel que publié sur MQTT.
-/// Calculé et comparé au statut précédent par `crate::capture::tracking`
-/// (voir `PersonTrack::last_reported_status`), pour ne déclencher une
-/// publication qu'aux changements d'état.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PersonStatus {
-    /// Personne détectée (bounding-box YOLO) mais non identifiée par la
-    /// reconnaissance faciale.
-    Unknown,
-    /// Personne identifiée, avec son nom (voir `known_faces/`).
-    Known(String),
-}
-
-/// Message JSON publié sur le topic MQTT configuré à chaque changement
-/// d'état : `{"camera": "...", "timestamp": "...", "status": "unknown"}` ou
-/// `{"camera": "...", "timestamp": "...", "status": "known", "name": "..."}`.
-#[derive(Debug, Serialize)]
-struct DetectionEvent<'a> {
-    camera: &'a str,
-    // Horodatage RFC 3339 (ex : "2026-09-18T15:42:07+02:00"), lisible par
-    // n'importe quel abonné sans configuration de fuseau supplémentaire.
-    timestamp: String,
-    status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-}
-
-impl<'a> DetectionEvent<'a> {
-    fn from_status(camera: &'a str, timestamp: String, status: &'a PersonStatus) -> Self {
-        let (status, name) = match status {
-            PersonStatus::Unknown => ("unknown", None),
-            PersonStatus::Known(name) => ("known", Some(name.as_str())),
-        };
-
-        Self {
-            camera,
-            timestamp,
-            status,
-            name,
-        }
-    }
-}
+// Le format des messages publiés ne vit plus ici : il est défini par le crate
+// `foxguard-protocol`, partagé avec `foxguard-manager` qui les consomme. Une
+// modification du format devient ainsi une erreur de COMPILATION des deux
+// côtés, au lieu d'une panne silencieuse à l'exécution.
+//
+// `PersonStatus` est ré-exporté pour que le reste de la caméra (notamment
+// `crate::capture::tracking`) continue de l'importer depuis ce module.
+pub use foxguard_protocol::{DetectionEvent, PersonStatus};
 
 /// Client MQTT connecté en tâche de fond, utilisé pour publier les
 /// événements de détection. Construit une seule fois au démarrage par
@@ -126,8 +91,7 @@ impl MqttPublisher {
     /// le broker est temporairement injoignable (même principe que
     /// `crate::mail::Mailer::send_alert` pour les e-mails d'alerte).
     pub fn publish_status(&self, camera_name: &str, status: &PersonStatus) {
-        let timestamp = chrono::Local::now().to_rfc3339();
-        let event = DetectionEvent::from_status(camera_name, timestamp, status);
+        let event = DetectionEvent::now(camera_name, status.clone());
 
         let payload = match serde_json::to_vec(&event) {
             Ok(payload) => payload,
@@ -151,52 +115,9 @@ impl MqttPublisher {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unknown_status_serializes_without_a_name_field() {
-        let event = DetectionEvent::from_status(
-            "salon",
-            "2026-09-18T15:42:07+02:00".to_string(),
-            &PersonStatus::Unknown,
-        );
-
-        let json = serde_json::to_string(&event).expect("sérialisation JSON");
-
-        assert!(json.contains("\"camera\":\"salon\""));
-        assert!(json.contains("\"status\":\"unknown\""));
-        assert!(
-            !json.contains("\"name\""),
-            "le champ name ne doit pas apparaître pour une personne inconnue : {json}"
-        );
-    }
-
-    #[test]
-    fn known_status_serializes_with_the_person_name() {
-        let status = PersonStatus::Known("jerome".to_string());
-        let event =
-            DetectionEvent::from_status("salon", "2026-09-18T15:42:07+02:00".to_string(), &status);
-
-        let json = serde_json::to_string(&event).expect("sérialisation JSON");
-
-        assert!(json.contains("\"status\":\"known\""));
-        assert!(json.contains("\"name\":\"jerome\""));
-    }
-
-    #[test]
-    fn event_payload_is_valid_json_with_the_expected_shape() {
-        let status = PersonStatus::Known("alice".to_string());
-        let event =
-            DetectionEvent::from_status("entree", "2026-09-18T15:42:07+02:00".to_string(), &status);
-
-        let value: serde_json::Value =
-            serde_json::from_slice(&serde_json::to_vec(&event).unwrap()).unwrap();
-
-        assert_eq!(value["camera"], "entree");
-        assert_eq!(value["status"], "known");
-        assert_eq!(value["name"], "alice");
-        assert_eq!(value["timestamp"], "2026-09-18T15:42:07+02:00");
-    }
-}
+// Les tests du FORMAT des messages (sérialisation, aller-retour, format de
+// fil) vivent maintenant dans le crate `foxguard-protocol`, avec le type
+// lui-même : les dupliquer ici reviendrait à tester deux fois la même chose,
+// et laisserait les deux copies diverger. Ce module ne conserve que la
+// connexion au broker et la publication, qui demandent un vrai broker pour
+// être testées.

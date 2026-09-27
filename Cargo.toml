@@ -1,25 +1,35 @@
 # Workspace FoxGuard.
 #
-# `foxguard-camera` tourne sur le Raspberry Pi, près de la caméra, avec ses
-# dépendances lourdes (V4L2, ONNX, traitement d'image).
+# Trois composants Rust, déployés sur des machines DIFFÉRENTES :
 #
-# Ce workspace prépare l'arrivée des composants qui tourneront sur un serveur
-# annexe (voir le README) : le découpage isole dès maintenant ce qui est
-# spécifique à la caméra de ce qui sera partagé.
+# - `foxguard-camera`  : tourne sur le Raspberry Pi, près de la caméra.
+#                        Dépendances lourdes (V4L2, ONNX, traitement d'image).
+# - `foxguard-manager` : tourne sur un serveur annexe, agrège les événements
+#                        de plusieurs caméras. Aucune dépendance caméra.
+# - `foxguard-protocol`: le contrat entre les deux — les messages qui
+#                        transitent sur MQTT. Aucune dépendance lourde.
 #
-# Le `Cargo.lock` sera commun à tous les membres, mais la COMPILATION ne l'est
-# pas : `cargo build -p foxguard-camera` ne construit que le sous-graphe de
-# dépendances de la caméra. C'est ce qui permettra d'ajouter des composants
-# aux dépendances incompatibles avec la compilation croisée ARM64 sous QEMU
-# (voir la note sur `ring` dans crates/camera/Cargo.toml) sans jamais les
-# construire pour le Raspberry Pi.
+# Pourquoi un workspace plutôt que trois dépôts : `foxguard-protocol` est le
+# format de fil entre la caméra et le manager. Dans des dépôts séparés, le
+# manager redéclarerait les structures à la main et rien ne détecterait une
+# dérive — ça compilerait des deux côtés et ça casserait silencieusement à
+# l'exécution. Ici, casser le contrat est une erreur de COMPILATION.
+#
+# Le `Cargo.lock` est commun au workspace, mais la COMPILATION ne l'est pas :
+# `cargo build -p foxguard-camera` ne construit que le sous-graphe de
+# dépendances de la caméra. Les dépendances TLS du manager (rustls/ring et
+# leur assembleur par architecture, qui a déjà fait échouer la compilation
+# croisée ARM64 sous QEMU — voir crates/camera/Cargo.toml) apparaissent donc
+# dans le lock sans jamais être compilées pour le Raspberry Pi.
 [workspace]
 resolver = "3"
-members = ["crates/camera"]
+members = ["crates/camera", "crates/manager", "crates/protocol"]
 
 # Versions partagées par plusieurs crates, déclarées une seule fois pour
 # qu'elles ne puissent pas diverger d'un composant à l'autre.
 [workspace.dependencies]
+foxguard-protocol = { path = "crates/protocol" }
+
 anyhow = "1.0"
 axum = "0.8.9"
 tower-http = { version = "0.7.0", features = ["fs"] }

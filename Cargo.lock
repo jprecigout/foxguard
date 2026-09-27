@@ -443,6 +443,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -805,6 +806,7 @@ dependencies = [
  "axum",
  "chrono",
  "font8x8",
+ "foxguard-protocol",
  "futures-util",
  "http-body-util",
  "image",
@@ -825,6 +827,34 @@ dependencies = [
  "tracing-subscriber",
  "tract-onnx",
  "v4l",
+]
+
+[[package]]
+name = "foxguard-manager"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "foxguard-protocol",
+ "rumqttc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "foxguard-protocol"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -50,7 +50,7 @@ struct PersonTrack {
 /// (voir [`PersonTrack::name`]).
 fn status_from_name(name: &Option<String>) -> PersonStatus {
     match name {
-        Some(n) => PersonStatus::Known(n.clone()),
+        Some(n) => PersonStatus::Known { name: n.clone() },
         None => PersonStatus::Unknown,
     }
 }
@@ -686,7 +686,12 @@ mod tests {
             vec![(ids[0], Some(("jerome".to_string(), 0.9)))],
         );
 
-        assert_eq!(changes, vec![PersonStatus::Known("jerome".to_string())]);
+        assert_eq!(
+            changes,
+            vec![PersonStatus::Known {
+                name: "jerome".to_string()
+            }]
+        );
     }
 
     #[test]
@@ -714,7 +719,12 @@ mod tests {
             vec![(ids[0], Some(("jerome".to_string(), 0.9)))],
         );
 
-        assert_eq!(changes, vec![PersonStatus::Known("jerome".to_string())]);
+        assert_eq!(
+            changes,
+            vec![PersonStatus::Known {
+                name: "jerome".to_string()
+            }]
+        );
     }
 
     #[test]
@@ -755,7 +765,9 @@ mod tests {
         let idx = tracker.find_by_id(ids[0]).unwrap();
         assert_eq!(
             tracker.tracks[idx].last_reported_status,
-            Some(PersonStatus::Known("jerome".to_string()))
+            Some(PersonStatus::Known {
+                name: "jerome".to_string()
+            })
         );
     }
 
@@ -780,7 +792,9 @@ mod tests {
         );
 
         assert_eq!(changes.len(), 2);
-        assert!(changes.contains(&PersonStatus::Known("jerome".to_string())));
+        assert!(changes.contains(&PersonStatus::Known {
+            name: "jerome".to_string()
+        }));
         assert!(changes.contains(&PersonStatus::Unknown));
     }
 }

@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 
+# Contrat de messages partagé avec foxguard-manager : c'est ce crate qui
+# garantit que le JSON publié ici est exactement celui que le manager relit.
+foxguard-protocol = { workspace = true }
+
 # Web & Asynchronisme
 tokio = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
