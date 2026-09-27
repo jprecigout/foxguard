@@ -1,30 +1,21 @@
-// Types et appels de l'API du manager.
+// Appels de l'API du manager.
 //
-// ⚠️ Ces types sont écrits À LA MAIN et doivent rester alignés sur
-// `crates/manager/src/api.rs` et `crates/protocol/src/lib.rs`. Rien ne le
-// vérifie aujourd'hui : c'est la frontière Rust ↔ TypeScript, et donc le seul
-// endroit du projet où une dérive de contrat passerait inaperçue jusqu'à
-// l'exécution (voir la note sur `ts-rs` dans le README de ce dossier).
+// Les types de l'API ne sont PAS écrits ici : ils sont générés depuis les
+// types Rust par ts-rs (voir `./generated/`, et les dérives `TS` dans
+// `crates/manager/src/api.rs` et `crates/protocol/src/lib.rs`).
+//
+// Conséquence : renommer ou supprimer un champ côté Rust casse la compilation
+// de cette interface. C'était auparavant la seule frontière du projet où une
+// dérive de contrat n'apparaissait qu'à l'exécution.
+//
+// Les fichiers générés sont COMMITÉS : l'interface se construit sans chaîne
+// Rust. Ils sont régénérés par `cargo test -p foxguard-manager`.
 
-/** Statut de reconnaissance, tel que sérialisé par `foxguard-protocol`. */
-export type DetectionStatus = "known" | "unknown";
+export type { DetectionEvent } from "./generated/DetectionEvent";
+export type { EventsResponse } from "./generated/EventsResponse";
+export type { PersonStatus } from "./generated/PersonStatus";
 
-export interface DetectionEvent {
-  camera: string;
-  /** Horodatage RFC 3339 avec décalage, ex. `2026-09-27T15:41:33+02:00`. */
-  timestamp: string;
-  status: DetectionStatus;
-  /** Présent uniquement quand `status === "known"`. */
-  name?: string;
-}
-
-export interface EventsResponse {
-  count: number;
-  total: number;
-  /** Vrai si la journée comporte plus d'événements que le serveur n'en renvoie. */
-  truncated: boolean;
-  events: DetectionEvent[];
-}
+import type { EventsResponse } from "./generated/EventsResponse";
 
 /** Erreur portant le code HTTP, pour distinguer « serveur injoignable » de « 500 ». */
 export class ApiError extends Error {

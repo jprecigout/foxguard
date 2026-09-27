@@ -8,7 +8,7 @@ description = "Agrège les événements de détection de plusieurs caméras FoxG
 # caméra ici (ni V4L2, ni ONNX, ni traitement d'image). C'est ce qui permet de
 # construire son image sans jamais passer par la compilation croisée ARM64.
 [dependencies]
-foxguard-protocol = { workspace = true }
+foxguard-protocol = { workspace = true, features = ["ts"] }
 
 anyhow = { workspace = true }
 axum = { workspace = true }
@@ -17,6 +17,7 @@ rumqttc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
+ts-rs = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
 tower-http = { workspace = true }

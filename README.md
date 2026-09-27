@@ -256,10 +256,11 @@ Vite sert alors l'interface sur son propre port en relayant `/api` vers
 l'origine unique de la production : le code d'appel est identique dans les
 deux cas, sans CORS ni URL d'API à injecter.
 
-> ⚠️ Les types TypeScript de `ui/src/api.ts` sont écrits À LA MAIN et doivent
-> rester alignés sur `crates/manager/src/api.rs`. C'est la seule frontière du
-> projet où une dérive de contrat n'est pas détectée à la compilation — voir la
-> note sur `ts-rs` dans `ui/README.md`.
+Les types de l'API sont **générés** depuis les types Rust par `ts-rs`
+(`ui/src/generated/`, régénérés par `cargo test -p foxguard-manager` et
+commités). Renommer un champ côté Rust casse donc la compilation de
+l'interface. Voir `ui/README.md` pour le détail et l'étape de CI qui détecte
+un fichier généré obsolète.
 
 ### Tests
 

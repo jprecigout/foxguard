@@ -43,19 +43,45 @@ nginx supplémentaire.
 
 ## Le contrat de types
 
-C'est le point à ne pas rater. Le crate `foxguard-protocol` garantit à la
-compilation que la caméra et le manager parlent le même langage — mais
-TypeScript ne sait rien des types Rust, et cette frontière-là est donc à
-nouveau exposée à la dérive silencieuse.
+Les types de l'API ne sont **pas écrits à la main** : ils sont générés depuis
+les types Rust par [`ts-rs`](https://github.com/Aleph-Alpha/ts-rs) et déposés
+dans `src/generated/`.
 
-La réponse la plus légère est [`ts-rs`](https://github.com/Aleph-Alpha/ts-rs) :
-une macro `derive` sur les types d'API du manager, qui génère les `.d.ts`
-pendant `cargo test`. Les types générés sont commités, et un changement côté
-Rust casse alors la compilation TypeScript.
+```bash
+cargo test -p foxguard-manager        # régénère src/generated/
+```
 
-⚠️ Ne réutilisez pas `DetectionEvent` tel quel comme type d'API : c'est le
-format de FIL MQTT entre caméra et manager. L'interface voudra des vues
-agrégées (dernière détection par caméra, historique paginé, miniatures). Deux
-types distincts, sinon le format de fil se retrouve contraint par les besoins
-d'affichage et ne peut plus évoluer sans casser les Raspberry Pi déjà
-déployés.
+Les fichiers générés sont **commités** : l'interface se construit sans chaîne
+Rust, et une revue voit passer les changements de contrat. Si vous modifiez un
+type d'API côté Rust sans relancer la génération, le fichier commité devient
+obsolète — une étape de CI le détecte :
+
+```bash
+cargo test -p foxguard-manager && git diff --exit-code ui/src/generated/
+```
+
+`ts-rs` est derrière la feature `ts` de `foxguard-protocol`, que seul
+`foxguard-manager` active : la caméra ne l'embarque pas dans sa compilation
+croisée ARM64.
+
+### Ce que ça garantit
+
+Renommer ou supprimer un champ côté Rust **casse la compilation** de
+l'interface, au lieu de produire une valeur `undefined` à l'exécution.
+
+Le gain est aussi qualitatif. `DetectionEvent` est généré en union
+discriminée, fidèle au `#[serde(flatten)]` du Rust :
+
+```ts
+type DetectionEvent = { camera: string; timestamp: string } &
+  ({ status: "unknown" } | { status: "known"; name: string });
+```
+
+TypeScript refuse donc `event.name` sans avoir d'abord vérifié
+`event.status === "known"` — l'état incohérent « inconnu avec un nom » n'est
+pas représentable, ce qu'une définition écrite à la main (`name?: string`)
+autorisait.
+
+⚠️ Ce que ça ne garantit **pas** : la cohérence entre versions DÉPLOYÉES.
+L'interface et le manager étant servis par le même conteneur, ils avancent
+ensemble — mais c'est une propriété du déploiement, pas du typage.

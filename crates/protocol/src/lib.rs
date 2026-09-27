@@ -24,12 +24,27 @@
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
+// Les définitions TypeScript de ces types sont GÉNÉRÉES à partir d'eux (voir
+// `ui/src/generated/`), et non écrites à la main côté interface. Un champ
+// renommé ou supprimé ici casse donc la compilation de l'interface, au lieu
+// de produire une erreur à l'exécution.
+//
+// La génération a lieu pendant `cargo test -p foxguard-manager` : ts-rs
+// installe un test par type dérivant `TS`, qui écrit le fichier.
+#[cfg(feature = "ts")]
+use ts_rs::TS;
+
 /// Statut de reconnaissance d'une personne détectée par une caméra.
 ///
 /// Sérialisé sous la forme `{"status": "unknown"}` ou
 /// `{"status": "known", "name": "jerome"}` : le nom n'apparaît que pour une
 /// personne identifiée.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "ts",
+    derive(TS),
+    ts(export, export_to = "../../../ui/src/generated/")
+)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum PersonStatus {
     /// Personne détectée (bounding-box YOLO) mais non identifiée par la
@@ -64,6 +79,11 @@ impl PersonStatus {
 /// {"camera":"salon","timestamp":"2026-09-18T15:42:07+02:00","status":"known","name":"jerome"}
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "ts",
+    derive(TS),
+    ts(export, export_to = "../../../ui/src/generated/")
+)]
 pub struct DetectionEvent {
     /// Nom de la caméra émettrice (voir `[camera] name` dans sa
     /// configuration), qui distingue plusieurs installations sur un même
@@ -71,6 +91,7 @@ pub struct DetectionEvent {
     pub camera: String,
 
     /// Horodatage de l'événement, au format RFC 3339.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub timestamp: DateTime<Local>,
 
     /// Statut de reconnaissance, aplati dans l'objet JSON (`status` et, le

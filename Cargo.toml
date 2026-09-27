@@ -54,6 +54,13 @@ rumqttc = { version = "0.24", default-features = false }
 # On utilise l'API `query()` et non les macros `query!` : ces dernières
 # exigent une base ACCESSIBLE À LA COMPILATION (ou un cache `.sqlx` à tenir à
 # jour), ce qui compliquerait inutilement le build Docker et la CI.
+# Génération des types TypeScript depuis les types Rust de l'API (voir
+# `ui/src/generated/`). Déclaré ici pour que la version reste unique, mais
+# ACTIVÉ uniquement derrière la feature `ts` de `foxguard-protocol` : la
+# caméra, elle, n'en a pas besoin et ne doit pas payer cette dépendance dans
+# sa compilation croisée ARM64.
+ts-rs = { version = "10", features = ["chrono-impl"] }
+
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "tls-rustls-ring",

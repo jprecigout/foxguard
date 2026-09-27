@@ -48,8 +48,13 @@ export function groupByCamera(events: DetectionEvent[], knownCameras: string[]):
       camera,
       events: cameraEvents,
       unknownCount: cameraEvents.filter((e) => e.status === "unknown").length,
+      // Le test porte sur `status` et non sur la présence de `name` : le type
+      // généré est une union discriminée, `name` n'existe tout simplement pas
+      // sur la branche « inconnu ». TypeScript refuse donc d'y accéder sans
+      // avoir d'abord restreint la branche — ce qu'un `e.name ? …` ne fait
+      // pas.
       people: [
-        ...new Set(cameraEvents.flatMap((e) => (e.name ? [e.name] : []))),
+        ...new Set(cameraEvents.flatMap((e) => (e.status === "known" ? [e.name] : []))),
       ].sort((a, b) => a.localeCompare(b, "fr")),
     }))
     .sort((a, b) => a.camera.localeCompare(b.camera, "fr"));

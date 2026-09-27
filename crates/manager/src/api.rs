@@ -14,6 +14,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tower_http::services::ServeDir;
+use ts_rs::TS;
 
 use chrono::NaiveDate;
 use foxguard_protocol::DetectionEvent;
@@ -64,18 +65,26 @@ pub struct EventsQuery {
 }
 
 /// Réponse de `GET /api/events`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
 pub struct EventsResponse {
     /// Nombre d'événements retournés dans `events`.
-    count: usize,
+    pub count: usize,
     /// Nombre total d'événements conservés en base.
-    total: i64,
+    ///
+    /// `ts(type = "number")` corrige la correspondance par défaut de ts-rs,
+    /// qui traduit `i64` en `bigint` par prudence sur la précision. Or
+    /// `serde_json` sérialise ce champ en nombre JSON ordinaire, et
+    /// `JSON.parse` en produit donc un `number` : annoncer `bigint` côté
+    /// TypeScript décrirait une valeur qui n'arrive jamais.
+    #[ts(type = "number")]
+    pub total: i64,
     /// Du plus récent au plus ancien.
-    events: Vec<DetectionEvent>,
+    pub events: Vec<DetectionEvent>,
     /// Vrai si le plafond a été atteint et que la journée comporte donc
     /// d'autres événements non renvoyés. L'interface peut ainsi le signaler
     /// plutôt que d'afficher une vue tronquée en silence.
-    truncated: bool,
+    pub truncated: bool,
 }
 
 /// Événements les plus récents, tous flux confondus.
