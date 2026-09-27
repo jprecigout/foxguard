@@ -9,6 +9,27 @@
 # depuis la racine du dépôt avec `-f`, ou ajustez `context`.
 
 services:
+  # Base de données des événements de détection. Le manager y applique ses
+  # migrations au démarrage : aucune préparation manuelle n'est nécessaire.
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: foxguard
+      POSTGRES_DB: foxguard
+      # Renseignez ce mot de passe dans un fichier `.env` à côté de ce
+      # compose (POSTGRES_PASSWORD=...), plutôt qu'en clair ici.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?mot de passe PostgreSQL requis}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # Le manager refuse de démarrer sans base : on attend qu'elle réponde
+      # vraiment, et pas seulement que le conteneur soit lancé.
+      test: ["CMD-SHELL", "pg_isready -U foxguard -d foxguard"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   # Broker MQTT partagé : les caméras y publient, le manager y lit.
   #
   # À retirer si vous disposez déjà d'un broker sur le réseau (dans ce cas,
@@ -29,7 +50,14 @@ services:
     image: foxguard-manager:latest
     restart: unless-stopped
     depends_on:
-      - mosquitto
+      mosquitto:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    environment:
+      # Prend le pas sur `[database] url` du fichier : évite d'écrire le mot
+      # de passe dans une configuration montée en lecture seule.
+      DATABASE_URL: postgres://foxguard:${POSTGRES_PASSWORD:?mot de passe PostgreSQL requis}@postgres:5432/foxguard
     ports:
       - "8090:8090"
     volumes:
@@ -38,3 +66,4 @@ services:
 
 volumes:
   mosquitto_data:
+  postgres_data:

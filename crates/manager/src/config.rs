@@ -8,8 +8,41 @@ pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
     pub mqtt: MqttConfig,
+    pub database: DatabaseConfig,
+}
+
+/// Connexion PostgreSQL. Section OBLIGATOIRE : le manager n'a pas de mode
+/// dégradé sans base, il perdrait silencieusement tout ce qu'il reçoit.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DatabaseConfig {
+    /// URL de connexion, ex :
+    /// `postgres://foxguard:motdepasse@postgres:5432/foxguard`.
+    ///
+    /// Peut être laissée vide ici et fournie par la variable d'environnement
+    /// `DATABASE_URL` (voir [`Config::load`]) : c'est la forme habituelle en
+    /// conteneur, et elle évite d'écrire un mot de passe dans un fichier.
     #[serde(default)]
-    pub store: StoreConfig,
+    pub url: String,
+
+    /// Taille maximale du pool de connexions.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+
+    /// Durée de conservation des événements, en jours. Une tâche de fond
+    /// supprime les plus anciens.
+    ///
+    /// **`0` désactive la purge** : aucun événement n'est alors jamais
+    /// effacé (même garde-fou que `[recording] retention_days` côté caméra).
+    #[serde(default = "default_event_retention_days")]
+    pub retention_days: u32,
+}
+
+fn default_max_connections() -> u32 {
+    5
+}
+
+fn default_event_retention_days() -> u32 {
+    90
 }
 
 /// Serveur HTTP : API de consultation et, à terme, service du bundle React
@@ -75,36 +108,40 @@ fn default_mqtt_topic() -> String {
     "foxguard/detections".to_string()
 }
 
-/// Conservation des événements en mémoire.
-#[derive(Debug, Clone, Deserialize)]
-pub struct StoreConfig {
-    /// Nombre maximal d'événements conservés. Au-delà, les plus anciens sont
-    /// oubliés.
-    ///
-    /// Le stockage est VOLATILE : tout est perdu au redémarrage. C'est un
-    /// choix assumé pour cette première version — la persistance (SQLite ou
-    /// autre) viendra quand le besoin sera précisé.
-    #[serde(default = "default_capacity")]
-    pub capacity: usize,
-}
-
-impl Default for StoreConfig {
-    fn default() -> Self {
-        Self {
-            capacity: default_capacity(),
-        }
-    }
-}
-
-fn default_capacity() -> usize {
-    1000
-}
+/// Nom de la variable d'environnement qui, si elle est renseignée, prend le
+/// pas sur `[database] url` du fichier de configuration.
+pub const DATABASE_URL_ENV: &str = "DATABASE_URL";
 
 impl Config {
-    /// Charge et parse `manager-config.toml` (ou un autre chemin TOML).
+    /// Charge et parse `manager-config.toml` (ou un autre chemin TOML), puis
+    /// applique les surcharges par variables d'environnement.
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        Ok(toml::from_str(&content)?)
+        let mut config: Config = toml::from_str(&content)?;
+        config.apply_env_overrides();
+
+        if config.database.url.is_empty() {
+            anyhow::bail!(
+                "URL de base de données absente : renseignez `[database] url` \
+                 ou la variable d'environnement {DATABASE_URL_ENV}"
+            );
+        }
+
+        Ok(config)
+    }
+
+    /// Applique les surcharges par variables d'environnement. Seule l'URL de
+    /// base est concernée : c'est la seule donnée de la configuration qui
+    /// porte un secret (le mot de passe y est inclus), et celle qu'on ne veut
+    /// pas voir traîner en clair dans un fichier. Une variable vide est
+    /// ignorée, pour qu'un environnement où elle est déclarée mais non
+    /// renseignée n'efface pas la valeur du fichier.
+    fn apply_env_overrides(&mut self) {
+        if let Ok(url) = std::env::var(DATABASE_URL_ENV)
+            && !url.is_empty()
+        {
+            self.database.url = url;
+        }
     }
 }
 
@@ -116,6 +153,9 @@ mod tests {
     const MINIMAL_TOML: &str = r#"
         [mqtt]
         broker_host = "192.168.1.50"
+
+        [database]
+        url = "postgres://foxguard:secret@localhost/foxguard"
     "#;
 
     fn write_temp_toml(content: &str) -> tempfile::NamedTempFile {
@@ -125,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_broker_host_is_required() {
+    fn only_the_broker_and_the_database_are_required() {
         let file = write_temp_toml(MINIMAL_TOML);
         let config = Config::load(file.path().to_str().unwrap()).expect("config minimale valide");
 
@@ -133,7 +173,48 @@ mod tests {
         assert_eq!(config.mqtt.broker_port, 1883);
         assert_eq!(config.mqtt.topic, "foxguard/detections");
         assert_eq!(config.server.port, 8090);
-        assert_eq!(config.store.capacity, 1000);
+        assert_eq!(config.database.max_connections, 5);
+        assert_eq!(config.database.retention_days, 90);
+    }
+
+    #[test]
+    fn a_missing_database_url_is_rejected() {
+        // Sans base, le manager perdrait silencieusement tout ce qu'il
+        // reçoit : mieux vaut refuser de démarrer.
+        let file = write_temp_toml("[mqtt]\nbroker_host = \"h\"\n\n[database]\n");
+        let err = Config::load(file.path().to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("base de données"), "{err}");
+    }
+
+    #[test]
+    fn the_database_url_env_var_overrides_the_file_unless_empty() {
+        // Un seul test pour les deux cas : `set_var` agit sur tout le
+        // processus, or les tests tournent en parallèle.
+        let base: Config = toml::from_str(MINIMAL_TOML).expect("TOML valide");
+
+        let mut config = base.clone();
+        unsafe { std::env::set_var(DATABASE_URL_ENV, "postgres://depuis/env") };
+        config.apply_env_overrides();
+        assert_eq!(config.database.url, "postgres://depuis/env");
+
+        let mut config = base.clone();
+        let from_file = config.database.url.clone();
+        unsafe { std::env::set_var(DATABASE_URL_ENV, "") };
+        config.apply_env_overrides();
+        assert_eq!(config.database.url, from_file);
+
+        let mut config = base;
+        unsafe { std::env::remove_var(DATABASE_URL_ENV) };
+        config.apply_env_overrides();
+        assert_eq!(config.database.url, from_file);
+    }
+
+    #[test]
+    fn a_retention_of_zero_is_accepted_and_means_disabled() {
+        let toml = format!("{MINIMAL_TOML}\nretention_days = 0\n");
+        let file = write_temp_toml(&toml);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+        assert_eq!(config.database.retention_days, 0);
     }
 
     #[test]
@@ -156,8 +237,10 @@ mod tests {
             broker_port = 8883
             topic = "maison/+/detections"
 
-            [store]
-            capacity = 50
+            [database]
+            url = "postgres://u:p@db/foxguard"
+            max_connections = 20
+            retention_days = 30
         "#;
         let file = write_temp_toml(toml);
         let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
@@ -166,7 +249,8 @@ mod tests {
         assert_eq!(config.server.ui_dir, "/srv/foxguard-ui");
         assert_eq!(config.mqtt.broker_port, 8883);
         assert_eq!(config.mqtt.topic, "maison/+/detections");
-        assert_eq!(config.store.capacity, 50);
+        assert_eq!(config.database.max_connections, 20);
+        assert_eq!(config.database.retention_days, 30);
     }
 
     #[test]

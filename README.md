@@ -111,7 +111,7 @@ de travail.
 * **`crates/camera/assets/logo.svg`** : Logo FoxGuard — affiché dans ce README et embarqué dans le binaire (`include_bytes!`) pour les e-mails d'alerte.
 * **`known_faces/`** : Photos de référence pour la reconnaissance faciale, nommées `<nom>_<horodatage>.jpg` (plusieurs fichiers possibles par personne).
 * **`output_record/`** : Enregistrements vidéo `.mjpeg` générés par l'application.
-* **`crates/manager/`** : Le manager — `config.rs` (sa configuration `manager-config.toml`), `ingest.rs` (abonnement MQTT et décodage des événements), `store.rs` (historique en mémoire, borné et **volatile**), `api.rs` (API HTTP de consultation et service du bundle de l'interface).
+* **`crates/manager/`** : Le manager — `config.rs` (sa configuration `manager-config.toml`), `ingest.rs` (abonnement MQTT et décodage des événements), `db.rs` (persistance PostgreSQL), `retention.rs` (purge des événements trop anciens), `api.rs` (API HTTP de consultation et service du bundle de l'interface), `migrations/` (schéma, appliqué au démarrage).
 * **`crates/protocol/`** : `DetectionEvent` et `PersonStatus`, le contrat partagé entre la caméra et le manager.
 * **`ui/`** : Interface React du manager (à venir — voir `ui/README.md`).
 * **`deploy/camera/`** : `Dockerfile` de l'image Raspberry Pi.
@@ -127,17 +127,42 @@ caméras publient et expose leur historique :
 | Route | Contenu |
 | --- | --- |
 | `GET /api/health` | sonde de disponibilité |
-| `GET /api/events` | événements récents, du plus récent au plus ancien (`?limit=`, 100 par défaut, 1000 max) |
+| `GET /api/events` | événements récents lus en base, du plus récent au plus ancien (`?limit=`, 100 par défaut, 1000 max) |
 | `GET /api/cameras` | caméras ayant émis au moins un événement encore en mémoire |
 | `GET /` | bundle de l'interface React (`[server] ui_dir`) |
 
+### Persistance
+
+Les événements sont enregistrés dans **PostgreSQL** : l'historique survit au
+redémarrage du manager et n'est plus borné par la mémoire du serveur.
+
+Le schéma vit dans `crates/manager/migrations/` et les migrations sont
+appliquées **automatiquement au démarrage** — rien à préparer à la main, ni à
+la première installation ni après une mise à jour. Une tâche de fond supprime
+les événements dépassant `[database] retention_days` (90 jours par défaut,
+`0` désactive la purge).
+
+Le manager **refuse de démarrer sans base**, contrairement au broker MQTT dont
+l'indisponibilité est tolérée : sans base il perdrait silencieusement tout ce
+qu'il reçoit, ce qui est pire qu'un échec franc.
+
+> ⚠️ Un échec d'écriture en base perd l'événement concerné : `rumqttc` a déjà
+> acquitté le message au broker, qui ne le renverra pas. Ces cas sont
+> journalisés en `ERROR`. Une file de reprise sur disque serait la parade si
+> le besoin se confirme.
+
 ### Déploiement
 
-Copier `manager-config-sample.toml` en `manager-config.toml` (gitignoré, il peut contenir
-les identifiants du broker). Seul `[mqtt] broker_host` est obligatoire. Puis,
-depuis la racine du dépôt :
+Copier `manager-config-sample.toml` en `manager-config.toml` (gitignoré, il
+peut contenir des identifiants). `[mqtt] broker_host` et l'URL de base sont
+obligatoires — cette dernière peut venir de la variable d'environnement
+`DATABASE_URL`, qui prend le pas sur le fichier.
+
+Le `compose.yml` fournit PostgreSQL et Mosquitto. Renseignez le mot de passe
+dans un fichier `.env` à côté du compose :
 
 ```bash
+echo "POSTGRES_PASSWORD=$(openssl rand -base64 24)" > deploy/server/.env
 docker compose -f deploy/server/compose.yml up -d
 ```
 
@@ -166,10 +191,30 @@ Vérification une fois les deux côtés démarrés :
 curl http://<serveur>:8090/api/events
 ```
 
-> **État actuel** : squelette fonctionnel. La chaîne caméra → MQTT → manager →
-> HTTP marche de bout en bout, mais l'historique est **volatile** (perdu au
-> redémarrage) et l'API se limite à la consultation. La persistance et les
-> notifications restent à construire.
+### Tests
+
+Les tests du dépôt PostgreSQL demandent une vraie base : ils vérifient les
+migrations, le SQL et la conversion des horodatages, ce qui n'a aucun sens
+contre une imitation. Ils **s'ignorent d'eux-mêmes** si
+`FOXGUARD_TEST_DATABASE_URL` n'est pas renseignée, pour qu'un `cargo test` sur
+un poste sans PostgreSQL reste vert — pensez donc à la renseigner en CI, sans
+quoi ils ne vérifient rien.
+
+```bash
+docker run -d --rm --name fg-pg -e POSTGRES_PASSWORD=secret \
+    -e POSTGRES_USER=foxguard -e POSTGRES_DB=foxguard \
+    -p 55432:5432 postgres:16-alpine
+
+FOXGUARD_TEST_DATABASE_URL=postgres://foxguard:secret@localhost:55432/foxguard \
+    cargo test -p foxguard-manager --test postgres
+```
+
+Chaque test travaille dans son propre schéma PostgreSQL : ils peuvent tourner
+en parallèle sans se marcher dessus.
+
+> **État actuel** : la chaîne caméra → MQTT → manager → PostgreSQL → HTTP
+> marche de bout en bout et l'historique est persistant. L'API se limite à la
+> consultation ; les notifications et l'interface React restent à construire.
 
 ---
 

@@ -44,6 +44,24 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # on désactive le backend TLS par défaut de rumqttc ("use-rustls") pour éviter
 # de tirer `rustls`/`ring` en dépendance (voir la note ci-dessus).
 rumqttc = { version = "0.24", default-features = false }
+# Accès PostgreSQL du manager (jamais compilé pour le Raspberry Pi, voir la
+# note en tête de fichier).
+#
+# `tls-rustls` plutôt que `tls-native-tls` : l'image du manager est une Debian
+# slim sans OpenSSL, et rustls évite d'y ajouter `libssl3`. Le `ring` qu'il
+# entraîne n'est pas un problème ici, contrairement à la caméra.
+#
+# On utilise l'API `query()` et non les macros `query!` : ces dernières
+# exigent une base ACCESSIBLE À LA COMPILATION (ou un cache `.sqlx` à tenir à
+# jour), ce qui compliquerait inutilement le build Docker et la CI.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "postgres",
+    "chrono",
+    "migrate",
+    "macros",
+] }
 
 [profile.release]
 opt-level = 3

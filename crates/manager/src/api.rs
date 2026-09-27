@@ -8,6 +8,8 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{Query, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
     routing::get,
 };
 use serde::{Deserialize, Serialize};
@@ -15,7 +17,7 @@ use tower_http::services::ServeDir;
 
 use foxguard_protocol::DetectionEvent;
 
-use crate::store::EventStore;
+use crate::db::EventRepository;
 
 /// Nombre d'événements retournés par défaut par `GET /api/events`.
 const DEFAULT_LIMIT: usize = 100;
@@ -26,7 +28,21 @@ const MAX_LIMIT: usize = 1000;
 
 /// État partagé avec les handlers HTTP.
 pub struct AppState {
-    pub store: Arc<EventStore>,
+    pub repository: Arc<EventRepository>,
+}
+
+/// Traduit une erreur de base en réponse HTTP.
+///
+/// Le détail est JOURNALISÉ mais pas renvoyé au client : un message d'erreur
+/// PostgreSQL expose volontiers des noms de table, de colonne, voire des
+/// fragments de requête.
+fn internal_error(context: &str, error: anyhow::Error) -> Response {
+    tracing::error!("❌ {context} : {error:#}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Erreur interne du serveur",
+    )
+        .into_response()
 }
 
 /// Paramètres de `GET /api/events?limit=...`.
@@ -40,8 +56,8 @@ pub struct EventsQuery {
 pub struct EventsResponse {
     /// Nombre d'événements retournés dans `events`.
     count: usize,
-    /// Nombre total d'événements actuellement conservés en mémoire.
-    total: usize,
+    /// Nombre total d'événements conservés en base.
+    total: i64,
     /// Du plus récent au plus ancien.
     events: Vec<DetectionEvent>,
 }
@@ -50,21 +66,34 @@ pub struct EventsResponse {
 async fn events_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<EventsQuery>,
-) -> Json<EventsResponse> {
+) -> Response {
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    let events = state.store.recent(limit);
+
+    let events = match state.repository.recent(limit as i64).await {
+        Ok(events) => events,
+        Err(e) => return internal_error("Lecture des événements", e),
+    };
+
+    let total = match state.repository.count().await {
+        Ok(total) => total,
+        Err(e) => return internal_error("Comptage des événements", e),
+    };
 
     Json(EventsResponse {
         count: events.len(),
-        total: state.store.len(),
+        total,
         events,
     })
+    .into_response()
 }
 
 /// Caméras ayant émis au moins un événement encore présent dans
 /// l'historique.
-async fn cameras_handler(State(state): State<Arc<AppState>>) -> Json<Vec<String>> {
-    Json(state.store.cameras())
+async fn cameras_handler(State(state): State<Arc<AppState>>) -> Response {
+    match state.repository.cameras().await {
+        Ok(cameras) => Json(cameras).into_response(),
+        Err(e) => internal_error("Lecture des caméras", e),
+    }
 }
 
 /// Sonde de disponibilité, pour `docker compose` ou un superviseur.
@@ -87,97 +116,7 @@ pub fn create_router(state: Arc<AppState>, ui_dir: &str) -> Router {
         .fallback_service(ServeDir::new(ui_dir))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use foxguard_protocol::PersonStatus;
-
-    fn state_with(count: usize) -> Arc<AppState> {
-        // Capacité volontairement bien supérieure au nombre d'événements
-        // injectés : ces tests portent sur la PAGINATION de l'API, pas sur
-        // l'éviction de l'historique (couverte dans `store`). Sans cette
-        // marge, `total` serait plafonné par le store et le test ne
-        // vérifierait plus ce qu'il annonce.
-        let store = EventStore::new(10_000);
-
-        for i in 0..count {
-            store.record(DetectionEvent::now(
-                format!("camera-{i}"),
-                PersonStatus::Unknown,
-            ));
-        }
-
-        Arc::new(AppState {
-            store: Arc::new(store),
-        })
-    }
-
-    #[tokio::test]
-    async fn events_returns_an_empty_list_when_nothing_was_received() {
-        let Json(response) =
-            events_handler(State(state_with(0)), Query(EventsQuery { limit: None })).await;
-
-        assert_eq!(response.count, 0);
-        assert_eq!(response.total, 0);
-        assert!(response.events.is_empty());
-    }
-
-    #[tokio::test]
-    async fn events_are_capped_by_the_default_limit() {
-        let Json(response) =
-            events_handler(State(state_with(150)), Query(EventsQuery { limit: None })).await;
-
-        assert_eq!(response.count, DEFAULT_LIMIT);
-        // `total` décrit tout l'historique, pas seulement la page retournée.
-        assert_eq!(response.total, 150);
-    }
-
-    #[tokio::test]
-    async fn an_explicit_limit_is_honoured() {
-        let Json(response) =
-            events_handler(State(state_with(50)), Query(EventsQuery { limit: Some(5) })).await;
-
-        assert_eq!(response.count, 5);
-    }
-
-    #[tokio::test]
-    async fn an_oversized_limit_is_clamped() {
-        // Une requête ne doit pas pouvoir demander la sérialisation de tout
-        // l'historique en une fois.
-        let Json(response) = events_handler(
-            State(state_with(50)),
-            Query(EventsQuery {
-                limit: Some(usize::MAX),
-            }),
-        )
-        .await;
-
-        assert_eq!(response.count, 50);
-    }
-
-    #[tokio::test]
-    async fn a_zero_limit_is_clamped_to_one() {
-        let Json(response) =
-            events_handler(State(state_with(10)), Query(EventsQuery { limit: Some(0) })).await;
-
-        assert_eq!(response.count, 1);
-    }
-
-    #[tokio::test]
-    async fn cameras_lists_each_emitter_once() {
-        let state = state_with(0);
-        state
-            .store
-            .record(DetectionEvent::now("salon", PersonStatus::Unknown));
-        state
-            .store
-            .record(DetectionEvent::now("salon", PersonStatus::Unknown));
-        state
-            .store
-            .record(DetectionEvent::now("entree", PersonStatus::Unknown));
-
-        let Json(cameras) = cameras_handler(State(state)).await;
-
-        assert_eq!(cameras, vec!["entree", "salon"]);
-    }
-}
+// Les tests de ces handlers demandent désormais une vraie base PostgreSQL :
+// ils vivent dans `tests/postgres.rs`, ignorés automatiquement quand aucune
+// base de test n'est configurée. Ce qui reste testable sans base — la
+// correspondance entre statut et colonnes — est couvert dans `db`.

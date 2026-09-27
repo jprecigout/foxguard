@@ -13,7 +13,7 @@ use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use tracing::{debug, error, info, warn};
 
 use crate::config::MqttConfig;
-use crate::store::EventStore;
+use crate::db::EventRepository;
 
 /// Démarre la tâche de fond qui écoute le broker et alimente `store`.
 ///
@@ -21,7 +21,7 @@ use crate::store::EventStore;
 /// reconnecte automatiquement. Un broker momentanément injoignable ne doit
 /// pas empêcher le manager de démarrer — son API HTTP reste utile pour
 /// consulter l'historique déjà reçu.
-pub fn spawn(config: MqttConfig, store: Arc<EventStore>) {
+pub fn spawn(config: MqttConfig, repository: Arc<EventRepository>) {
     let client_id = format!("foxguard-manager-{}", std::process::id());
     let mut options = MqttOptions::new(client_id, config.broker_host.clone(), config.broker_port);
     options.set_keep_alive(Duration::from_secs(30));
@@ -53,7 +53,7 @@ pub fn spawn(config: MqttConfig, store: Arc<EventStore>) {
                 }
 
                 Ok(Event::Incoming(Packet::Publish(publish))) => {
-                    handle_payload(&publish.payload, &store);
+                    handle_payload(&publish.payload, &repository).await;
                 }
 
                 Ok(_) => {}
@@ -78,7 +78,27 @@ pub fn spawn(config: MqttConfig, store: Arc<EventStore>) {
 ///
 /// Extrait de [`spawn`] pour être testable sans broker (voir les tests en fin
 /// de fichier).
-fn handle_payload(payload: &[u8], store: &EventStore) {
+async fn handle_payload(payload: &[u8], repository: &EventRepository) {
+    let Some(event) = parse_event(payload) else {
+        return;
+    };
+
+    // Un échec d'écriture PERD l'événement : `rumqttc` a déjà acquitté le
+    // message au broker, qui ne le renverra pas. On le journalise donc en
+    // `error!` — c'est le seul signal qu'il en reste. Une file de reprise sur
+    // disque serait la parade, si le besoin se confirme.
+    if let Err(e) = repository.record(&event).await {
+        error!("❌ Événement perdu ({}) : {e:#}", event.camera);
+    }
+}
+
+/// Décode une charge utile MQTT, ou `None` si elle n'est pas un événement de
+/// détection reconnaissable.
+///
+/// Extrait de [`handle_payload`] pour être testable sans base de données :
+/// c'est ici que vit la tolérance aux messages inattendus, le reste n'étant
+/// qu'une écriture.
+fn parse_event(payload: &[u8]) -> Option<DetectionEvent> {
     match serde_json::from_slice::<DetectionEvent>(payload) {
         Ok(event) => {
             match event.status.name() {
@@ -86,13 +106,17 @@ fn handle_payload(payload: &[u8], store: &EventStore) {
                 None => debug!("❓ {} : personne inconnue", event.camera),
             }
 
-            store.record(event);
+            Some(event)
         }
         Err(e) => {
+            // Le broker peut porter d'autres producteurs, et une caméra plus
+            // récente peut émettre un format que ce manager ne comprend pas
+            // encore : on signale et on continue.
             warn!(
                 "⚠️ Message MQTT ignoré (format non reconnu) : {e} — {}",
                 String::from_utf8_lossy(payload)
             );
+            None
         }
     }
 }
@@ -102,64 +126,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_valid_payload_is_recorded() {
-        let store = EventStore::new(10);
+    fn a_valid_payload_is_decoded() {
         let raw = br#"{"camera":"salon","timestamp":"2026-09-18T15:42:07+02:00","status":"known","name":"jerome"}"#;
 
-        handle_payload(raw, &store);
+        let event = parse_event(raw).expect("charge utile valide");
 
-        let recent = store.recent(10);
-        assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].camera, "salon");
-        assert_eq!(recent[0].status.name(), Some("jerome"));
+        assert_eq!(event.camera, "salon");
+        assert_eq!(event.status.name(), Some("jerome"));
     }
 
     #[test]
-    fn an_unknown_person_payload_is_recorded() {
-        let store = EventStore::new(10);
+    fn an_unknown_person_payload_is_decoded() {
         let raw =
             br#"{"camera":"entree","timestamp":"2026-09-18T15:42:07+02:00","status":"unknown"}"#;
 
-        handle_payload(raw, &store);
+        let event = parse_event(raw).expect("charge utile valide");
 
-        assert!(store.recent(1)[0].status.is_unknown());
+        assert!(event.status.is_unknown());
     }
 
     #[test]
     fn a_malformed_payload_is_ignored_without_panicking() {
-        let store = EventStore::new(10);
-
-        handle_payload(b"ceci n'est pas du JSON", &store);
-
-        assert!(
-            store.is_empty(),
-            "un message illisible ne doit rien enregistrer"
-        );
+        assert!(parse_event(b"ceci n'est pas du JSON").is_none());
     }
 
     #[test]
     fn a_json_payload_with_the_wrong_shape_is_ignored() {
         // JSON valide, mais qui ne décrit pas un événement de détection : un
         // autre producteur publie peut-être sur le même topic.
-        let store = EventStore::new(10);
-
-        handle_payload(br#"{"temperature": 21.5}"#, &store);
-
-        assert!(store.is_empty());
+        assert!(parse_event(br#"{"temperature": 21.5}"#).is_none());
     }
 
     #[test]
-    fn ingestion_continues_after_a_malformed_message() {
+    fn decoding_is_independent_between_messages() {
         // Le point important : un message corrompu ne doit pas empêcher le
         // suivant d'être traité.
-        let store = EventStore::new(10);
-
-        handle_payload(b"{{{", &store);
-        handle_payload(
-            br#"{"camera":"salon","timestamp":"2026-09-18T15:42:07+02:00","status":"unknown"}"#,
-            &store,
+        assert!(parse_event(b"{{{").is_none());
+        assert!(
+            parse_event(
+                br#"{"camera":"salon","timestamp":"2026-09-18T15:42:07+02:00","status":"unknown"}"#
+            )
+            .is_some()
         );
-
-        assert_eq!(store.len(), 1);
     }
 }

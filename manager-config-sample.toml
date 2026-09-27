@@ -23,8 +23,22 @@ password = ""
 # "foxguard/+/detections" permet d'écouter plusieurs topics à la fois.
 topic = "foxguard/detections"
 
-[store]
-# Nombre maximal d'événements conservés EN MÉMOIRE. Au-delà, les plus anciens
-# sont oubliés. Attention : l'historique est volatile, tout est perdu au
-# redémarrage du manager (voir crates/manager/src/store.rs).
-capacity = 1000
+# SECTION OBLIGATOIRE : sans base, le manager perdrait silencieusement tout ce
+# qu'il reçoit et refuse donc de démarrer.
+#
+# Les migrations du schéma sont appliquées automatiquement au démarrage : il
+# n'y a rien à préparer à la main, ni à la première installation ni après une
+# mise à jour.
+[database]
+# URL de connexion. Peut être laissée VIDE ici et fournie par la variable
+# d'environnement DATABASE_URL, qui prend alors le pas : c'est la forme
+# habituelle en conteneur, et elle évite d'écrire un mot de passe dans un
+# fichier (voir deploy/server/compose.yml).
+url = "postgres://foxguard:motdepasse@postgres:5432/foxguard"
+# Taille maximale du pool de connexions.
+max_connections = 5
+# Durée de conservation des événements, en jours. Une tâche de fond supprime
+# les plus anciens, une fois par jour et au démarrage.
+#
+# 0 DÉSACTIVE la purge : aucun événement n'est alors jamais effacé.
+retention_days = 90

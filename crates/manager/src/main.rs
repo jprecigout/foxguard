@@ -18,8 +18,8 @@ use tracing_subscriber::EnvFilter;
 
 use foxguard_manager::api::{self, AppState};
 use foxguard_manager::config::Config;
-use foxguard_manager::ingest;
-use foxguard_manager::store::EventStore;
+use foxguard_manager::db::EventRepository;
+use foxguard_manager::{ingest, retention};
 
 /// Fichier de configuration du manager, relatif au répertoire de travail
 /// (voir la note équivalente dans `foxguard-camera`).
@@ -36,13 +36,21 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::load(MANAGER_CONFIG_PATH)?;
 
-    let store = Arc::new(EventStore::new(config.store.capacity));
+    // Connexion à PostgreSQL et application des migrations. Volontairement
+    // AVANT tout le reste : sans base, le manager perdrait silencieusement
+    // tout ce qu'il reçoit, mieux vaut échouer au démarrage.
+    let repository = Arc::new(
+        EventRepository::connect(&config.database.url, config.database.max_connections).await?,
+    );
 
     // Réception des événements des caméras, en tâche de fond.
-    ingest::spawn(config.mqtt.clone(), Arc::clone(&store));
+    ingest::spawn(config.mqtt.clone(), Arc::clone(&repository));
+
+    // Purge des événements trop anciens.
+    retention::spawn_cleanup_task(Arc::clone(&repository), config.database.retention_days);
 
     let state = Arc::new(AppState {
-        store: Arc::clone(&store),
+        repository: Arc::clone(&repository),
     });
     let app = api::create_router(state, &config.server.ui_dir);
 
