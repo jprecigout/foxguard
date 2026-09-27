@@ -5,9 +5,13 @@
   --border: #333;
   --text: #e0e0e0;
   --muted: #8a8a8a;
-  --accent: #2196f3;
-  --danger: #f44336;
-  --ok: #4caf50;
+  /* Palette reprise de l'interface embarquée de la caméra
+     (crates/camera/static/controller.html) : les deux interfaces sont le même
+     produit, elles ne doivent pas avoir deux identités visuelles. */
+  --accent: #1e88e5;
+  --accent-red: #e53935;
+  --danger: #e53935;
+  --ok: #43a047;
   color-scheme: dark;
 }
 
@@ -28,19 +32,32 @@ body {
   padding: 24px 16px 64px;
 }
 
-header h1 {
-  font-size: 1.5rem;
-  margin: 0 0 4px;
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
+.brand .logo {
+  width: 52px;
+  height: 52px;
+  flex-shrink: 0;
+}
+
+header h1 {
+  font-size: 1.9rem;
+  margin: 0;
+}
+
+/* Même traitement que l'interface de la caméra : « Guard » en rouge. */
 header h1 .fox {
-  color: var(--accent);
+  color: var(--accent-red);
 }
 
 .subtitle {
   color: var(--muted);
   font-size: 0.9rem;
-  margin: 0 0 20px;
+  margin: 6px 0 20px;
 }
 
 .daybar {

@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Ombre portée Material Design 3 -->
+    <filter id="md-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+
+    <!-- Fond Sombre Squircle -->
+    <linearGradient id="bg-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#212129"/>
+      <stop offset="100%" stop-color="#0F0F12"/>
+    </linearGradient>
+
+    <!-- Dégradé Métallique du Bouclier -->
+    <linearGradient id="shield-gradient-left" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3A3A48"/>
+      <stop offset="100%" stop-color="#23232C"/>
+    </linearGradient>
+
+    <linearGradient id="shield-gradient-right" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2D2D38"/>
+      <stop offset="100%" stop-color="#191920"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Container Arrière-plan (Squircle Material) -->
+  <rect x="32" y="32" width="448" height="448" rx="96" fill="url(#bg-gradient)" filter="url(#md-shadow)"/>
+
+  <!-- 🛡️ BOUCLIER DE SÉCURITÉ (Guard) -->
+  <g id="shield">
+    <!-- Côté Gauche du Bouclier -->
+    <path d="M 256,70 L 110,120 C 110,270 170,380 256,430 Z" 
+          fill="url(#shield-gradient-left)" 
+          stroke="#FF5500" 
+          stroke-width="3"/>
+
+    <!-- Côté Droit du Bouclier (Ombré) -->
+    <path d="M 256,70 L 402,120 C 402,270 342,380 256,430 Z" 
+          fill="url(#shield-gradient-right)" 
+          stroke="#FF5500" 
+          stroke-width="3"/>
+  </g>
+
+  <!-- 🦊 TÊTE DU RENARD REDIMENSIONNÉE & CENTRÉE DANS LE BOUCLIER -->
+  <!-- Utilisation d'un scale(0.75) centré en (256, 250) -->
+  <g transform="translate(256, 250) scale(0.75) translate(-256, -235)">
+
+    <!-- 1. Oreille Gauche (Corail/Orange Clair) -->
+    <polygon points="256,160 180,160 90,50" fill="#FF6B4A"/>
+    
+    <!-- 2. Oreille Droite (Orange Vif / Ombré) -->
+    <polygon points="256,160 332,160 422,50" fill="#FF451A"/>
+
+    <!-- 3. Côté Gauche du Visage (Orange Clair) -->
+    <polygon points="256,160 180,160 70,310 256,350" fill="#FF6B4A"/>
+
+    <!-- 4. Côté Droit du Visage (Orange Foncé) -->
+    <polygon points="256,160 332,160 442,310 256,350" fill="#FF451A"/>
+
+    <!-- 5. Joue / Mâchoire Blanche Polygonale Gauche -->
+    <polygon points="70,310 256,350 256,420 180,370" fill="#EAEAEA"/>
+
+    <!-- 6. Joue / Mâchoire Blanche Polygonale Droite (Ombrée) -->
+    <polygon points="442,310 256,350 256,420 332,370" fill="#CBD5E1"/>
+
+    <!-- 7. Yeux Polygonaux Discrets -->
+    <circle cx="185" cy="245" r="11" fill="#3D2922"/>
+    <circle cx="327" cy="245" r="11" fill="#2A1B16"/>
+
+    <!-- 8. Truffe / Museau Sombre -->
+    <polygon points="256,350 238,368 256,392 274,368" fill="#2A1B16"/>
+
+  </g>
+</svg>

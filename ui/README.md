@@ -20,6 +20,19 @@ compte.
 `foxguard-ui` est la vue d'ENSEMBLE : plusieurs caméras, historique agrégé des
 détections, recherche, notifications.
 
+## Identité visuelle
+
+`public/logo.svg` est une **copie** de `crates/camera/assets/logo.svg`, et la
+palette de `src/styles.css` reprend celle de l'interface embarquée de la
+caméra (`crates/camera/static/controller.html`) : les deux interfaces sont le
+même produit et ne doivent pas avoir deux identités.
+
+La copie est délibérée. L'étape Node du Dockerfile ne reçoit que le dossier
+`ui/` comme contexte, et `npm run dev` travaille depuis ce même dossier :
+référencer un fichier situé hors de `ui/` casserait l'un ou l'autre. Pour un
+SVG de 3 Ko, la duplication coûte moins cher que le couplage — mais si le logo
+évolue, **les deux copies sont à mettre à jour**.
+
 ## Toolchain
 
 Hors du workspace Cargo : npm/pnpm et son propre lockfile. Les deux

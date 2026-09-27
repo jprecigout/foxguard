@@ -144,9 +144,14 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <h1>
-          🦊 Fox<span className="fox">Guard</span>
-        </h1>
+        <div className="brand">
+          {/* Servi depuis `public/` : le fichier est copié tel quel à la
+              racine du bundle, donc référencé en chemin absolu. */}
+          <img className="logo" src="/logo.svg" alt="" aria-hidden="true" />
+          <h1>
+            Fox<span className="fox">Guard</span>
+          </h1>
+        </div>
         <p className="subtitle">Détections du jour, par caméra</p>
       </header>
 
