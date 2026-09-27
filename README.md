@@ -165,6 +165,8 @@ d'abord le mot de passe de la base dans un `.env` à côté du compose :
 echo "POSTGRES_PASSWORD=$(openssl rand -base64 24)" > deploy/server/.env
 ```
 
+Ce fichier est gitignoré : il n'existe pas après un clone, il faut le créer.
+
 **Si vous avez déjà un broker MQTT** (souvent le cas avec Home Assistant ou une
 pile Grafana/InfluxDB), renseignez simplement son adresse dans `broker_host` de
 `manager-config.toml`, puis :
@@ -182,19 +184,29 @@ docker compose --profile broker -f deploy/server/compose.yml up -d --build
 Le broker n'est pas démarré par défaut pour éviter un conflit sur le port 1883
 avec celui que vous avez peut-être déjà.
 
-Pour un broker tournant sur l'HÔTE du serveur (et non dans ce compose), mettez
-`broker_host = "host.docker.internal"`.
+> ⚠️ **`--profile broker` est à répéter sur CHAQUE commande** qui doit voir ce
+> conteneur — `down`, `ps`, `logs mosquitto`. Sans lui, Compose fait comme si
+> le service n'existait pas, et un `down` laisse le broker tourner.
+
+Selon l'emplacement du broker, `broker_host` prend une valeur différente :
+
+| Le broker tourne… | `broker_host` |
+| --- | --- |
+| dans ce `compose.yml` (`--profile broker`) | `mosquitto` |
+| sur l'hôte du serveur, hors compose | `host.docker.internal` |
+| ailleurs sur le réseau | son adresse IP |
 
 Vérification :
 
 ```bash
 docker compose -f deploy/server/compose.yml logs manager
-curl http://localhost:8090/api/events
 ```
 
-Le `compose.yml` démarre aussi un broker Mosquitto ; retirez ce service si
-vous en avez déjà un sur le réseau, et renseignez son adresse dans
-`broker_host`.
+Le journal doit afficher `✅ Connecté au broker MQTT.` puis :
+
+```bash
+curl http://localhost:8090/api/events
+```
 
 ### Brancher les caméras dessus
 
@@ -207,9 +219,13 @@ name = "salon"          # distingue les installations dans les événements
 
 [mqtt]
 enabled = true          # désactivé par défaut
-broker_host = "192.168.1.50"
+broker_host = "192.168.1.50"    # ADRESSE IP du serveur, voir ci-dessous
 topic = "foxguard/detections"   # doit correspondre au `topic` du manager
 ```
+
+> ⚠️ Même si le broker est celui du `compose.yml`, les caméras doivent viser
+> l'**adresse IP du serveur** et non `mosquitto` : ce nom n'existe que sur le
+> réseau interne de Compose, il est introuvable depuis un Raspberry Pi.
 
 Vérification une fois les deux côtés démarrés :
 
@@ -327,6 +343,19 @@ sur le serveur annexe, voir la section « Le manager » plus haut.
 ```bash
 docker build -f deploy/camera/Dockerfile -t foxguard-camera:latest .
 ```
+
+Vérifiez que l'image contient bien le vrai binaire — quelques mégaoctets, pas
+quelques centaines de kilooctets :
+
+```bash
+docker run --rm --entrypoint sh foxguard-camera:latest -c 'ls -lh /app/foxguard-camera'
+```
+
+Un binaire de ~370 Ko signalerait que l'étape de mise en cache des dépendances
+a livré son programme factice à la place du vrai : le conteneur se terminerait
+alors immédiatement, code de sortie 0, **sans le moindre message**. Le
+`Dockerfile` s'en prémunit (voir le `touch` après la copie des sources), mais
+c'est un mode de panne assez déroutant pour mériter une vérification.
 
 ### Lancer le conteneur avec accès à la caméra locale (/dev/video0)
 
