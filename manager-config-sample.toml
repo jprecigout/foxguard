@@ -1,4 +1,4 @@
-# Configuration de foxguard-manager (à copier en `manager.toml`).
+# Configuration de foxguard-manager (à copier en `manager-config.toml`).
 #
 # Le manager tourne sur le serveur annexe : il s'abonne au broker MQTT sur
 # lequel les caméras publient, et expose leur historique par HTTP.

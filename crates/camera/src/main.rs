@@ -21,6 +21,15 @@ use foxguard_camera::capture::{self, SharedState};
 use foxguard_camera::config::Config;
 use foxguard_camera::retention;
 
+/// Fichier de configuration de la caméra, relatif au répertoire de travail.
+///
+/// `cargo run -p foxguard-camera` exécute le binaire depuis la RACINE du
+/// workspace : c'est donc là que le fichier est attendu en développement, et
+/// à la racine de `/app` dans l'image Docker. Le préfixe `camera-` le
+/// distingue de `manager-config.toml`, le dépôt hébergeant plusieurs
+/// composants.
+const CAMERA_CONFIG_PATH: &str = "camera-config.toml";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Affichage de la bannière console et de la version.
@@ -33,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
     info!("🚀 Démarrage du système FoxGuard...");
 
     // Chargement de la configuration
-    let config = Config::load("config.toml")?;
+    let config = Config::load(CAMERA_CONFIG_PATH)?;
 
     // Création du canal Broadcast pour le flux vidéo WebSocket (capacité de 16 frames)
     let (tx, _) = broadcast::channel(16);
@@ -45,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
         tx,
         api_token: config.server.api_token.clone(),
         pending_enrollment: Mutex::new(None),
+        recordings_dir: config.recording.dir.clone(),
     });
 
     // Lancement de la boucle de capture caméra dans une tâche blocking

@@ -42,7 +42,7 @@ tracing-subscriber = { workspace = true }
 tokio-util = { version = "0.7.19", features = ["io"] }
 # Client MQTT (publication des événements de détection, voir src/mqtt.rs).
 # `default-features = false` : la connexion au broker n'utilise pas TLS
-# (voir `[mqtt]` dans config.toml), donc on désactive le backend TLS par
+# (voir `[mqtt]` dans camera-config.toml), donc on désactive le backend TLS par
 # défaut de rumqttc ("use-rustls") pour éviter de tirer `rustls`/`ring` en
 # dépendance — `ring` embarque de l'assembleur par architecture qui a déjà
 # fait planter la compilation croisée ARM64 sous QEMU (voir le Dockerfile,

@@ -19,8 +19,19 @@ use foxguard_camera::api::create_router;
 use foxguard_camera::capture::SharedState;
 
 /// Construit un [`SharedState`] minimal pour les tests, avec le jeton API
-/// donné et aucune surveillance/enregistrement actifs.
-fn test_state(token: &str) -> Arc<SharedState> {
+/// donné, aucune surveillance/enregistrement actifs, et un dossier
+/// d'enregistrements TEMPORAIRE.
+///
+/// Ce dernier point est essentiel : Cargo exécute les tests d'intégration
+/// avec le répertoire courant positionné sur le paquet (`crates/camera/`), et
+/// non sur le workspace. Avec un chemin relatif, `create_router` créait donc
+/// un dossier `output_record/` en plein milieu des sources — visible dans
+/// `git status` après chaque `cargo test`.
+///
+/// Le [`tempfile::TempDir`] est retourné avec l'état et supprime le dossier à
+/// son `Drop` : l'appelant doit le garder vivant tant qu'il utilise le
+/// routeur.
+fn test_state_in(token: &str, dir: &std::path::Path) -> Arc<SharedState> {
     let (tx, _rx) = tokio::sync::broadcast::channel(16);
     Arc::new(SharedState {
         detection_enabled: AtomicBool::new(false),
@@ -28,7 +39,15 @@ fn test_state(token: &str) -> Arc<SharedState> {
         api_token: token.to_string(),
         tx,
         pending_enrollment: Mutex::new(None),
+        recordings_dir: dir.to_string_lossy().to_string(),
     })
+}
+
+/// Comme [`test_state_in`], avec son propre dossier temporaire.
+fn test_state(token: &str) -> (Arc<SharedState>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("dossier temporaire");
+    let state = test_state_in(token, dir.path());
+    (state, dir)
 }
 
 /// Requête GET simple, sans corps.
@@ -50,7 +69,8 @@ fn delete(uri: &str) -> Request<Body> {
 
 #[tokio::test]
 async fn index_route_serves_the_control_html_page() {
-    let app = create_router(test_state("secret"));
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
 
     let response = app.oneshot(get("/")).await.expect("réponse HTTP");
 
@@ -67,7 +87,8 @@ async fn index_route_serves_the_control_html_page() {
 
 #[tokio::test]
 async fn recordings_list_route_returns_a_json_array() {
-    let app = create_router(test_state("secret"));
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
 
     let response = app
         .oneshot(get("/api/recordings"))
@@ -97,7 +118,8 @@ async fn recordings_list_route_returns_a_json_array() {
 
 #[tokio::test]
 async fn recording_download_rejects_filenames_containing_path_traversal() {
-    let app = create_router(test_state("secret"));
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
 
     // ".." dans le nom de fichier : rejeté avant tout accès disque (voir
     // `stream_mjpeg_handler`).
@@ -111,7 +133,8 @@ async fn recording_download_rejects_filenames_containing_path_traversal() {
 
 #[tokio::test]
 async fn recording_download_rejects_non_mjpeg_extensions() {
-    let app = create_router(test_state("secret"));
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
 
     let response = app
         .oneshot(get("/recordings/rapport.pdf"))
@@ -123,7 +146,8 @@ async fn recording_download_rejects_non_mjpeg_extensions() {
 
 #[tokio::test]
 async fn recording_download_returns_404_for_a_legit_but_missing_file() {
-    let app = create_router(test_state("secret"));
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
 
     let response = app
         .oneshot(get("/recordings/rec_ne_existe_pas.mjpeg"))
@@ -147,7 +171,11 @@ async fn recording_download_returns_404_for_a_legit_but_missing_file() {
 /// Démarre `create_router` sur un vrai `TcpListener` (port éphémère) via
 /// `axum::serve`, exactement comme `src/main.rs`, et retourne son adresse.
 async fn spawn_test_server(token: &str) -> SocketAddr {
-    let app = create_router(test_state(token));
+    // Dossier volontairement « fuité » (`keep`) : le serveur vit dans une
+    // tâche détachée qui survit au test, donc le supprimer ici le lui
+    // retirerait sous les pieds.
+    let dir = tempfile::tempdir().expect("dossier temporaire").keep();
+    let app = create_router(test_state_in(token, &dir));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("liaison sur un port éphémère");
@@ -229,7 +257,8 @@ async fn websocket_upgrade_succeeds_with_the_correct_token() {
 
 #[tokio::test]
 async fn unknown_route_returns_404() {
-    let app = create_router(test_state("secret"));
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
 
     let response = app
         .oneshot(get("/cette-route-n-existe-pas"))
@@ -247,7 +276,8 @@ async fn unknown_route_returns_404() {
 
 #[tokio::test]
 async fn recording_delete_is_rejected_without_a_token() {
-    let app = create_router(test_state("secret"));
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
 
     let response = app
         .oneshot(delete("/api/recordings/rec_20260918_120854.mjpeg"))
@@ -259,7 +289,8 @@ async fn recording_delete_is_rejected_without_a_token() {
 
 #[tokio::test]
 async fn recording_delete_is_rejected_with_the_wrong_token() {
-    let app = create_router(test_state("secret"));
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
 
     let response = app
         .oneshot(delete(
@@ -276,7 +307,8 @@ async fn recording_delete_rejects_path_traversal_even_with_a_valid_token() {
     // Un jeton valide ne doit PAS permettre de sortir du dossier des
     // enregistrements : la validation du nom est une seconde barrière,
     // indépendante de l'authentification.
-    let app = create_router(test_state("secret"));
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
 
     let response = app
         .oneshot(delete("/api/recordings/..evil.mjpeg?token=secret"))
@@ -288,7 +320,8 @@ async fn recording_delete_rejects_path_traversal_even_with_a_valid_token() {
 
 #[tokio::test]
 async fn recording_delete_rejects_non_recording_extensions() {
-    let app = create_router(test_state("secret"));
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
 
     let response = app
         .oneshot(delete("/api/recordings/config.toml?token=secret"))
@@ -300,7 +333,8 @@ async fn recording_delete_rejects_non_recording_extensions() {
 
 #[tokio::test]
 async fn recording_delete_returns_404_for_a_legit_but_missing_file() {
-    let app = create_router(test_state("secret"));
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
 
     let response = app
         .oneshot(delete(
@@ -314,15 +348,14 @@ async fn recording_delete_returns_404_for_a_legit_but_missing_file() {
 
 #[tokio::test]
 async fn recording_delete_removes_an_existing_file() {
-    // `create_router` crée le dossier `output_record/` s'il n'existe pas, et
-    // les handlers y travaillent en chemin relatif : ce test écrit donc un
-    // vrai fichier, sous un nom qui lui est propre pour ne pas interférer
-    // avec les autres tests exécutés en parallèle.
-    let app = create_router(test_state("secret"));
+    // Le fichier est écrit dans le dossier TEMPORAIRE de ce test, celui-là
+    // même que le routeur utilise : le test est donc isolé des autres
+    // exécutés en parallèle et ne laisse rien dans l'arborescence du dépôt.
+    let dir = tempfile::tempdir().expect("dossier temporaire");
+    let app = create_router(test_state_in("secret", dir.path()));
 
     let name = "rec_test_suppression_20260101_000000.mjpeg";
-    let path = std::path::Path::new("output_record").join(name);
-    std::fs::create_dir_all("output_record").expect("dossier des enregistrements");
+    let path = dir.path().join(name);
     std::fs::write(&path, b"contenu de test").expect("écriture du fichier de test");
     assert!(path.exists());
 

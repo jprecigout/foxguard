@@ -1,4 +1,4 @@
-//! Chargement et structures de configuration du manager (`manager.toml`).
+//! Chargement et structures de configuration du manager (`manager-config.toml`).
 
 use serde::Deserialize;
 
@@ -101,7 +101,7 @@ fn default_capacity() -> usize {
 }
 
 impl Config {
-    /// Charge et parse `manager.toml` (ou un autre chemin TOML).
+    /// Charge et parse `manager-config.toml` (ou un autre chemin TOML).
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         Ok(toml::from_str(&content)?)
@@ -171,6 +171,6 @@ mod tests {
 
     #[test]
     fn load_fails_on_a_missing_file() {
-        assert!(Config::load("/chemin/inexistant/manager.toml").is_err());
+        assert!(Config::load("/chemin/inexistant/manager-config.toml").is_err());
     }
 }

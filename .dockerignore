@@ -10,8 +10,8 @@ README.md
 # Données d'exécution : jamais dans une image.
 output_record/
 known_faces/
-config.toml
-manager.toml
+camera-config.toml
+manager-config.toml
 
 # Interface React : seules les images qui en ont besoin la copient, et jamais
 # ses dépendances installées.

@@ -26,7 +26,6 @@ use tower_http::services::ServeDir;
 use tracing::{error, info, warn};
 
 use crate::capture::SharedState;
-use crate::config::RECORDINGS_DIR;
 use crate::retention::is_recording_file;
 
 // Compteur global pour attribuer un ID unique séquentiel à chaque client
@@ -64,10 +63,10 @@ pub enum ClientCommand {
 }
 
 /// Handler pour lister les enregistrements disponibles dans `output_record/`
-async fn list_recordings_handler() -> Json<Vec<VideoFile>> {
+async fn list_recordings_handler(State(state): State<Arc<SharedState>>) -> Json<Vec<VideoFile>> {
     let mut files = Vec::new();
 
-    if let Ok(entries) = std::fs::read_dir(RECORDINGS_DIR) {
+    if let Ok(entries) = std::fs::read_dir(&state.recordings_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file()
@@ -103,12 +102,15 @@ async fn list_recordings_handler() -> Json<Vec<VideoFile>> {
 /// (jusqu'à plusieurs secondes pour un enregistrement de quelques centaines
 /// de frames) sans aucun bénéfice. On sert maintenant le fichier tel quel,
 /// aussi vite que le réseau le permet.
-async fn stream_mjpeg_handler(Path(filename): Path<String>) -> Result<Response, StatusCode> {
+async fn stream_mjpeg_handler(
+    Path(filename): Path<String>,
+    State(state): State<Arc<SharedState>>,
+) -> Result<Response, StatusCode> {
     if !is_safe_recording_name(&filename) {
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let filepath = format!("{}/{}", RECORDINGS_DIR, filename);
+    let filepath = std::path::Path::new(&state.recordings_dir).join(&filename);
     let bytes = tokio::fs::read(&filepath)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
@@ -163,7 +165,7 @@ async fn delete_recording_handler(
         return StatusCode::BAD_REQUEST;
     }
 
-    let filepath = std::path::Path::new(RECORDINGS_DIR).join(&filename);
+    let filepath = std::path::Path::new(&state.recordings_dir).join(&filename);
 
     match std::fs::remove_file(&filepath) {
         Ok(()) => {
@@ -311,7 +313,7 @@ pub async fn handle_socket(
 /// Helper pour instancier le routeur Axum
 pub fn create_router(state: Arc<SharedState>) -> Router {
     // S'assurer que le dossier des enregistrements existe
-    let _ = std::fs::create_dir_all("output_record");
+    let _ = std::fs::create_dir_all(&state.recordings_dir);
 
     Router::new()
         .route("/", get(index_handler)) // Servir l'interface web sur la racine

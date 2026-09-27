@@ -28,7 +28,7 @@ smtp_password = "XXXXXXXXXX"
 from_address = "XXXXXXXXXX"
 to_address = "XXXXXXXXXX"
 
-# Section entièrement optionnelle : un config.toml sans [mqtt] du tout
+# Section entièrement optionnelle : un camera-config.toml sans [mqtt] du tout
 # continue de fonctionner, avec la publication MQTT désactivée. Publie un
 # message JSON à chaque CHANGEMENT d'état de reconnaissance (personne
 # inconnue détectée, ou identifiée avec son nom), pas à chaque frame.
@@ -45,9 +45,14 @@ password = "XXXXXXXXXX"
 # Topic sur lequel publier chaque événement de détection.
 topic = "foxguard/detections"
 
-# Section entièrement optionnelle : un config.toml sans [recording] du tout
+# Section entièrement optionnelle : un camera-config.toml sans [recording] du tout
 # continue de fonctionner, avec 7 jours de conservation.
 [recording]
+# Dossier où sont écrits, listés et purgés les enregistrements. Relatif au
+# répertoire de travail par défaut. Le renseigner en ABSOLU est recommandé
+# pour un déploiement en conteneur ou en service systemd, où ce répertoire
+# n'est pas celui du dépôt.
+dir = "output_record"
 # Durée de conservation des enregistrements, en jours. Au-delà, les fichiers
 # de output_record/ sont supprimés automatiquement par une tâche de fond.
 #

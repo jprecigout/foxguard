@@ -21,6 +21,10 @@ use foxguard_manager::config::Config;
 use foxguard_manager::ingest;
 use foxguard_manager::store::EventStore;
 
+/// Fichier de configuration du manager, relatif au répertoire de travail
+/// (voir la note équivalente dans `foxguard-camera`).
+const MANAGER_CONFIG_PATH: &str = "manager-config.toml";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
@@ -30,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
-    let config = Config::load("manager.toml")?;
+    let config = Config::load(MANAGER_CONFIG_PATH)?;
 
     let store = Arc::new(EventStore::new(config.store.capacity));
 

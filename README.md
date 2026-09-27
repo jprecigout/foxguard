@@ -74,14 +74,14 @@ cargo clippy --workspace --all-targets  # analyse statique
 ```
 
 ⚠️ La caméra se lance **depuis la racine du workspace** : les chemins de
-`config.toml` (modèles ONNX, dossiers de données) sont relatifs au répertoire
+`camera-config.toml` (modèles ONNX, dossiers de données) sont relatifs au répertoire
 de travail.
 
 ---
 
 ## 📂 Structure du Projet
 
-* **`crates/camera/src/main.rs`** : Point d'entrée de l'application — bannière de démarrage, chargement de `config.toml`, initialisation de l'état partagé, lancement de la boucle caméra (tâche bloquante) et du serveur Axum.
+* **`crates/camera/src/main.rs`** : Point d'entrée de l'application — bannière de démarrage, chargement de `camera-config.toml`, initialisation de l'état partagé, lancement de la boucle caméra (tâche bloquante) et du serveur Axum.
 * **`crates/camera/src/capture/`** : Capture caméra (V4L2) et pipeline de traitement, découpé par responsabilité (chaque étape a son propre fichier ; c'est `mod.rs` qui les enchaîne).
   * **`mod.rs`** : `start_camera_loop` — ouverture du périphérique V4L2, chargement des modèles et de la base de visages connus, démarrage du worker de reconnaissance, puis boucle de capture.
   * **`state.rs`** : `SharedState`, état partagé avec le serveur HTTP/WebSocket (surveillance/enregistrement actifs, jeton API, canal de diffusion, capture de référence en attente).
@@ -102,16 +102,16 @@ de travail.
   * **`types.rs`** : Types partagés du pipeline (`BoundingBox`, `KnownPerson`).
 * **`crates/camera/models/`** : Les 3 modèles ONNX embarqués (`yolov8n.onnx`, `face_detection_yunet_2023mar.onnx`, `arcface-mobilefacenet.onnx`).
 * **`crates/camera/src/geometry.rs`** : Calcul d'intersection sur union (IoU), utilitaire partagé entre le tracking (`capture/tracking.rs`) et la détection d'objets/visages (`vision/object_detector.rs`, `vision/face_detector.rs`), pour éviter de dupliquer ce calcul.
-* **`crates/camera/src/config.rs`** : Chargement et structures de `config.toml` (serveur, caméra, détection, e-mail, MQTT).
+* **`crates/camera/src/config.rs`** : Chargement et structures de `camera-config.toml` (serveur, caméra, détection, e-mail, MQTT).
 * **`crates/camera/src/mail.rs`** : Construction et envoi des alertes e-mail (HTML multipart avec logo et photo de la détection).
 * **`crates/camera/src/retention.rs`** : Tâche de fond qui supprime les enregistrements dépassant la durée de conservation configurée (`[recording] retention_days`), et prédicat partagé `is_recording_file` qui définit ce qui est un enregistrement pour la liste, le téléchargement, la suppression et la purge.
-* **`crates/camera/src/mqtt.rs`** : Connexion à un broker MQTT et publication des événements de détection (nom de caméra, horodatage, statut connu/inconnu) à chaque changement d'état ; fonctionnalité optionnelle (voir `[mqtt]` dans `config.toml`).
+* **`crates/camera/src/mqtt.rs`** : Connexion à un broker MQTT et publication des événements de détection (nom de caméra, horodatage, statut connu/inconnu) à chaque changement d'état ; fonctionnalité optionnelle (voir `[mqtt]` dans `camera-config.toml`).
 * **`crates/camera/src/util.rs`** : Petits utilitaires transverses (verrouillage de mutex tolérant à l'empoisonnement).
 * **`crates/camera/static/controller.html`** : Interface utilisateur web — flux vidéo, interrupteurs, capture de photo de référence, liste et lecture des enregistrements (relecture calée sur l'horodatage réel des frames).
 * **`crates/camera/assets/logo.svg`** : Logo FoxGuard — affiché dans ce README et embarqué dans le binaire (`include_bytes!`) pour les e-mails d'alerte.
 * **`known_faces/`** : Photos de référence pour la reconnaissance faciale, nommées `<nom>_<horodatage>.jpg` (plusieurs fichiers possibles par personne).
 * **`output_record/`** : Enregistrements vidéo `.mjpeg` générés par l'application.
-* **`crates/manager/`** : Le manager — `config.rs` (sa configuration `manager.toml`), `ingest.rs` (abonnement MQTT et décodage des événements), `store.rs` (historique en mémoire, borné et **volatile**), `api.rs` (API HTTP de consultation et service du bundle de l'interface).
+* **`crates/manager/`** : Le manager — `config.rs` (sa configuration `manager-config.toml`), `ingest.rs` (abonnement MQTT et décodage des événements), `store.rs` (historique en mémoire, borné et **volatile**), `api.rs` (API HTTP de consultation et service du bundle de l'interface).
 * **`crates/protocol/`** : `DetectionEvent` et `PersonStatus`, le contrat partagé entre la caméra et le manager.
 * **`ui/`** : Interface React du manager (à venir — voir `ui/README.md`).
 * **`deploy/camera/`** : `Dockerfile` de l'image Raspberry Pi.
@@ -133,7 +133,7 @@ caméras publient et expose leur historique :
 
 ### Déploiement
 
-Copier `manager-sample.toml` en `manager.toml` (gitignoré, il peut contenir
+Copier `manager-config-sample.toml` en `manager-config.toml` (gitignoré, il peut contenir
 les identifiants du broker). Seul `[mqtt] broker_host` est obligatoire. Puis,
 depuis la racine du dépôt :
 
@@ -147,7 +147,7 @@ vous en avez déjà un sur le réseau, et renseignez son adresse dans
 
 ### Brancher les caméras dessus
 
-Rien n'arrive tant que les caméras ne publient pas : dans le `config.toml` de
+Rien n'arrive tant que les caméras ne publient pas : dans le `camera-config.toml` de
 CHAQUE Raspberry Pi, activez la section `[mqtt]` et pointez-la vers le broker.
 
 ```toml
@@ -196,15 +196,26 @@ Le manager a son propre filtre (`RUST_LOG=foxguard_manager=debug`).
 
 ---
 
-## ⚙️ Configuration (`config.toml`)
+## ⚙️ Configuration (`camera-config.toml`)
 
-Partez de `config-sample.toml` pour créer votre propre `config.toml`.
+Les fichiers de configuration vivent à la **racine du dépôt**, un par
+composant : `camera-config.toml` et `manager-config.toml` (modèles :
+`camera-config-sample.toml` et `manager-config-sample.toml`, les deux fichiers
+réels étant gitignorés car ils contiennent des identifiants).
+
+C'est la racine et non les crates, parce que `cargo run -p <composant>` exécute
+le binaire avec le répertoire de travail positionné sur la **racine du
+workspace** : un fichier placé dans `crates/camera/` y serait introuvable. Un
+fichier de configuration est par ailleurs une donnée de déploiement, montée ou
+copiée à côté du binaire, et non du code qui voyage dans le crate.
+
+Partez de `camera-config-sample.toml` pour créer votre propre `camera-config.toml`.
 
 * **`[server]`** : `host`, `port`, `api_token` (jeton exigé en paramètre `?token=` pour se connecter au WebSocket).
 * **`[camera]`** : `device_index` (index du périphérique V4L2, ex. `0` pour `/dev/video0`), `name` (nom de la caméra inclus dans les événements MQTT, optionnel — `"foxguard"` par défaut).
 * **`[detection]`** : `enabled` (surveillance active au démarrage), chemins des 3 modèles ONNX (`model_path`, `model_detect_face_path`, `model_face_path`, tous dans `crates/camera/models/`), tailles d'entrée (`input_size` pour YOLO, `input_face_size` pour ArcFace), `confidence_threshold` (seuil de détection YOLO) et `email_cooldown_secs`.
 * **`[email]`** : `enabled`, identifiants SMTP (`smtp_server`, `smtp_user`, `smtp_password`), `from_address`, `to_address`.
-* **`[recording]`** *(optionnel, section entière absente = 7 jours)* : `retention_days` (durée de conservation des enregistrements, en jours — **`0` désactive entièrement la suppression automatique**) et `cleanup_interval_secs` (intervalle entre deux passages, `3600` par défaut). Un passage a aussi lieu au démarrage, pour purger ce qui a expiré pendant un arrêt prolongé. L'âge est déterminé par la date de dernière modification du fichier, jamais par son nom : un enregistrement en cours d'écriture ne peut donc pas être supprimé sous la caméra.
+* **`[recording]`** *(optionnel, section entière absente = valeurs par défaut)* : `dir` (dossier des enregistrements, `"output_record"` par défaut, relatif au répertoire de travail — à renseigner en absolu pour un déploiement en conteneur ou en service systemd), `retention_days` (durée de conservation des enregistrements, en jours — **`0` désactive entièrement la suppression automatique**) et `cleanup_interval_secs` (intervalle entre deux passages, `3600` par défaut). Un passage a aussi lieu au démarrage, pour purger ce qui a expiré pendant un arrêt prolongé. L'âge est déterminé par la date de dernière modification du fichier, jamais par son nom : un enregistrement en cours d'écriture ne peut donc pas être supprimé sous la caméra.
 * **`[mqtt]`** *(optionnel, section entière absente = désactivé)* : `enabled`, `broker_host`, `broker_port` (`1883` par défaut), `username`/`password` (authentification optionnelle, pas de TLS), `topic` (`"foxguard/detections"` par défaut). Publie un message JSON à chaque changement d'état de reconnaissance, par exemple :
   ```json
   {"camera": "salon", "timestamp": "2026-09-18T15:42:07+02:00", "status": "known", "name": "jerome"}
@@ -222,7 +233,7 @@ optimisé (recommandé pour les performances de l'inférence IA) :
 cargo run --release -p foxguard-camera
 ```
 
-⚠️ **Depuis la racine du dépôt** : les chemins de `config.toml` (modèles ONNX,
+⚠️ **Depuis la racine du dépôt** : les chemins de `camera-config.toml` (modèles ONNX,
 dossiers de données) sont relatifs au répertoire de travail.
 
 Le manager, lui, se lance sur le serveur annexe — pas sur le Raspberry Pi :
@@ -231,7 +242,7 @@ Le manager, lui, se lance sur le serveur annexe — pas sur le Raspberry Pi :
 cargo run --release -p foxguard-manager
 ```
 
-Il lit `manager.toml` (modèle : `manager-sample.toml`).
+Il lit `manager-config.toml` (modèle : `manager-config-sample.toml`).
 
 ---
 

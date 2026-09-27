@@ -21,7 +21,7 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use crate::config::{RECORDINGS_DIR, RecordingConfig};
+use crate::config::RecordingConfig;
 use tracing::{error, info, warn};
 
 /// Extensions considérées comme des enregistrements. Tout autre fichier
@@ -55,6 +55,7 @@ pub fn spawn_cleanup_task(config: RecordingConfig) {
 
     let max_age = Duration::from_secs(config.retention_days * 24 * 60 * 60);
     let interval = Duration::from_secs(config.cleanup_interval_secs.max(1));
+    let dir = config.dir.clone();
 
     info!(
         "🗂️ Nettoyage automatique des enregistrements : conservation {} jour(s), passage toutes les {} s.",
@@ -73,10 +74,9 @@ pub fn spawn_cleanup_task(config: RecordingConfig) {
             // `delete_expired` fait des appels systèmes bloquants (lecture de
             // dossier, suppressions) : on les confie au pool dédié plutôt que
             // de bloquer un thread de l'exécuteur asynchrone.
-            let result = tokio::task::spawn_blocking(move || {
-                delete_expired(Path::new(RECORDINGS_DIR), max_age)
-            })
-            .await;
+            let dir = dir.clone();
+            let result =
+                tokio::task::spawn_blocking(move || delete_expired(Path::new(&dir), max_age)).await;
 
             match result {
                 Ok(Ok(report)) if report.deleted > 0 || report.failed > 0 => {
@@ -93,7 +93,7 @@ pub fn spawn_cleanup_task(config: RecordingConfig) {
                 Ok(Err(e)) => {
                     error!(
                         "❌ Nettoyage des enregistrements impossible dans '{}' : {}",
-                        RECORDINGS_DIR, e
+                        config.dir, e
                     );
                 }
                 Err(e) => {
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn other_files_are_not_recordings() {
         assert!(!is_recording_file(Path::new("notes.txt")));
-        assert!(!is_recording_file(Path::new("config.toml")));
+        assert!(!is_recording_file(Path::new("camera-config.toml")));
         // Sans extension du tout.
         assert!(!is_recording_file(Path::new("rec_20260918_120854")));
     }
@@ -334,7 +334,7 @@ mod tests {
         // pas écrit, quel que soit son âge.
         let dir = tempdir();
         let note = file_aged(dir.path(), "important.txt", 365 * ONE_DAY);
-        let config = file_aged(dir.path(), "config.toml", 365 * ONE_DAY);
+        let config = file_aged(dir.path(), "camera-config.toml", 365 * ONE_DAY);
 
         let report = delete_expired(dir.path(), 7 * ONE_DAY).expect("balayage");
 

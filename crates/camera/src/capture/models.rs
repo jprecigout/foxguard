@@ -69,7 +69,7 @@ impl Models {
                 Arc::new(Mutex::new(Vec::new()))
             };
 
-        // Connexion MQTT optionnelle (voir `[mqtt]` dans config.toml). La
+        // Connexion MQTT optionnelle (voir `[mqtt]` dans camera-config.toml). La
         // connexion réelle est paresseuse et se reconnecte automatiquement
         // en tâche de fond (voir `MqttPublisher::connect`) : un broker
         // momentanément injoignable au démarrage n'empêche pas FoxGuard de

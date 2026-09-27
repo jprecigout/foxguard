@@ -30,17 +30,18 @@ pub(super) struct RecordingWriter {
 }
 
 impl RecordingWriter {
-    /// Crée un nouveau fichier d'enregistrement dans `output_record/`
-    /// (créé si besoin) et démarre son horloge interne (voir
-    /// [`Self::write_frame`]).
-    pub(super) fn create() -> io::Result<Self> {
-        Self::create_in(Path::new("output_record"))
+    /// Crée un nouveau fichier d'enregistrement dans `dir` (créé si besoin)
+    /// et démarre son horloge interne (voir [`Self::write_frame`]).
+    ///
+    /// Le dossier vient de la configuration (`[recording] dir`) et non d'une
+    /// constante : c'est ce qui permet de le placer ailleurs qu'à côté du
+    /// binaire, et aux tests de travailler dans un dossier temporaire.
+    pub(super) fn create(dir: &str) -> io::Result<Self> {
+        Self::create_in(Path::new(dir))
     }
 
-    /// Comme [`Self::create`], mais dans un dossier explicite plutôt que le
-    /// dossier `output_record/` fixe utilisé en production. Extrait pour
-    /// être testable sans dépendre du répertoire courant du processus (voir
-    /// les tests en fin de fichier).
+    /// Comme [`Self::create`], mais à partir d'un [`Path`] : sert aux tests,
+    /// qui travaillent dans un dossier temporaire.
     fn create_in(dir: &Path) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
 

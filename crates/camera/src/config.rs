@@ -1,21 +1,19 @@
-//! Chargement et structures de configuration (fichier `config.toml`).
+//! Chargement et structures de configuration (fichier `camera-config.toml`).
 
 use serde::Deserialize;
 
-/// Dossier des enregistrements vidéo, partagé par le serveur HTTP
-/// (`crate::api`), l'écriture des enregistrements
-/// (`crate::capture::recording`) et le nettoyage automatique
-/// (`crate::retention`).
-pub const RECORDINGS_DIR: &str = "output_record";
+/// Dossier des enregistrements vidéo par défaut, relatif au répertoire de
+/// travail. Surchargeable par `[recording] dir` (voir [`RecordingConfig`]).
+pub const DEFAULT_RECORDINGS_DIR: &str = "output_record";
 
-/// Racine de la configuration, telle que lue depuis `config.toml`.
+/// Racine de la configuration, telle que lue depuis `camera-config.toml`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
     pub camera: CameraConfig,
     pub detection: DetectionConfig,
     pub email: EmailConfig,
-    // Section entière optionnelle : un `config.toml` existant sans `[mqtt]`
+    // Section entière optionnelle : un `camera-config.toml` existant sans `[mqtt]`
     // continue de charger tel quel, avec la publication MQTT désactivée.
     #[serde(default)]
     pub mqtt: MqttConfig,
@@ -26,9 +24,17 @@ pub struct Config {
 
 /// Paramètres des enregistrements vidéo : durée de conservation et fréquence
 /// du nettoyage automatique (voir [`crate::retention`]). Section entièrement
-/// optionnelle, pour qu'un `config.toml` existant reste valide tel quel.
+/// optionnelle, pour qu'un `camera-config.toml` existant reste valide tel quel.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RecordingConfig {
+    /// Dossier où sont écrits, listés et purgés les enregistrements.
+    ///
+    /// Relatif au répertoire de travail par défaut. Le renseigner en ABSOLU
+    /// est recommandé pour un déploiement en conteneur ou en service systemd,
+    /// où ce répertoire n'est pas celui du dépôt.
+    #[serde(default = "default_recordings_dir")]
+    pub dir: String,
+
     /// Durée de conservation des enregistrements, en jours. Au-delà, ils sont
     /// supprimés automatiquement par la tâche de nettoyage.
     ///
@@ -48,9 +54,14 @@ pub struct RecordingConfig {
     pub cleanup_interval_secs: u64,
 }
 
+fn default_recordings_dir() -> String {
+    DEFAULT_RECORDINGS_DIR.to_string()
+}
+
 impl Default for RecordingConfig {
     fn default() -> Self {
         Self {
+            dir: default_recordings_dir(),
             retention_days: default_retention_days(),
             cleanup_interval_secs: default_cleanup_interval_secs(),
         }
@@ -132,7 +143,7 @@ pub struct EmailConfig {
 /// Paramètres de publication des événements de détection sur un broker MQTT
 /// (voir `crate::mqtt`) : fonctionnalité optionnelle, désactivée par défaut.
 /// Tous les champs ont une valeur par défaut, y compris la section `[mqtt]`
-/// elle-même (voir [`Config::mqtt`]), pour qu'un `config.toml` existant
+/// elle-même (voir [`Config::mqtt`]), pour qu'un `camera-config.toml` existant
 /// n'ait pas besoin d'être modifié pour rester valide.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MqttConfig {
@@ -178,7 +189,7 @@ fn default_mqtt_topic() -> String {
 }
 
 impl Config {
-    /// Charge et parse `config.toml` (ou un autre chemin TOML) en [`Config`].
+    /// Charge et parse `camera-config.toml` (ou un autre chemin TOML) en [`Config`].
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
@@ -234,7 +245,7 @@ mod tests {
 
     #[test]
     fn recording_section_is_optional_and_defaults_to_seven_days() {
-        // Un `config.toml` antérieur à l'ajout de `[recording]` doit rester
+        // Un `camera-config.toml` antérieur à l'ajout de `[recording]` doit rester
         // valide et bénéficier de la rétention par défaut.
         let file = write_temp_toml(VALID_TOML);
         let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
@@ -377,7 +388,7 @@ mod tests {
 
     #[test]
     fn mqtt_section_is_entirely_optional_and_defaults_to_disabled() {
-        // Un `config.toml` d'avant l'ajout de MQTT, sans section `[mqtt]`
+        // Un `camera-config.toml` d'avant l'ajout de MQTT, sans section `[mqtt]`
         // du tout, doit continuer à charger tel quel.
         let file = write_temp_toml(VALID_TOML);
         let config = Config::load(file.path().to_str().unwrap()).expect("config valide");

@@ -1,7 +1,7 @@
 //! Publication d'événements de détection sur un broker MQTT : nom de la
 //! caméra, horodatage, et statut de la personne détectée (inconnue, ou
 //! connue avec son nom). Fonctionnalité optionnelle, activée via
-//! `[mqtt] enabled = true` dans `config.toml` (voir [`crate::config::MqttConfig`]).
+//! `[mqtt] enabled = true` dans `camera-config.toml` (voir [`crate::config::MqttConfig`]).
 //!
 //! La détection du CHANGEMENT d'état (ne publier qu'une fois par transition,
 //! pas à chaque tentative de reconnaissance) vit dans

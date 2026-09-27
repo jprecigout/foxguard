@@ -9,7 +9,7 @@ use foxguard_camera::config::Config;
 
 #[test]
 fn load_reads_config_sample_toml_shipped_with_the_repo() {
-    // `config-sample.toml` est le modèle fourni aux utilisateurs (voir
+    // `camera-config-sample.toml` est le modèle fourni aux utilisateurs (voir
     // README.md, section Configuration) : il doit rester chargeable tel quel.
     //
     // Le chemin est résolu depuis le MANIFESTE du crate et non depuis le
@@ -18,10 +18,11 @@ fn load_reads_config_sample_toml_shipped_with_the_repo() {
     // que le modèle vit à la racine du workspace — là où l'application est
     // lancée en développement (`cargo run -p foxguard-camera`) et là où le
     // Dockerfile va le chercher.
-    let sample = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config-sample.toml");
+    let sample =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../camera-config-sample.toml");
 
     let config = Config::load(sample.to_str().expect("chemin UTF-8"))
-        .expect("config-sample.toml doit toujours être un TOML valide et complet");
+        .expect("camera-config-sample.toml doit toujours être un TOML valide et complet");
 
     assert!(!config.server.host.is_empty());
     assert!(config.server.port > 0);

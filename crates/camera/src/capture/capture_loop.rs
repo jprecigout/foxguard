@@ -120,7 +120,7 @@ pub(super) fn run(
 
         if is_recording_active {
             if recording.is_none() {
-                recording = Some(RecordingWriter::create()?);
+                recording = Some(RecordingWriter::create(&state.recordings_dir)?);
             }
             if let Some(ref mut writer) = recording {
                 let _ = writer.write_frame(&jpeg_bytes);

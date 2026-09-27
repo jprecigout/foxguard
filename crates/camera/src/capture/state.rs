@@ -21,4 +21,12 @@ pub struct SharedState {
     // consomme (take()) cette valeur dès qu'une frame est disponible (voir
     // `super::known_faces::try_capture_reference`).
     pub pending_enrollment: Mutex<Option<String>>,
+
+    // Dossier des enregistrements, issu de `[recording] dir` (voir
+    // `crate::config`). Porté par l'état plutôt que par une constante
+    // globale : c'est ce qui permet aux tests d'intégration de travailler
+    // dans un dossier temporaire, au lieu d'écrire dans l'arborescence du
+    // dépôt (Cargo exécute les tests d'intégration avec le répertoire courant
+    // positionné sur le paquet, pas sur le workspace).
+    pub recordings_dir: String,
 }

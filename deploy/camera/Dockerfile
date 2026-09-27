@@ -79,7 +79,7 @@ WORKDIR /app
 # Création des répertoires de données et attribution des permissions.
 #
 # L'arborescence `crates/camera/models` est reproduite telle quelle parce que
-# les chemins de `config.toml` sont relatifs au répertoire de travail : le
+# les chemins de `camera-config.toml` sont relatifs au répertoire de travail : le
 # MÊME fichier de configuration fonctionne ainsi en développement (depuis la
 # racine du workspace) et dans l'image.
 RUN mkdir -p /app/crates/camera/models /app/output_record /app/known_faces && \
@@ -90,7 +90,7 @@ COPY --from=builder --chown=foxguard:foxguard /app/target/release/foxguard-camer
 # `static/` est servi à l'exécution par ServeDir (icônes de l'interface) :
 # il doit être présent dans l'image, pas seulement à la compilation.
 COPY --from=builder --chown=foxguard:foxguard /app/crates/camera/static /app/static
-COPY --chown=foxguard:foxguard config.toml /app/config.toml
+COPY --chown=foxguard:foxguard camera-config.toml /app/camera-config.toml
 # Les 3 modèles ONNX (YOLOv8, YuNet, ArcFace)
 COPY --chown=foxguard:foxguard crates/camera/models /app/crates/camera/models
 

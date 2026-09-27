@@ -33,7 +33,7 @@ Le manager sert le bundle statique à la racine, et son API sous `/api/*`
 
 | Route             | Contenu                                        |
 | ----------------- | ---------------------------------------------- |
-| `GET /`           | ce bundle (`[server] ui_dir` de `manager.toml`) |
+| `GET /`           | ce bundle (`[server] ui_dir` de `manager-config.toml`) |
 | `GET /api/health` | sonde de disponibilité                          |
 | `GET /api/events` | événements récents (`?limit=`)                  |
 | `GET /api/cameras`| caméras ayant émis au moins un événement        |

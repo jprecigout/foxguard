@@ -1,14 +1,14 @@
 /target
 /output_record
 .vscode
-config.toml
+camera-config.toml
 *.tar
 # Photos de référence de la reconnaissance faciale : données personnelles
 # (visages de personnes identifiables), à ne pas versionner.
 /known_faces
 
 # Configuration du manager : peut contenir les identifiants du broker MQTT.
-/manager.toml
+/manager-config.toml
 
 # Interface React (foxguard-ui)
 ui/node_modules/

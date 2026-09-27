@@ -12,7 +12,7 @@ services:
   # Broker MQTT partagé : les caméras y publient, le manager y lit.
   #
   # À retirer si vous disposez déjà d'un broker sur le réseau (dans ce cas,
-  # renseignez simplement son adresse dans `broker_host` de manager.toml).
+  # renseignez simplement son adresse dans `broker_host` de manager-config.toml).
   mosquitto:
     image: eclipse-mosquitto:2
     restart: unless-stopped
@@ -34,7 +34,7 @@ services:
       - "8090:8090"
     volumes:
       # Configuration du manager, montée en lecture seule.
-      - ../../manager.toml:/app/manager.toml:ro
+      - ../../manager-config.toml:/app/manager-config.toml:ro
 
 volumes:
   mosquitto_data:
