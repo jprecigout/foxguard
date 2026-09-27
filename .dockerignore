@@ -1,6 +1,19 @@
+# Contexte de build partagé par toutes les images du dépôt (le contexte est la
+# racine du workspace, car les Dockerfile ont besoin des manifestes de tous
+# les membres pour mettre les dépendances en cache).
 target/
-output_record/
 .git/
 .gitignore
 README.md
 *.tar
+
+# Données d'exécution : jamais dans une image.
+output_record/
+known_faces/
+config.toml
+manager.toml
+
+# Interface React : seules les images qui en ont besoin la copient, et jamais
+# ses dépendances installées.
+ui/node_modules/
+ui/dist/

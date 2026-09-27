@@ -1,58 +1,39 @@
-[package]
-name = "foxguard"
-version = "0.1.0"
-edition = "2024"
+# Workspace FoxGuard.
+#
+# `foxguard-camera` tourne sur le Raspberry Pi, près de la caméra, avec ses
+# dépendances lourdes (V4L2, ONNX, traitement d'image).
+#
+# Ce workspace prépare l'arrivée des composants qui tourneront sur un serveur
+# annexe (voir le README) : le découpage isole dès maintenant ce qui est
+# spécifique à la caméra de ce qui sera partagé.
+#
+# Le `Cargo.lock` sera commun à tous les membres, mais la COMPILATION ne l'est
+# pas : `cargo build -p foxguard-camera` ne construit que le sous-graphe de
+# dépendances de la caméra. C'est ce qui permettra d'ajouter des composants
+# aux dépendances incompatibles avec la compilation croisée ARM64 sous QEMU
+# (voir la note sur `ring` dans crates/camera/Cargo.toml) sans jamais les
+# construire pour le Raspberry Pi.
+[workspace]
+resolver = "3"
+members = ["crates/camera"]
 
-[dependencies]
-
-# Web & Asynchronisme
-tokio = { version = "1.38", features = ["full"] }
-axum = { version = "0.8.9", features = ["ws"] }
-futures-util = "0.3"
+# Versions partagées par plusieurs crates, déclarées une seule fois pour
+# qu'elles ne puissent pas diverger d'un composant à l'autre.
+[workspace.dependencies]
+anyhow = "1.0"
+axum = "0.8.9"
+tower-http = { version = "0.7.0", features = ["fs"] }
+chrono = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+tokio = { version = "1.38", features = ["full"] }
 toml = "1.1.4"
-tower-http = { version = "0.7.0", features = ["fs"] }
-rayon = "1.10"
-
-# Traitement image & V4L2
-v4l = "0.14"
-image = "0.25"
-imageproc = "0.25"
-font8x8 = "0.3"
-
-# IA / ONNX Runtime
-tract-onnx = "0.23.4"
-ndarray = "0.17.2"
-
-# Utilitaire & Alertes
-lettre = { version = "0.11", default-features = false, features = [
-    "builder",
-    "smtp-transport",
-    "tokio1-native-tls",
-] }
-chrono = "0.4"
-anyhow = "1.0"
 tracing = "0.1"
-tracing-subscriber = "0.3"
-tokio-util = { version = "0.7.19", features = ["io"] }
-# Client MQTT (publication des événements de détection, voir src/mqtt.rs).
-# `default-features = false` : la connexion au broker n'utilise pas TLS
-# (voir `[mqtt]` dans config.toml), donc on désactive le backend TLS par
-# défaut de rumqttc ("use-rustls") pour éviter de tirer `rustls`/`ring` en
-# dépendance — `ring` embarque de l'assembleur par architecture qui a déjà
-# fait planter la compilation croisée ARM64 sous QEMU (voir le Dockerfile,
-# lettre/tokio1-native-tls pour le même problème côté e-mail).
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# `default-features = false` : la connexion au broker n'utilise pas TLS, donc
+# on désactive le backend TLS par défaut de rumqttc ("use-rustls") pour éviter
+# de tirer `rustls`/`ring` en dépendance (voir la note ci-dessus).
 rumqttc = { version = "0.24", default-features = false }
-
-[dev-dependencies]
-# Utilisés uniquement par les tests unitaires/d'intégration (voir tests/ et
-# les modules #[cfg(test)]) : appel du routeur Axum sans ouvrir de socket
-# réseau (tower::ServiceExt::oneshot), lecture des corps de réponse HTTP, et
-# fichiers/dossiers temporaires isolés entre les tests.
-tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
-tempfile = "3.14"
 
 [profile.release]
 opt-level = 3

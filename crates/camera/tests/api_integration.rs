@@ -1,5 +1,5 @@
 //! Tests d'intégration du serveur HTTP / WebSocket : vérifient le routeur
-//! Axum exposé par `foxguard::api::create_router` de bout en bout (routage,
+//! Axum exposé par `foxguard_camera::api::create_router` de bout en bout (routage,
 //! extraction des paramètres, en-têtes, code de statut, corps de réponse).
 //! Les routes HTTP classiques sont testées sans ouvrir de socket réseau réel
 //! (`tower::ServiceExt::oneshot`) ; l'upgrade WebSocket, qui a besoin d'une
@@ -15,8 +15,8 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use foxguard::api::create_router;
-use foxguard::capture::SharedState;
+use foxguard_camera::api::create_router;
+use foxguard_camera::capture::SharedState;
 
 /// Construit un [`SharedState`] minimal pour les tests, avec le jeton API
 /// donné et aucune surveillance/enregistrement actifs.

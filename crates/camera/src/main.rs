@@ -14,10 +14,10 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::broadcast;
 
-use foxguard::api;
-use foxguard::capture::{self, SharedState};
-use foxguard::config::Config;
-use foxguard::retention;
+use foxguard_camera::api;
+use foxguard_camera::capture::{self, SharedState};
+use foxguard_camera::config::Config;
+use foxguard_camera::retention;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

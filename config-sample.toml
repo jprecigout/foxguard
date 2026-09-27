@@ -12,9 +12,9 @@ name = "foxguard"
 
 [detection]
 enabled = false
-model_path = "src/vision/models/yolov8n.onnx"
-model_detect_face_path = "src/vision/models/face_detection_yunet_2023mar.onnx"
-model_face_path = "src/vision/models/arcface-mobilefacenet.onnx"
+model_path = "crates/camera/models/yolov8n.onnx"
+model_detect_face_path = "crates/camera/models/face_detection_yunet_2023mar.onnx"
+model_face_path = "crates/camera/models/arcface-mobilefacenet.onnx"
 input_size = 320
 input_face_size = 112
 confidence_threshold = 0.5

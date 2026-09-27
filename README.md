@@ -20,10 +20,26 @@
 
 ---
 
+## 📦 Workspace Cargo
+
+Le dépôt est un **workspace Cargo**. La caméra vit dans `crates/camera/` :
+
+```bash
+cargo test --workspace                  # toute la suite
+cargo run -p foxguard-camera            # depuis la RACINE du dépôt
+cargo clippy --workspace --all-targets  # analyse statique
+```
+
+⚠️ La caméra se lance **depuis la racine du workspace** : les chemins de
+`config.toml` (modèles ONNX, dossiers de données) sont relatifs au répertoire
+de travail.
+
+---
+
 ## 📂 Structure du Projet
 
-* **`src/main.rs`** : Point d'entrée de l'application — bannière de démarrage, chargement de `config.toml`, initialisation de l'état partagé, lancement de la boucle caméra (tâche bloquante) et du serveur Axum.
-* **`src/capture/`** : Capture caméra (V4L2) et pipeline de traitement, découpé par responsabilité (chaque étape a son propre fichier ; c'est `mod.rs` qui les enchaîne).
+* **`crates/camera/src/main.rs`** : Point d'entrée de l'application — bannière de démarrage, chargement de `config.toml`, initialisation de l'état partagé, lancement de la boucle caméra (tâche bloquante) et du serveur Axum.
+* **`crates/camera/src/capture/`** : Capture caméra (V4L2) et pipeline de traitement, découpé par responsabilité (chaque étape a son propre fichier ; c'est `mod.rs` qui les enchaîne).
   * **`mod.rs`** : `start_camera_loop` — ouverture du périphérique V4L2, chargement des modèles et de la base de visages connus, démarrage du worker de reconnaissance, puis boucle de capture.
   * **`state.rs`** : `SharedState`, état partagé avec le serveur HTTP/WebSocket (surveillance/enregistrement actifs, jeton API, canal de diffusion, capture de référence en attente).
   * **`models.rs`** : Chargement des modèles IA (YOLO, YuNet, ArcFace) et de la base de visages connus au démarrage (`Models`).
@@ -34,24 +50,26 @@
   * **`codec.rs`** : Décodage YUYV → RGB, parallélisé avec Rayon.
   * **`recording.rs`** : Écriture des enregistrements `output_record/*.mjpeg`, avec un horodatage réel par frame pour une relecture fidèle à la vitesse de capture (au lieu d'un débit fixe supposé).
   * **`capture_loop.rs`** : Boucle principale de lecture V4L2 — incrustation des boîtes, alerte e-mail, enregistrement disque et diffusion WebSocket.
-* **`src/api.rs`** : Routage Axum, page de contrôle (`GET /`), upgrade WebSocket authentifié par jeton (`GET /ws?token=...`), commandes JSON entrantes (`set_monitoring`, `set_detection`, `set_recording`, `capture_reference`), liste (`GET /api/recordings`), téléchargement (`GET /recordings/{filename}`) et suppression (`DELETE /api/recordings/{filename}?token=...`, seule route destructive, authentifiée par le même jeton que le WebSocket) des enregistrements (le fichier `.mjpeg` est servi tel quel ; la relecture, avec son cadencement réel, se fait côté client).
-* **`src/vision/`** : Pipeline de vision par ordinateur, un fichier par étape.
+* **`crates/camera/src/api.rs`** : Routage Axum, page de contrôle (`GET /`), upgrade WebSocket authentifié par jeton (`GET /ws?token=...`), commandes JSON entrantes (`set_monitoring`, `set_detection`, `set_recording`, `capture_reference`), liste (`GET /api/recordings`), téléchargement (`GET /recordings/{filename}`) et suppression (`DELETE /api/recordings/{filename}?token=...`, seule route destructive, authentifiée par le même jeton que le WebSocket) des enregistrements (le fichier `.mjpeg` est servi tel quel ; la relecture, avec son cadencement réel, se fait côté client).
+* **`crates/camera/src/vision/`** : Pipeline de vision par ordinateur, un fichier par étape.
   * **`object_detector.rs`** : `ObjectDetector` (YOLOv8), restreint aux classes personne / chat / chien.
   * **`face_detector.rs`** : `FaceDetectorYuNet`, détection et alignement de visage (recadré en 112x112).
   * **`face_recognition.rs`** : `FaceEmbedder`, empreinte ArcFace / MobileFaceNet et comparaison des identités par similarité cosinus.
   * **`model.rs`** : Chargement ONNX mutualisé par les trois modèles ci-dessus.
   * **`types.rs`** : Types partagés du pipeline (`BoundingBox`, `KnownPerson`).
+  * *(les 3 modèles ONNX vivent dans `crates/camera/models/`)*
   * **`models/`** : Les 3 modèles ONNX embarqués (`yolov8n.onnx`, `face_detection_yunet_2023mar.onnx`, `arcface-mobilefacenet.onnx`).
-* **`src/geometry.rs`** : Calcul d'intersection sur union (IoU), utilitaire partagé entre le tracking (`capture/tracking.rs`) et la détection d'objets/visages (`vision/object_detector.rs`, `vision/face_detector.rs`), pour éviter de dupliquer ce calcul.
-* **`src/config.rs`** : Chargement et structures de `config.toml` (serveur, caméra, détection, e-mail, MQTT).
-* **`src/mail.rs`** : Construction et envoi des alertes e-mail (HTML multipart avec logo et photo de la détection).
-* **`src/retention.rs`** : Tâche de fond qui supprime les enregistrements dépassant la durée de conservation configurée (`[recording] retention_days`), et prédicat partagé `is_recording_file` qui définit ce qui est un enregistrement pour la liste, le téléchargement, la suppression et la purge.
-* **`src/mqtt.rs`** : Connexion à un broker MQTT et publication des événements de détection (nom de caméra, horodatage, statut connu/inconnu) à chaque changement d'état ; fonctionnalité optionnelle (voir `[mqtt]` dans `config.toml`).
-* **`src/util.rs`** : Petits utilitaires transverses (verrouillage de mutex tolérant à l'empoisonnement).
-* **`static/controller.html`** : Interface utilisateur web — flux vidéo, interrupteurs, capture de photo de référence, liste et lecture des enregistrements (relecture calée sur l'horodatage réel des frames).
-* **`assets/logo.svg`** : Logo FoxGuard — affiché dans ce README et embarqué dans le binaire (`include_bytes!`) pour les e-mails d'alerte.
+* **`crates/camera/src/geometry.rs`** : Calcul d'intersection sur union (IoU), utilitaire partagé entre le tracking (`capture/tracking.rs`) et la détection d'objets/visages (`vision/object_detector.rs`, `vision/face_detector.rs`), pour éviter de dupliquer ce calcul.
+* **`crates/camera/src/config.rs`** : Chargement et structures de `config.toml` (serveur, caméra, détection, e-mail, MQTT).
+* **`crates/camera/src/mail.rs`** : Construction et envoi des alertes e-mail (HTML multipart avec logo et photo de la détection).
+* **`crates/camera/src/retention.rs`** : Tâche de fond qui supprime les enregistrements dépassant la durée de conservation configurée (`[recording] retention_days`), et prédicat partagé `is_recording_file` qui définit ce qui est un enregistrement pour la liste, le téléchargement, la suppression et la purge.
+* **`crates/camera/src/mqtt.rs`** : Connexion à un broker MQTT et publication des événements de détection (nom de caméra, horodatage, statut connu/inconnu) à chaque changement d'état ; fonctionnalité optionnelle (voir `[mqtt]` dans `config.toml`).
+* **`crates/camera/src/util.rs`** : Petits utilitaires transverses (verrouillage de mutex tolérant à l'empoisonnement).
+* **`crates/camera/static/controller.html`** : Interface utilisateur web — flux vidéo, interrupteurs, capture de photo de référence, liste et lecture des enregistrements (relecture calée sur l'horodatage réel des frames).
+* **`crates/camera/assets/logo.svg`** : Logo FoxGuard — affiché dans ce README et embarqué dans le binaire (`include_bytes!`) pour les e-mails d'alerte.
 * **`known_faces/`** : Photos de référence pour la reconnaissance faciale, nommées `<nom>_<horodatage>.jpg` (plusieurs fichiers possibles par personne).
 * **`output_record/`** : Enregistrements vidéo `.mjpeg` générés par l'application.
+* **`deploy/camera/`** : `Dockerfile` de l'image Raspberry Pi.
 
 ---
 
@@ -87,7 +105,7 @@ cargo run --release
 ### Construire l'image Docker 
 
 ```bash
-docker build -t foxguard:latest .
+docker build -f deploy/camera/Dockerfile -t foxguard-camera:latest .
 ```
 
 ### Lancer le conteneur avec accès à la caméra locale (/dev/video0)
@@ -100,7 +118,7 @@ docker run -d \
   --device=/dev/video0:/dev/video0 \
   -p 8080:8080 \
   -v $(pwd)/output_record:/app/output_record \
-  foxguard:latest
+  foxguard-camera:latest
 ```
 
 ### Construire l'image pour le raspberry
@@ -152,7 +170,7 @@ docker buildx build --platform linux/arm64 -t jprecigout/foxguard:rpi4 --push .
 sur le Raspberry Pi
 
 ```bash
-docker pull jprecigout/foxguard:rpi4
+docker pull jprecigout/foxguard-camera:rpi4
 ```
 
 ## 🛠️ Modification de la configuration du rapsberry pour activer le pilote V4L2 Legacy
@@ -244,7 +262,7 @@ docker run -d \
   -v /dev:/dev \
   -p 8080:8080 \
   -v $(pwd)/output_record:/app/output_record \
-  foxguard:rpi4
+  foxguard-camera:rpi4
 ```
 ---
 
