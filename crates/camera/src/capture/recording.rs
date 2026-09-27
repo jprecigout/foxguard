@@ -21,6 +21,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use chrono::Local;
+use tracing::info;
 
 /// Écrivain d'un fichier d'enregistrement `output_record/rec_<horodatage>.mjpeg`.
 pub(super) struct RecordingWriter {
@@ -48,7 +49,7 @@ impl RecordingWriter {
             Local::now().format("%Y%m%d_%H%M%S")
         ));
 
-        println!("💾 Début d'enregistrement : {}", filename.display());
+        info!("💾 Début d'enregistrement : {}", filename.display());
 
         Ok(Self {
             file: File::create(&filename)?,

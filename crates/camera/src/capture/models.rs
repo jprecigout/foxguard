@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::mail::Mailer;
 use crate::mqtt::MqttPublisher;
 use crate::vision::{FaceDetectorYuNet, FaceEmbedder, KnownPerson, ObjectDetector};
+use tracing::{error, info, warn};
 
 use super::known_faces::load_known_faces;
 
@@ -39,11 +40,11 @@ impl Models {
         // caméra live (crops de personnes déjà petits, performance critique).
         let face_detector = match FaceDetectorYuNet::new(config.detection.clone(), 640, 640) {
             Ok(detector) => {
-                println!("✅ Modèle YuNet chargé avec succès.");
+                info!("✅ Modèle YuNet chargé avec succès.");
                 Arc::new(Some(detector))
             }
             Err(e) => {
-                eprintln!("❌ Erreur d'initialisation YuNet : {:?}", e);
+                error!("❌ Erreur d'initialisation YuNet : {:?}", e);
                 Arc::new(None)
             }
         };
@@ -64,7 +65,7 @@ impl Models {
                     "known_faces",
                 )))
             } else {
-                eprintln!("⚠️ YuNet ou ArcFace indisponible.");
+                warn!("⚠️ YuNet ou ArcFace indisponible.");
                 Arc::new(Mutex::new(Vec::new()))
             };
 
@@ -74,7 +75,7 @@ impl Models {
         // momentanément injoignable au démarrage n'empêche pas FoxGuard de
         // démarrer.
         let mqtt = if config.mqtt.enabled {
-            println!(
+            info!(
                 "📡 Connexion MQTT activée : {}:{} (topic \"{}\")",
                 config.mqtt.broker_host, config.mqtt.broker_port, config.mqtt.topic
             );

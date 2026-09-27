@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::broadcast;
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
 
 use foxguard_camera::api;
 use foxguard_camera::capture::{self, SharedState};
@@ -21,10 +23,14 @@ use foxguard_camera::retention;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Affichage de la bannière console et de la version
+    // Affichage de la bannière console et de la version.
+    // Volontairement en `println!` : c'est un affichage de démarrage destiné
+    // à la console, pas un événement à journaliser, filtrer ou horodater.
     print_banner();
 
-    println!("🚀 Démarrage du système FoxGuard...");
+    init_tracing();
+
+    info!("🚀 Démarrage du système FoxGuard...");
 
     // Chargement de la configuration
     let config = Config::load("config.toml")?;
@@ -47,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::task::spawn_blocking(move || {
         if let Err(e) = capture::start_camera_loop(camera_config, camera_state) {
-            eprintln!("❌ Erreur critique dans la caméra : {}", e);
+            error!("❌ Erreur critique dans la caméra : {}", e);
         }
     });
 
@@ -66,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
 
-    println!("🚀 Serveur démarré sur http://{}", bind_addr);
+    info!("🚀 Serveur démarré sur http://{}", bind_addr);
 
     // Transmet l'adresse SocketAddr aux extracteurs ConnectInfo
     axum::serve(
@@ -76,6 +82,30 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     Ok(())
+}
+
+/// Initialise la journalisation.
+///
+/// Tout le code applicatif utilise `tracing` plutôt que `println!` /
+/// `eprintln!`, pour deux raisons :
+///
+/// 1. FILTRAGE PAR NIVEAU. Les diagnostics par visage détecté, par personne
+///    suivie et par fenêtre de scan sont précieux pour régler les seuils de
+///    `[detection]`, mais ils noient la console en fonctionnement normal. Ils
+///    sont donc en `debug!` : muets par défaut, réactivables à la demande avec
+///    `RUST_LOG=foxguard_camera=debug`, sans recompiler.
+///
+/// 2. CODE PARALLÈLE. `println!` et `eprintln!` écrivent sur stdout/stderr,
+///    protégés par un verrou global : les tâches Rayon du pipeline de vision
+///    se sérialisaient sur leurs propres messages de diagnostic.
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("foxguard_camera=info,warn"));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .init();
 }
 
 // Affiche le logo ASCII et la version dans la console au démarrage.

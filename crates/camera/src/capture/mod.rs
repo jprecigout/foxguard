@@ -29,6 +29,7 @@ pub use state::SharedState;
 use anyhow::Result;
 use image::RgbImage;
 use std::sync::{Arc, Mutex, mpsc};
+use tracing::info;
 use v4l::buffer::Type;
 use v4l::prelude::*;
 use v4l::video::Capture;
@@ -55,7 +56,7 @@ pub fn start_camera_loop(config: Config, state: Arc<SharedState>) -> Result<()> 
     // sans `unsafe` (type self-référentiel).
     let dev = Device::new(config.camera.device_index)?;
     let fmt = dev.format()?;
-    println!(
+    info!(
         "🎥 Caméra détectée : {}x{} ({:?})",
         fmt.width, fmt.height, fmt.fourcc
     );

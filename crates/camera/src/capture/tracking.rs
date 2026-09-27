@@ -11,6 +11,7 @@ use rayon::prelude::*;
 use std::time::{Duration, Instant};
 
 use image::RgbImage;
+use tracing::{debug, warn};
 
 use crate::mqtt::PersonStatus;
 use crate::vision::{BoundingBox, FaceDetectorYuNet, FaceEmbedder, KnownPerson};
@@ -313,13 +314,13 @@ pub(super) fn process_persons_parallel(
                 Ok(Some(face)) => face,
 
                 Ok(None) => {
-                    println!("🙂 Track #{} : aucun visage exploitable", track_id);
+                    debug!("🙂 Track #{} : aucun visage exploitable", track_id);
 
                     return Some((*track_id, None));
                 }
 
                 Err(e) => {
-                    eprintln!("⚠️ YuNet erreur Track #{} : {:?}", track_id, e);
+                    warn!("⚠️ YuNet erreur Track #{} : {:?}", track_id, e);
 
                     return Some((*track_id, None));
                 }
@@ -330,7 +331,7 @@ pub(super) fn process_persons_parallel(
                 Ok(embedding) => embedding,
 
                 Err(e) => {
-                    eprintln!("⚠️ ArcFace erreur Track #{} : {:?}", track_id, e);
+                    warn!("⚠️ ArcFace erreur Track #{} : {:?}", track_id, e);
 
                     return Some((*track_id, None));
                 }
@@ -352,7 +353,7 @@ pub(super) fn process_persons_parallel(
                 })
                 .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             {
-                println!(
+                debug!(
                     "🔬 Track #{} meilleure similarité brute : {} = {:.3} (seuil={:.2})",
                     track_id, closest_name, closest_sim, threshold
                 );
@@ -360,11 +361,11 @@ pub(super) fn process_persons_parallel(
 
             match &identity {
                 Some((name, similarity)) => {
-                    println!("🎯 Track #{} → {} ({:.3})", track_id, name, similarity);
+                    debug!("🎯 Track #{} → {} ({:.3})", track_id, name, similarity);
                 }
 
                 None => {
-                    println!("❓ Track #{} → inconnu", track_id);
+                    debug!("❓ Track #{} → inconnu", track_id);
                 }
             }
 
@@ -407,7 +408,7 @@ fn apply_recognition_results(
                 track.name = Some(name.clone());
                 track.similarity = similarity;
 
-                println!(
+                debug!(
                     "✅ Track #{} identité mémorisée : {} ({:.3})",
                     track_id, name, similarity
                 );

@@ -7,6 +7,7 @@ use anyhow::Result;
 use image::{ImageFormat, RgbImage};
 use std::sync::{Arc, Mutex, atomic::Ordering, mpsc};
 use std::time::{Duration, Instant};
+use tracing::info;
 use v4l::io::traits::CaptureStream;
 use v4l::prelude::*;
 
@@ -40,7 +41,7 @@ pub(super) fn run(
     let mut recording: Option<RecordingWriter> = None;
     let mut last_email_time = Instant::now() - Duration::from_secs(email_cooldown_secs);
 
-    println!("📹 Boucle Caméra démarrée avec succès.");
+    info!("📹 Boucle Caméra démarrée avec succès.");
 
     loop {
         // Capture du buffer brut depuis V4L2
@@ -125,7 +126,7 @@ pub(super) fn run(
                 let _ = writer.write_frame(&jpeg_bytes);
             }
         } else if recording.is_some() {
-            println!("💾 Arrêt de l'enregistrement.");
+            info!("💾 Arrêt de l'enregistrement.");
             recording = None;
         }
 

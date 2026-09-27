@@ -22,6 +22,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use crate::config::{RECORDINGS_DIR, RecordingConfig};
+use tracing::{error, info, warn};
 
 /// Extensions considérées comme des enregistrements. Tout autre fichier
 /// présent dans le dossier est ignoré : la purge ne doit jamais toucher à
@@ -48,14 +49,14 @@ pub struct CleanupReport {
 /// démarrée du tout.
 pub fn spawn_cleanup_task(config: RecordingConfig) {
     if config.retention_days == 0 {
-        println!("🗂️ Nettoyage automatique des enregistrements désactivé (retention_days = 0).");
+        info!("🗂️ Nettoyage automatique des enregistrements désactivé (retention_days = 0).");
         return;
     }
 
     let max_age = Duration::from_secs(config.retention_days * 24 * 60 * 60);
     let interval = Duration::from_secs(config.cleanup_interval_secs.max(1));
 
-    println!(
+    info!(
         "🗂️ Nettoyage automatique des enregistrements : conservation {} jour(s), passage toutes les {} s.",
         config.retention_days,
         interval.as_secs()
@@ -79,7 +80,7 @@ pub fn spawn_cleanup_task(config: RecordingConfig) {
 
             match result {
                 Ok(Ok(report)) if report.deleted > 0 || report.failed > 0 => {
-                    println!(
+                    info!(
                         "🗂️ Nettoyage : {} enregistrement(s) supprimé(s) ({:.1} Mo libérés), {} échec(s).",
                         report.deleted,
                         report.freed_bytes as f64 / (1024.0 * 1024.0),
@@ -90,13 +91,13 @@ pub fn spawn_cleanup_task(config: RecordingConfig) {
                 // remplir les logs d'un message horaire sans information.
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => {
-                    eprintln!(
+                    error!(
                         "❌ Nettoyage des enregistrements impossible dans '{}' : {}",
                         RECORDINGS_DIR, e
                     );
                 }
                 Err(e) => {
-                    eprintln!("❌ Tâche de nettoyage interrompue : {}", e);
+                    error!("❌ Tâche de nettoyage interrompue : {}", e);
                 }
             }
         }
@@ -166,7 +167,7 @@ fn delete_expired(dir: &Path, max_age: Duration) -> io::Result<CleanupReport> {
 
         match fs::remove_file(&path) {
             Ok(()) => {
-                println!(
+                info!(
                     "🗑️ Enregistrement expiré supprimé : {} ({} jour(s))",
                     path.display(),
                     age.as_secs() / (24 * 60 * 60)
@@ -175,7 +176,7 @@ fn delete_expired(dir: &Path, max_age: Duration) -> io::Result<CleanupReport> {
                 report.freed_bytes += size;
             }
             Err(e) => {
-                eprintln!("⚠️ Suppression impossible pour {} : {}", path.display(), e);
+                warn!("⚠️ Suppression impossible pour {} : {}", path.display(), e);
                 report.failed += 1;
             }
         }

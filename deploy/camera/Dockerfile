@@ -100,6 +100,10 @@ USER foxguard
 # Exposition du port Web / WebSocket
 EXPOSE 8080
 
-ENV RUST_LOG=info
+# Niveau de journalisation (tracing / EnvFilter, voir `init_tracing` dans
+# crates/camera/src/main.rs). `foxguard_camera=debug` ajoute les diagnostics
+# par visage détecté et par personne suivie, utiles pour régler les seuils de
+# [detection] — au prix d'un journal très verbeux.
+ENV RUST_LOG=foxguard_camera=info,warn
 
 CMD [ "./foxguard-camera" ]

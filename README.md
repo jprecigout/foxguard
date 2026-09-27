@@ -173,6 +173,29 @@ curl http://<serveur>:8090/api/events
 
 ---
 
+## 📜 Journalisation
+
+L'application utilise `tracing`. Le niveau se règle par la variable
+d'environnement **`RUST_LOG`** :
+
+```bash
+RUST_LOG=foxguard_camera=debug cargo run -p foxguard-camera
+```
+
+Par défaut (`foxguard_camera=info,warn`), seuls les événements de cycle de vie
+apparaissent : démarrage, visages de référence chargés, clients WebSocket,
+enregistrements, erreurs.
+
+Le niveau `debug` ajoute les diagnostics par visage détecté et par personne
+suivie — notamment la similarité obtenue face à chaque gabarit, qui est le
+moyen le plus direct de régler `face_match_threshold`. Ces messages sont
+volontairement muets par défaut : ils sont émis depuis les tâches parallèles
+du pipeline de vision, à raison de plusieurs par seconde.
+
+Le manager a son propre filtre (`RUST_LOG=foxguard_manager=debug`).
+
+---
+
 ## ⚙️ Configuration (`config.toml`)
 
 Partez de `config-sample.toml` pour créer votre propre `config.toml`.

@@ -12,6 +12,7 @@
 use std::time::Duration;
 
 use rumqttc::{AsyncClient, MqttOptions, QoS};
+use tracing::error;
 
 use crate::config::MqttConfig;
 
@@ -70,7 +71,7 @@ impl MqttPublisher {
                 match event_loop.poll().await {
                     Ok(_notification) => {}
                     Err(e) => {
-                        eprintln!("❌ Connexion MQTT perdue, nouvelle tentative : {:?}", e);
+                        error!("❌ Connexion MQTT perdue, nouvelle tentative : {:?}", e);
                         // Évite de boucler à vide (et de spammer les logs)
                         // pendant qu'un broker est injoignable ; `rumqttc`
                         // retentera la connexion au prochain `poll()`.
@@ -96,7 +97,7 @@ impl MqttPublisher {
         let payload = match serde_json::to_vec(&event) {
             Ok(payload) => payload,
             Err(e) => {
-                eprintln!("❌ Impossible de sérialiser l'événement MQTT : {:?}", e);
+                error!("❌ Impossible de sérialiser l'événement MQTT : {:?}", e);
                 return;
             }
         };
@@ -109,7 +110,7 @@ impl MqttPublisher {
                 .publish(topic, QoS::AtLeastOnce, false, payload)
                 .await
             {
-                eprintln!("❌ Échec de publication MQTT : {:?}", e);
+                error!("❌ Échec de publication MQTT : {:?}", e);
             }
         });
     }

@@ -8,6 +8,7 @@ use tract_ndarray::prelude::*;
 use tract_onnx::prelude::*;
 
 use crate::config::DetectionConfig;
+use tracing::{debug, error, warn};
 
 use super::model::load_onnx_model;
 
@@ -139,7 +140,7 @@ impl FaceDetectorYuNet {
         let outputs = self.model.run(tvec![tensor.into()])?;
 
         if outputs.len() != 12 {
-            eprintln!("❌ YuNet : {} sorties reçues, 12 attendues", outputs.len());
+            error!("❌ YuNet : {} sorties reçues, 12 attendues", outputs.len());
             return Ok(None);
         }
 
@@ -215,7 +216,7 @@ impl FaceDetectorYuNet {
                 || bbox.shape() != [1, expected, 4]
                 || kps.shape() != [1, expected, 10]
             {
-                eprintln!(
+                warn!(
                     "⚠️ Dimensions invalides scale={} cls={:?} obj={:?} bbox={:?} kps={:?}",
                     scale_index,
                     cls.shape(),
@@ -355,7 +356,7 @@ impl FaceDetectorYuNet {
 
         // CANDIDATS
 
-        eprintln!("🔍 YuNet : {} visage(s) candidat(s)", detections.len());
+        debug!("🔍 YuNet : {} visage(s) candidat(s)", detections.len());
 
         if detections.is_empty() {
             return Ok(None);
@@ -429,7 +430,7 @@ impl FaceDetectorYuNet {
         // un visage occupant tout le cadre, mais une photo de référence en
         // gros plan (known_faces/) si, et ne doit pas être rejetée à tort.
         if w > orig_w * 97 / 100 || h > orig_h * 97 / 100 {
-            eprintln!(
+            debug!(
                 "⚠️ YuNet bbox rejeté : {}x{} dans crop {}x{}",
                 w, h, orig_w, orig_h
             );
@@ -479,7 +480,7 @@ impl FaceDetectorYuNet {
                 &mut aligned,
             );
 
-            println!(
+            debug!(
                 "🙂 YuNet : visage {:.1}% | aligné par landmarks",
                 best.score * 100.0
             );
@@ -523,7 +524,7 @@ impl FaceDetectorYuNet {
 
         let aligned = image::imageops::resize(&face_crop, 112, 112, FilterType::Triangle);
 
-        println!(
+        debug!(
             "🙂 YuNet : visage {:.1}% | bbox {}x{} | crop {}x{} | repli crop+resize",
             best.score * 100.0,
             w,

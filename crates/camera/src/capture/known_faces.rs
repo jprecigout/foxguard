@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::util::MutexExt;
 use crate::vision::{FaceDetectorYuNet, FaceEmbedder, KnownPerson};
+use tracing::{debug, error, info, warn};
 
 use super::state::SharedState;
 
@@ -109,7 +110,7 @@ fn detect_face_native_res(
     }
 
     if let Some((score, _)) = &best {
-        println!(
+        debug!(
             "👁️ Meilleure fenêtre retenue pour la photo de référence : score={:.3}",
             score
         );
@@ -139,7 +140,7 @@ pub(super) fn load_known_faces(
     // Création du dossier s'il n'existe pas
     if !path.exists() {
         if let Err(e) = std::fs::create_dir_all(path) {
-            eprintln!("❌ Impossible de créer le dossier {} : {:?}", folder, e);
+            error!("❌ Impossible de créer le dossier {} : {:?}", folder, e);
         }
 
         return Vec::new();
@@ -149,7 +150,7 @@ pub(super) fn load_known_faces(
     let entries = match std::fs::read_dir(path) {
         Ok(entries) => entries,
         Err(e) => {
-            eprintln!("❌ Impossible de lire le dossier {} : {:?}", folder, e);
+            error!("❌ Impossible de lire le dossier {} : {:?}", folder, e);
             return Vec::new();
         }
     };
@@ -176,7 +177,7 @@ pub(super) fn load_known_faces(
         .map(|p| p.name.as_str())
         .collect::<std::collections::HashSet<_>>()
         .len();
-    println!(
+    info!(
         "👥 Base de reconnaissance : {} personne(s) ({} gabarit(s) au total)",
         distinct_people,
         known.len()
@@ -237,7 +238,7 @@ fn load_known_face(
         Ok(img) => img.to_rgb8(),
 
         Err(e) => {
-            eprintln!(
+            error!(
                 "❌ Impossible de charger {} : {:?}",
                 entry_path.display(),
                 e
@@ -256,13 +257,13 @@ fn load_known_face(
         Ok(Some(face)) => face,
 
         Ok(None) => {
-            eprintln!("   ⚠️ Aucun visage détecté dans {}", entry_path.display());
+            warn!("⚠️ Aucun visage détecté dans {}", entry_path.display());
 
             return None;
         }
 
         Err(e) => {
-            eprintln!("   ❌ Erreur YuNet sur {} : {:?}", entry_path.display(), e);
+            error!("❌ Erreur YuNet sur {} : {:?}", entry_path.display(), e);
 
             return None;
         }
@@ -273,7 +274,7 @@ fn load_known_face(
         Ok(embedding) => embedding,
 
         Err(e) => {
-            eprintln!("   ❌ Erreur ArcFace pour {} : {:?}", name, e);
+            error!("❌ Erreur ArcFace pour {} : {:?}", name, e);
 
             return None;
         }
@@ -281,7 +282,7 @@ fn load_known_face(
 
     // Vérification de l'embedding
     if embedding.is_empty() {
-        eprintln!("   ❌ Embedding vide pour {}", name);
+        error!("❌ Embedding vide pour {}", name);
 
         return None;
     }
@@ -290,10 +291,7 @@ fn load_known_face(
 
     // Vérification de la norme
     if !norm.is_finite() || norm < 1e-6 {
-        eprintln!(
-            "   ❌ Embedding invalide pour {} (norme = {:.6})",
-            name, norm
-        );
+        error!("❌ Embedding invalide pour {} (norme = {:.6})", name, norm);
 
         return None;
     }
@@ -306,8 +304,8 @@ fn load_known_face(
     // s'entrelaçaient entre threads, et on lisait le fichier d'une photo suivi
     // du nom d'une AUTRE. De quoi croire à une confusion d'identités alors que
     // le chargement était correct.
-    println!(
-        "   ✅ Visage de référence chargé : {} → {}",
+    info!(
+        "✅ Visage de référence chargé : {} → {}",
         entry_path.display(),
         name
     );
@@ -346,7 +344,7 @@ pub(super) fn try_capture_reference(
         .collect();
 
     if safe_name.is_empty() {
-        eprintln!(
+        warn!(
             "⚠️ Nom de référence invalide reçu pour la capture : {:?}",
             name
         );
@@ -370,7 +368,7 @@ pub(super) fn try_capture_reference(
     if img.write_to(&mut cursor, ImageFormat::Jpeg).is_ok()
         && std::fs::write(&path, &encoded).is_ok()
     {
-        println!(
+        info!(
             "📸 Photo de référence capturée depuis la webcam pour '{}' → {}",
             safe_name, path
         );
@@ -395,14 +393,14 @@ pub(super) fn try_capture_reference(
                     .len();
                 let total = fresh.len();
                 *known_people_reload.lock_or_recover() = fresh;
-                println!(
+                info!(
                     "🔄 Base de reconnaissance rechargée : {} personne(s) ({} gabarit(s) au total).",
                     distinct, total
                 );
             }
         });
     } else {
-        eprintln!(
+        error!(
             "❌ Échec de sauvegarde de la photo de référence pour '{}'",
             safe_name
         );

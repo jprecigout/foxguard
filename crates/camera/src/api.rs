@@ -23,6 +23,7 @@ use std::sync::{
 };
 use tokio::sync::broadcast::error::RecvError;
 use tower_http::services::ServeDir;
+use tracing::{error, info, warn};
 
 use crate::capture::SharedState;
 use crate::config::RECORDINGS_DIR;
@@ -154,7 +155,7 @@ async fn delete_recording_handler(
     let is_authorized = auth.token.as_deref() == Some(state.api_token.as_str());
 
     if !is_authorized {
-        println!("⚠️ Tentative de suppression d'enregistrement rejetée (Token invalide).");
+        warn!("⚠️ Tentative de suppression d'enregistrement rejetée (Token invalide).");
         return StatusCode::UNAUTHORIZED;
     }
 
@@ -166,12 +167,12 @@ async fn delete_recording_handler(
 
     match std::fs::remove_file(&filepath) {
         Ok(()) => {
-            println!("🗑️ Enregistrement supprimé : {}", filepath.display());
+            info!("🗑️ Enregistrement supprimé : {}", filepath.display());
             StatusCode::NO_CONTENT
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
         Err(e) => {
-            eprintln!(
+            error!(
                 "❌ Suppression impossible pour {} : {}",
                 filepath.display(),
                 e
@@ -199,14 +200,14 @@ pub async fn ws_handler(
     };
 
     if !is_authorized {
-        println!("⚠️ Tentative de connexion WebSocket rejetée (Token invalide).");
+        warn!("⚠️ Tentative de connexion WebSocket rejetée (Token invalide).");
         return (StatusCode::UNAUTHORIZED, "Accès refusé").into_response();
     }
 
     // Génération d'un ID unique pour identifier ce client
     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
 
-    println!(
+    info!(
         "✅ [WS] Nouveau client connecté #{} (IP: {})",
         client_id, addr
     );
@@ -260,7 +261,7 @@ pub async fn handle_socket(
                         state_cmd
                             .recording_enabled
                             .store(enabled, Ordering::Relaxed);
-                        println!(
+                        info!(
                             "🛡️ [WS Client #{}] A modifié la surveillance générale : {}",
                             client_id, enabled
                         );
@@ -269,7 +270,7 @@ pub async fn handle_socket(
                         state_cmd
                             .detection_enabled
                             .store(enabled, Ordering::Relaxed);
-                        println!(
+                        info!(
                             "🔍 [WS Client #{}] A modifié la détection : {}",
                             client_id, enabled
                         );
@@ -278,7 +279,7 @@ pub async fn handle_socket(
                         state_cmd
                             .recording_enabled
                             .store(enabled, Ordering::Relaxed);
-                        println!(
+                        info!(
                             "💾 [WS Client #{}] A modifié l'enregistrement : {}",
                             client_id, enabled
                         );
@@ -287,7 +288,7 @@ pub async fn handle_socket(
                         if let Ok(mut pending) = state_cmd.pending_enrollment.lock() {
                             *pending = Some(name.clone());
                         }
-                        println!(
+                        info!(
                             "📸 [WS Client #{}] Capture de photo de référence demandée pour : {}",
                             client_id, name
                         );
@@ -304,7 +305,7 @@ pub async fn handle_socket(
     }
 
     // 🔴 Lors de la déconnexion
-    println!("❌ [WS] Client déconnecté #{} (IP: {})", client_id, addr);
+    info!("❌ [WS] Client déconnecté #{} (IP: {})", client_id, addr);
 }
 
 /// Helper pour instancier le routeur Axum

@@ -6,6 +6,7 @@ use lettre::message::header::{ContentDisposition, ContentId, ContentType};
 use lettre::message::{MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+use tracing::{error, info};
 
 use crate::config::EmailConfig;
 
@@ -32,7 +33,7 @@ impl Mailer {
         // Exécution asynchrone pour ne pas bloquer le flux vidéo de la caméra
         tokio::spawn(async move {
             if let Err(e) = Self::dispatch_email(config, image_bytes).await {
-                eprintln!("❌ Erreur lors de l'envoi de l'email : {}", e);
+                error!("❌ Erreur lors de l'envoi de l'email : {}", e);
             }
         });
     }
@@ -178,7 +179,7 @@ impl Mailer {
                 .build();
 
         mailer.send(email).await?;
-        println!("📧 E-mail d'alerte avec photo HTML envoyé avec succès !");
+        info!("📧 E-mail d'alerte avec photo HTML envoyé avec succès !");
 
         Ok(())
     }

@@ -7,6 +7,7 @@
 use std::sync::{Arc, Mutex, mpsc};
 
 use image::RgbImage;
+use tracing::error;
 
 use crate::mqtt::MqttPublisher;
 use crate::util::MutexExt;
@@ -64,7 +65,7 @@ pub(super) fn spawn_recognition_worker(
                 Ok(boxes) => boxes,
 
                 Err(e) => {
-                    eprintln!("❌ Erreur YOLO : {:?}", e);
+                    error!("❌ Erreur YOLO : {:?}", e);
                     continue;
                 }
             };
