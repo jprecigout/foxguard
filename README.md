@@ -158,12 +158,38 @@ peut contenir des identifiants). `[mqtt] broker_host` et l'URL de base sont
 obligatoires — cette dernière peut venir de la variable d'environnement
 `DATABASE_URL`, qui prend le pas sur le fichier.
 
-Le `compose.yml` fournit PostgreSQL et Mosquitto. Renseignez le mot de passe
-dans un fichier `.env` à côté du compose :
+Le `compose.yml` fournit PostgreSQL, et Mosquitto **en option**. Renseignez
+d'abord le mot de passe de la base dans un `.env` à côté du compose :
 
 ```bash
 echo "POSTGRES_PASSWORD=$(openssl rand -base64 24)" > deploy/server/.env
-docker compose -f deploy/server/compose.yml up -d
+```
+
+**Si vous avez déjà un broker MQTT** (souvent le cas avec Home Assistant ou une
+pile Grafana/InfluxDB), renseignez simplement son adresse dans `broker_host` de
+`manager-config.toml`, puis :
+
+```bash
+docker compose -f deploy/server/compose.yml up -d --build
+```
+
+**Si vous n'en avez pas**, ajoutez le profil qui démarre Mosquitto :
+
+```bash
+docker compose --profile broker -f deploy/server/compose.yml up -d --build
+```
+
+Le broker n'est pas démarré par défaut pour éviter un conflit sur le port 1883
+avec celui que vous avez peut-être déjà.
+
+Pour un broker tournant sur l'HÔTE du serveur (et non dans ce compose), mettez
+`broker_host = "host.docker.internal"`.
+
+Vérification :
+
+```bash
+docker compose -f deploy/server/compose.yml logs manager
+curl http://localhost:8090/api/events
 ```
 
 Le `compose.yml` démarre aussi un broker Mosquitto ; retirez ce service si

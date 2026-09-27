@@ -30,11 +30,18 @@ services:
       timeout: 5s
       retries: 10
 
-  # Broker MQTT partagé : les caméras y publient, le manager y lit.
+  # Broker MQTT OPTIONNEL : les caméras y publient, le manager y lit.
   #
-  # À retirer si vous disposez déjà d'un broker sur le réseau (dans ce cas,
-  # renseignez simplement son adresse dans `broker_host` de manager-config.toml).
+  # Derrière un profil, donc NON démarré par défaut : beaucoup d'installations
+  # domestiques ont déjà un broker (souvent aux côtés de Home Assistant ou
+  # d'une pile Grafana/InfluxDB). En démarrer un second entrerait en conflit
+  # sur le port 1883.
+  #
+  #   - vous avez déjà un broker : ne rien faire, renseignez seulement son
+  #     adresse dans `broker_host` de manager-config.toml ;
+  #   - vous n'en avez pas : ajoutez `--profile broker` à la commande.
   mosquitto:
+    profiles: ["broker"]
     image: eclipse-mosquitto:2
     restart: unless-stopped
     ports:
@@ -49,9 +56,11 @@ services:
       dockerfile: deploy/server/Dockerfile
     image: foxguard-manager:latest
     restart: unless-stopped
+    # Seule la base est une dépendance DURE : le manager refuse de démarrer
+    # sans elle. Le broker, lui, peut être injoignable au lancement — la
+    # connexion est paresseuse et se rétablit toute seule — et il n'est pas
+    # forcément géré par ce compose (voir le service `mosquitto` ci-dessus).
     depends_on:
-      mosquitto:
-        condition: service_started
       postgres:
         condition: service_healthy
     environment:
@@ -60,6 +69,11 @@ services:
       DATABASE_URL: postgres://foxguard:${POSTGRES_PASSWORD:?mot de passe PostgreSQL requis}@postgres:5432/foxguard
     ports:
       - "8090:8090"
+    # Permet d'atteindre un broker qui tourne sur l'HÔTE (et non dans ce
+    # compose) via `broker_host = "host.docker.internal"`. Sans effet si le
+    # broker est ailleurs sur le réseau.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       # Configuration du manager, montée en lecture seule.
       - ../../manager-config.toml:/app/manager-config.toml:ro

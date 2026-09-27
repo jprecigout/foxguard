@@ -33,8 +33,17 @@ RUN mkdir -p crates/camera/src crates/manager/src crates/protocol/src \
 RUN cargo build --release --locked -p foxguard-manager
 RUN rm -rf crates/camera/src crates/manager/src crates/protocol/src
 
+# Copie du code source réel.
+#
+# `touch` INDISPENSABLE : `COPY` préserve les dates de modification du
+# contexte de build, donc les sources arrivent plus ANCIENNES que les
+# artefacts du build de cache ci-dessus. Cargo les considérerait à jour et ne
+# recompilerait rien — l'image embarquerait alors le binaire factice
+# `fn main() {}`, qui se termine immédiatement sans le moindre message.
 COPY crates ./crates
+RUN find crates -name '*.rs' -exec touch {} +
 
+# Compilation finale du binaire
 RUN cargo build --release -p foxguard-manager
 
 # ==========================================
@@ -60,9 +69,11 @@ RUN mkdir -p /app/ui/dist && chown -R foxguard:foxguard /app
 
 COPY --from=builder --chown=foxguard:foxguard /app/target/release/foxguard-manager /app/foxguard-manager
 
-# Bundle de l'interface React. Tant que `ui/` n'est pas construit, ce dossier
-# reste vide et le manager se contente de servir son API.
-COPY --chown=foxguard:foxguard ui/dist* /app/ui/dist/
+# Le dossier de l'interface est créé VIDE ci-dessus : le manager se contente
+# alors de servir son API, `/` retournant 404. Quand `ui/` existera, c'est une
+# étape de build Node qui produira le bundle et le copiera ici — pas un `COPY`
+# depuis l'hôte, qui dépendrait d'un `npm run build` lancé à la main (et que
+# le `.dockerignore` exclut volontairement du contexte).
 
 USER foxguard
 

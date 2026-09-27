@@ -13,3 +13,4 @@ camera-config.toml
 # Interface React (foxguard-ui)
 ui/node_modules/
 ui/dist/
+deploy/server/.env
