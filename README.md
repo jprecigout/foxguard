@@ -1,4 +1,4 @@
-# <img src="assets/logo.svg" width="40" height="40" alt="Logo FoxGuard"> FoxGuard
+# <img src="crates/camera/assets/logo.svg" width="40" height="40" alt="Logo FoxGuard"> FoxGuard
 
 **FoxGuard** est un système de vidéosurveillance intelligent propulsé par l'IA et développé en Rust.
 
@@ -10,7 +10,7 @@
 * **Tracking des personnes** : Suivi de chaque personne détectée d'une frame à l'autre (association par IoU), pour ne relancer la reconnaissance faciale que lorsque c'est nécessaire (nouvelle personne, déplacement significatif, ou périodiquement).
 * **Reconnaissance faciale** : Détection et alignement du visage (YuNet, recadré en 112x112) puis extraction d'une empreinte faciale (ArcFace / MobileFaceNet), comparée par similarité cosinus à une base de visages connus.
 * **Capture de photo de référence depuis l'interface web** : Un bouton « Capturer » enregistre la frame webcam courante comme nouveau gabarit de référence pour un nom donné. Plusieurs captures (angles/poses différents) s'accumulent pour la même personne au lieu de se remplacer, ce qui rend la reconnaissance plus fiable (voir `known_faces/`).
-* **Interface Web de Contrôle** : Panneau de contrôle moderne intégré et servi via le framework web Axum (`static/controller.html`).
+* **Interface Web de Contrôle** : Panneau de contrôle moderne intégré et servi via le framework web Axum (`crates/camera/static/controller.html`).
 * **Streaming Vidéo en Direct** : Diffusion par WebSockets (`/ws`) avec une optimisation de type *pass-through* (transmission directe du buffer MJPEG sans décodage/ré-encodage CPU superflu lorsque la détection est inactive).
 * **Gestion des enregistrements** : Suppression manuelle depuis l'interface web (bouton par enregistrement, avec confirmation), et purge automatique des enregistrements dépassant la durée de conservation configurée (voir `[recording]`).
 * **Enregistrement Vidéo** : Sauvegarde des flux en fichiers `.mjpeg` (dossier `output_record/`), activable dynamiquement depuis l'interface web, avec liste et relecture des enregistrements directement dans l'UI. Chaque frame est horodatée à l'enregistrement, pour une relecture fidèle au FPS réel de capture (qui peut varier, par exemple en basse luminosité) plutôt qu'à un débit fixe supposé.
@@ -86,7 +86,7 @@ de travail.
   * **`mod.rs`** : `start_camera_loop` — ouverture du périphérique V4L2, chargement des modèles et de la base de visages connus, démarrage du worker de reconnaissance, puis boucle de capture.
   * **`state.rs`** : `SharedState`, état partagé avec le serveur HTTP/WebSocket (surveillance/enregistrement actifs, jeton API, canal de diffusion, capture de référence en attente).
   * **`models.rs`** : Chargement des modèles IA (YOLO, YuNet, ArcFace) et de la base de visages connus au démarrage (`Models`).
-  * **`tracking.rs`** : Suivi des personnes d'une frame à l'autre par IoU (`PersonTracker`) et reconnaissance faciale parallèle (YuNet + ArcFace, parallélisée avec Rayon). Détecte aussi, sans effet de bord, les *changements* d'état de reconnaissance de chaque personne suivie (inconnue ↔ identifiée), pour piloter la publication MQTT (voir `worker.rs` et `src/mqtt.rs`).
+  * **`tracking.rs`** : Suivi des personnes d'une frame à l'autre par IoU (`PersonTracker`) et reconnaissance faciale parallèle (YuNet + ArcFace, parallélisée avec Rayon). Détecte aussi, sans effet de bord, les *changements* d'état de reconnaissance de chaque personne suivie (inconnue ↔ identifiée), pour piloter la publication MQTT (voir `worker.rs` et `../mqtt.rs`).
   * **`known_faces.rs`** : Chargement (parallélisé avec Rayon) et rechargement à chaud du dossier `known_faces/`, et capture de photo de référence depuis l'UI web (rechargement en tâche de fond via `tokio::task::spawn_blocking`).
   * **`worker.rs`** : Thread d'arrière-plan (`tokio::task::spawn_blocking`) qui exécute le pipeline YOLO → tracking → reconnaissance, et publie sur MQTT (si activé) les changements d'état retournés par `tracking.rs`.
   * **`overlay.rs`** : Incrustation des bounding-box et de leur légende sur la frame vidéo.
@@ -100,8 +100,7 @@ de travail.
   * **`face_recognition.rs`** : `FaceEmbedder`, empreinte ArcFace / MobileFaceNet et comparaison des identités par similarité cosinus.
   * **`model.rs`** : Chargement ONNX mutualisé par les trois modèles ci-dessus.
   * **`types.rs`** : Types partagés du pipeline (`BoundingBox`, `KnownPerson`).
-  * *(les 3 modèles ONNX vivent dans `crates/camera/models/`)*
-  * **`models/`** : Les 3 modèles ONNX embarqués (`yolov8n.onnx`, `face_detection_yunet_2023mar.onnx`, `arcface-mobilefacenet.onnx`).
+* **`crates/camera/models/`** : Les 3 modèles ONNX embarqués (`yolov8n.onnx`, `face_detection_yunet_2023mar.onnx`, `arcface-mobilefacenet.onnx`).
 * **`crates/camera/src/geometry.rs`** : Calcul d'intersection sur union (IoU), utilitaire partagé entre le tracking (`capture/tracking.rs`) et la détection d'objets/visages (`vision/object_detector.rs`, `vision/face_detector.rs`), pour éviter de dupliquer ce calcul.
 * **`crates/camera/src/config.rs`** : Chargement et structures de `config.toml` (serveur, caméra, détection, e-mail, MQTT).
 * **`crates/camera/src/mail.rs`** : Construction et envoi des alertes e-mail (HTML multipart avec logo et photo de la détection).
@@ -132,15 +131,40 @@ caméras publient et expose leur historique :
 | `GET /api/cameras` | caméras ayant émis au moins un événement encore en mémoire |
 | `GET /` | bundle de l'interface React (`[server] ui_dir`) |
 
-Configuration : copier `manager-sample.toml` en `manager.toml`. Seul
-`[mqtt] broker_host` est obligatoire.
+### Déploiement
+
+Copier `manager-sample.toml` en `manager.toml` (gitignoré, il peut contenir
+les identifiants du broker). Seul `[mqtt] broker_host` est obligatoire. Puis,
+depuis la racine du dépôt :
 
 ```bash
 docker compose -f deploy/server/compose.yml up -d
 ```
 
 Le `compose.yml` démarre aussi un broker Mosquitto ; retirez ce service si
-vous en avez déjà un sur le réseau.
+vous en avez déjà un sur le réseau, et renseignez son adresse dans
+`broker_host`.
+
+### Brancher les caméras dessus
+
+Rien n'arrive tant que les caméras ne publient pas : dans le `config.toml` de
+CHAQUE Raspberry Pi, activez la section `[mqtt]` et pointez-la vers le broker.
+
+```toml
+[camera]
+name = "salon"          # distingue les installations dans les événements
+
+[mqtt]
+enabled = true          # désactivé par défaut
+broker_host = "192.168.1.50"
+topic = "foxguard/detections"   # doit correspondre au `topic` du manager
+```
+
+Vérification une fois les deux côtés démarrés :
+
+```bash
+curl http://<serveur>:8090/api/events
+```
 
 > **État actuel** : squelette fonctionnel. La chaîne caméra → MQTT → manager →
 > HTTP marche de bout en bout, mais l'historique est **volatile** (perdu au
@@ -155,7 +179,7 @@ Partez de `config-sample.toml` pour créer votre propre `config.toml`.
 
 * **`[server]`** : `host`, `port`, `api_token` (jeton exigé en paramètre `?token=` pour se connecter au WebSocket).
 * **`[camera]`** : `device_index` (index du périphérique V4L2, ex. `0` pour `/dev/video0`), `name` (nom de la caméra inclus dans les événements MQTT, optionnel — `"foxguard"` par défaut).
-* **`[detection]`** : `enabled` (surveillance active au démarrage), chemins des 3 modèles ONNX (`model_path`, `model_detect_face_path`, `model_face_path`, tous dans `src/vision/models/`), tailles d'entrée (`input_size` pour YOLO, `input_face_size` pour ArcFace), `confidence_threshold` (seuil de détection YOLO) et `email_cooldown_secs`.
+* **`[detection]`** : `enabled` (surveillance active au démarrage), chemins des 3 modèles ONNX (`model_path`, `model_detect_face_path`, `model_face_path`, tous dans `crates/camera/models/`), tailles d'entrée (`input_size` pour YOLO, `input_face_size` pour ArcFace), `confidence_threshold` (seuil de détection YOLO) et `email_cooldown_secs`.
 * **`[email]`** : `enabled`, identifiants SMTP (`smtp_server`, `smtp_user`, `smtp_password`), `from_address`, `to_address`.
 * **`[recording]`** *(optionnel, section entière absente = 7 jours)* : `retention_days` (durée de conservation des enregistrements, en jours — **`0` désactive entièrement la suppression automatique**) et `cleanup_interval_secs` (intervalle entre deux passages, `3600` par défaut). Un passage a aussi lieu au démarrage, pour purger ce qui a expiré pendant un arrêt prolongé. L'âge est déterminé par la date de dernière modification du fichier, jamais par son nom : un enregistrement en cours d'écriture ne peut donc pas être supprimé sous la caméra.
 * **`[mqtt]`** *(optionnel, section entière absente = désactivé)* : `enabled`, `broker_host`, `broker_port` (`1883` par défaut), `username`/`password` (authentification optionnelle, pas de TLS), `topic` (`"foxguard/detections"` par défaut). Publie un message JSON à chaque changement d'état de reconnaissance, par exemple :
@@ -168,15 +192,30 @@ Partez de `config-sample.toml` pour créer votre propre `config.toml`.
 
 ## 🛠️ Compilation et Lancement
 
-Pour lancer l'application en mode optimisé (recommandé pour les performances de l'inférence IA) :
+Le dépôt étant un workspace, chaque composant se lance avec `-p`. En mode
+optimisé (recommandé pour les performances de l'inférence IA) :
 
 ```bash
-cargo run --release
+cargo run --release -p foxguard-camera
 ```
+
+⚠️ **Depuis la racine du dépôt** : les chemins de `config.toml` (modèles ONNX,
+dossiers de données) sont relatifs au répertoire de travail.
+
+Le manager, lui, se lance sur le serveur annexe — pas sur le Raspberry Pi :
+
+```bash
+cargo run --release -p foxguard-manager
+```
+
+Il lit `manager.toml` (modèle : `manager-sample.toml`).
 
 ---
 
-## 🚀 Commande de Build et Lancement Docker
+## 🚀 Docker — image de la caméra (Raspberry Pi)
+
+Cette section ne concerne que `foxguard-camera`. Pour le manager, qui tourne
+sur le serveur annexe, voir la section « Le manager » plus haut.
 
 ### Construire l'image Docker 
 
@@ -194,8 +233,25 @@ docker run -d \
   --device=/dev/video0:/dev/video0 \
   -p 8080:8080 \
   -v $(pwd)/output_record:/app/output_record \
+  -v $(pwd)/known_faces:/app/known_faces \
   foxguard-camera:latest
 ```
+
+`known_faces/` est monté lui aussi : sans cela, les photos de référence
+capturées depuis l'interface web vivent dans le système de fichiers du
+conteneur et disparaissent à sa recréation.
+
+> **⚠️ Droits des dossiers montés.** Le conteneur tourne sous un utilisateur
+> non-root d'UID **10001** (voir `deploy/camera/Dockerfile`), alors qu'un
+> dossier créé sur l'hôte appartient à votre utilisateur. Sans ajustement, le
+> conteneur ne peut rien y écrire et l'activation de la surveillance échoue
+> avec `Permission denied (os error 13)`. Préparez les dossiers une fois pour
+> toutes avant le premier lancement :
+>
+> ```bash
+> mkdir -p output_record known_faces
+> sudo chown -R 10001:10001 output_record known_faces
+> ```
 
 ### Construire l'image pour le raspberry
 
@@ -221,7 +277,10 @@ Option 1 : Sans utilisation de Docker Hub ou GitHub Container Registry
 1. Buildez et sauvegardez l'image dans un fichier .tar
 
 ```bash
-docker buildx build --platform linux/arm64 -t foxguard:rpi4 --output type=docker,dest=foxguard_rpi4.tar .
+docker buildx build --platform linux/arm64 \
+  -f deploy/camera/Dockerfile \
+  -t foxguard-camera:rpi4 \
+  --output type=docker,dest=foxguard_rpi4.tar .
 ```
 
 1. Copiez le fichier sur le Raspberry Pi :
@@ -240,7 +299,10 @@ docker load -i foxguard_rpi4.tar
 Option 2 : Publier sur Docker Hub
 
 ```bash
-docker buildx build --platform linux/arm64 -t jprecigout/foxguard:rpi4 --push .
+docker buildx build --platform linux/arm64 \
+  -f deploy/camera/Dockerfile \
+  -t jprecigout/foxguard-camera:rpi4 \
+  --push .
 ```
 
 sur le Raspberry Pi
@@ -338,13 +400,23 @@ docker run -d \
   -v /dev:/dev \
   -p 8080:8080 \
   -v $(pwd)/output_record:/app/output_record \
+  -v $(pwd)/known_faces:/app/known_faces \
   foxguard-camera:rpi4
 ```
+
+Mêmes remarques que ci-dessus sur le montage de `known_faces/` et sur les
+droits des dossiers (`sudo chown -R 10001:10001 output_record known_faces`).
 ---
 
 ## 🌐 Utilisation de l'Interface Web
 
-Ouvrez votre navigateur web et rendez-vous sur l'adresse du serveur (par exemple : http://localhost:8080 ou http://foxguard.local:8080).
+Chaque caméra embarque **sa propre** interface, servie directement par le
+Raspberry Pi. Elle reste le poste de pilotage d'une caméra donnée — et le
+secours qui fonctionne encore quand le serveur annexe est en panne ou
+injoignable. L'interface d'ENSEMBLE (plusieurs caméras, historique agrégé)
+sera celle du manager, à venir (voir `ui/README.md`).
+
+Ouvrez votre navigateur web et rendez-vous sur l'adresse de la caméra (par exemple : http://localhost:8080 ou http://foxguard.local:8080).
 
 Le flux vidéo s'établit automatiquement via WebSocket.
 
