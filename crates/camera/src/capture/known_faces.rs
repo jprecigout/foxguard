@@ -232,8 +232,6 @@ fn load_known_face(
 
     let name = person_name_from_stem(stem);
 
-    println!("🔄 Chargement du visage connu : {}", entry_path.display());
-
     // Chargement de la photo
     let img = match image::open(entry_path) {
         Ok(img) => img.to_rgb8(),
@@ -300,7 +298,19 @@ fn load_known_face(
         return None;
     }
 
-    println!("   ✅ Visage connu chargé : {}", name);
+    // UNE SEULE ligne par photo, portant à la fois le fichier et le nom qui en
+    // a été déduit.
+    //
+    // Le chargement est parallélisé (voir `load_known_faces`) : deux messages
+    // distincts — « chargement de <fichier> » puis « chargé : <nom> » —
+    // s'entrelaçaient entre threads, et on lisait le fichier d'une photo suivi
+    // du nom d'une AUTRE. De quoi croire à une confusion d'identités alors que
+    // le chargement était correct.
+    println!(
+        "   ✅ Visage de référence chargé : {} → {}",
+        entry_path.display(),
+        name
+    );
 
     Some(KnownPerson { name, embedding })
 }
