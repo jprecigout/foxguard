@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="fr">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FoxGuard — Direct</title>
+
+    <!--
+      VUE EN DIRECT SEULE, servie par la caméra.
+
+      Pourquoi cette page existe, alors que `controller.html` affiche déjà le
+      direct : l'interface du manager (voir `ui/`) donne accès au direct de
+      chaque caméra, mais elle est servie par une AUTRE ORIGINE. Elle ne peut
+      donc pas ouvrir elle-même le WebSocket de la caméra — et quand bien
+      même, il faudrait lui confier le jeton d'API de chaque caméra, c'est-à-
+      dire le recopier dans une base puis dans une page web. Ce serait une
+      dégradation nette du modèle de sécurité pour afficher une image.
+
+      La caméra sert donc elle-même sa vue en direct, que le manager affiche
+      dans un cadre — exactement comme pour les clips (voir
+      `clip-player.html`). Le jeton ne quitte jamais la caméra.
+
+      Cette page est volontairement RÉDUITE au direct : pas d'interrupteur, pas
+      de capture, pas de suppression. Le manager est en lecture seule, et le
+      pilotage d'une caméra reste sur son interface complète.
+    -->
+    <style>
+        :root {
+            --bg: #121212;
+            --border: #333;
+            --text: #e0e0e0;
+            --muted: #8a8a8a;
+            --accent-red: #e53935;
+            --ok: #43a047;
+            color-scheme: dark;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            height: 100%;
+        }
+
+        body {
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg);
+            color: var(--text);
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            min-height: 0;
+        }
+
+        img,
+        canvas {
+            max-width: 100%;
+            max-height: 100%;
+            display: block;
+            background: #000;
+        }
+
+        .status {
+            color: var(--muted);
+            font-size: 0.9rem;
+            text-align: center;
+            padding: 0 16px;
+        }
+
+        /* Pastille d'état, reprise de l'interface complète. */
+        .badge {
+            position: absolute;
+            top: 10px;
+            right: 12px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 10px;
+            border-radius: 999px;
+            background: rgba(0, 0, 0, 0.6);
+            color: var(--muted);
+            font-size: 0.7rem;
+            letter-spacing: 0.04em;
+            pointer-events: none;
+        }
+
+        .dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--accent-red);
+        }
+
+        .dot.connected {
+            background: var(--ok);
+        }
+
+        [hidden] {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+    <main>
+        <p class="status" id="status">Connexion au flux vidéo…</p>
+        <canvas id="canvas" hidden></canvas>
+        <img id="image" alt="Flux vidéo en direct" hidden>
+        <span class="badge" id="badge" hidden><span class="dot" id="dot"></span><span id="codec"></span></span>
+    </main>
+
+    <script>
+        // Le jeton est injecté par la caméra au moment de servir la page (voir
+        // `live_handler` dans src/api.rs) : il ne transite jamais par le
+        // manager, qui n'a aucune raison de le connaître.
+        const API_TOKEN = "__FOXGUARD_API_TOKEN__";
+
+        const statusEl = document.getElementById('status');
+        const canvas = document.getElementById('canvas');
+        const image = document.getElementById('image');
+        const badge = document.getElementById('badge');
+        const dot = document.getElementById('dot');
+        const codecEl = document.getElementById('codec');
+
+        let socket = null;
+        let decoder = null;
+
+        /** Vrai si ce navigateur sait décoder du H.264 lui-même. */
+        function supportsWebCodecs() {
+            return typeof window.VideoDecoder === 'function'
+                && typeof window.EncodedVideoChunk === 'function';
+        }
+
+        function show(kind) {
+            const h264 = kind === 'h264';
+
+            canvas.hidden = !h264;
+            image.hidden = h264;
+            statusEl.hidden = true;
+
+            codecEl.textContent = h264 ? 'H.264' : 'MJPEG';
+            dot.className = 'dot connected';
+            badge.hidden = false;
+        }
+
+        function disconnected() {
+            statusEl.textContent = 'Reconnexion au flux…';
+            statusEl.hidden = false;
+            canvas.hidden = true;
+            image.hidden = true;
+            dot.className = 'dot';
+        }
+
+        /**
+         * Démarre le direct : H.264 si la caméra l'encode ET si le navigateur
+         * sait le décoder, MJPEG sinon.
+         *
+         * Même logique que l'interface complète (`controller.html`), et pour
+         * la même raison : le MJPEG reste le repli qui marche partout.
+         */
+        async function start() {
+            if (supportsWebCodecs()) {
+                try {
+                    const response = await fetch('/api/capabilities');
+
+                    if (response.ok && (await response.json()).h264) {
+                        connectH264();
+                        return;
+                    }
+                } catch (err) {
+                    console.warn('Capacités de la caméra indisponibles :', err);
+                }
+            }
+
+            connectMjpeg();
+        }
+
+        /** Direct en H.264, décodé par le navigateur (voir `crate::api`). */
+        function connectH264() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            socket = new WebSocket(
+                `${protocol}//${window.location.host}/ws/h264?token=${API_TOKEN}`
+            );
+            socket.binaryType = 'arraybuffer';
+
+            const context = canvas.getContext('2d');
+            let fallenBack = false;
+
+            const fallBack = (reason) => {
+                if (fallenBack) return;
+                fallenBack = true;
+
+                console.warn('Flux H.264 abandonné, repli sur MJPEG :', reason);
+
+                if (decoder) {
+                    try { decoder.close(); } catch (_) { /* déjà fermé */ }
+                    decoder = null;
+                }
+
+                try { socket.close(); } catch (_) { /* déjà fermée */ }
+                connectMjpeg();
+            };
+
+            socket.onmessage = (event) => {
+                if (typeof event.data === 'string') {
+                    let announcement;
+
+                    try {
+                        announcement = JSON.parse(event.data);
+                    } catch (err) {
+                        fallBack(err);
+                        return;
+                    }
+
+                    if (announcement.type !== 'config') return;
+
+                    decoder = new VideoDecoder({
+                        output: (frame) => {
+                            if (canvas.width !== frame.displayWidth) {
+                                canvas.width = frame.displayWidth;
+                                canvas.height = frame.displayHeight;
+                            }
+
+                            context.drawImage(frame, 0, 0);
+                            // Obligatoire : une VideoFrame retient de la
+                            // mémoire graphique que le ramasse-miettes ne
+                            // libère pas.
+                            frame.close();
+
+                            show('h264');
+                        },
+                        error: fallBack,
+                    });
+
+                    decoder.configure({
+                        codec: announcement.codec,
+                        optimizeForLatency: true,
+                    });
+
+                    return;
+                }
+
+                if (!(event.data instanceof ArrayBuffer) || !decoder) return;
+
+                const view = new DataView(event.data);
+
+                try {
+                    decoder.decode(new EncodedVideoChunk({
+                        type: view.getUint8(0) === 1 ? 'key' : 'delta',
+                        timestamp: Number(view.getBigUint64(1)),
+                        data: new Uint8Array(event.data, 9),
+                    }));
+                } catch (err) {
+                    fallBack(err);
+                }
+            };
+
+            socket.onclose = () => {
+                if (fallenBack) return;
+
+                disconnected();
+
+                if (decoder) {
+                    try { decoder.close(); } catch (_) { /* déjà fermé */ }
+                    decoder = null;
+                }
+
+                setTimeout(connectH264, 2000);
+            };
+
+            socket.onerror = () => socket.close();
+        }
+
+        /** Direct en MJPEG : une image JPEG complète par frame. */
+        function connectMjpeg() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            socket = new WebSocket(
+                `${protocol}//${window.location.host}/ws?token=${API_TOKEN}`
+            );
+            socket.binaryType = 'arraybuffer';
+
+            socket.onopen = () => show('mjpeg');
+
+            socket.onmessage = (event) => {
+                if (!(event.data instanceof ArrayBuffer)) return;
+
+                // Blob plutôt qu'une data URL en base64 : cette dernière
+                // encode chaque frame caractère par caractère en JavaScript,
+                // et ajoute un tiers au poids déjà conséquent du MJPEG.
+                const url = URL.createObjectURL(
+                    new Blob([event.data], { type: 'image/jpeg' })
+                );
+                const previous = image.src;
+
+                image.src = url;
+
+                if (previous.startsWith('blob:')) {
+                    URL.revokeObjectURL(previous);
+                }
+            };
+
+            socket.onclose = () => {
+                disconnected();
+                setTimeout(connectMjpeg, 2000);
+            };
+
+            socket.onerror = () => socket.close();
+        }
+
+        start();
+    </script>
+</body>
+
+</html>

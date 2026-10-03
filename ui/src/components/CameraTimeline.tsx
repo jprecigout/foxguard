@@ -151,12 +151,14 @@ export function CameraTimeline({
   selectedId,
   onSelect,
   onPlay,
+  onWatchLive,
 }: {
   day: string;
   cameraDay: CameraDay;
   selectedId: number | null;
   onSelect: (id: number) => void;
   onPlay: (url: string, title: string) => void;
+  onWatchLive: (url: string, camera: string) => void;
 }) {
   // La pellicule se lit dans le sens du temps, alors que l'API renvoie du plus
   // récent au plus ancien (l'ordre d'une liste). On la retourne donc, sans
@@ -167,6 +169,21 @@ export function CameraTimeline({
     <section className="camera">
       <header>
         <h2>{cameraDay.camera}</h2>
+
+        {/* Le direct ne dépend pas de la journée affichée ni des détections :
+            une caméra sans rien à signaler se regarde quand même. Il
+            n'apparaît que si la caméra a déclaré son URL publique — le
+            manager ne peut pas la deviner (voir `[server] public_url`). */}
+        {cameraDay.liveUrl && (
+          <button
+            className="live"
+            onClick={() => onWatchLive(cameraDay.liveUrl!, cameraDay.camera)}
+            title={`Voir le direct de ${cameraDay.camera}`}
+          >
+            ● Direct
+          </button>
+        )}
+
         <span className="count">
           {cameraDay.events.length} détection{cameraDay.events.length > 1 ? "s" : ""}
         </span>

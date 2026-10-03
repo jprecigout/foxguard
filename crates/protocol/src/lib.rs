@@ -29,8 +29,10 @@ use serde::{Deserialize, Serialize};
 // renommé ou supprimé ici casse donc la compilation de l'interface, au lieu
 // de produire une erreur à l'exécution.
 //
-// La génération a lieu pendant `cargo test -p foxguard-manager` : ts-rs
-// installe un test par type dérivant `TS`, qui écrit le fichier.
+// La génération a lieu pendant `cargo test --workspace` : ts-rs installe un
+// test par type dérivant `TS`, DANS LE CRATE QUI LE DÉFINIT. Les types d'ici
+// ne sont donc pas écrits par un test du manager, et `-p foxguard-manager`
+// n'en régénérerait aucun.
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
@@ -129,65 +131,32 @@ pub struct DetectionEvent {
     #[cfg_attr(feature = "ts", ts(optional))]
     pub thumbnail: Option<String>,
 
-    /// Enregistrement vidéo couvrant la détection, s'il y en a un.
+    /// URL de base par laquelle la caméra émettrice est joignable depuis un
+    /// navigateur, ex. `http://192.168.1.42:8080`.
+    ///
+    /// Elle décrit la CAMÉRA, et non l'événement : c'est pourquoi elle vit
+    /// ici plutôt que dans la référence du clip, où elle a commencé. Le
+    /// manager s'en sert pour deux choses — le clip de cet événement, et le
+    /// DIRECT de la caméra — et la seconde ne doit pas dépendre de
+    /// l'existence du premier.
+    ///
+    /// `None` quand la caméra ne la déclare pas (`[server] public_url`) : elle
+    /// ne peut pas la deviner, puisqu'elle écoute en général sur `0.0.0.0` et
+    /// que son adresse vue du navigateur dépend du réseau et d'un éventuel
+    /// proxy. Aucun lien n'est alors proposé, plutôt qu'un lien mort.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
-    pub clip: Option<ClipRef>,
-}
+    pub base_url: Option<String>,
 
-/// Référence vers le clip vidéo d'un événement, tel que servi par la caméra
-/// qui l'a écrit.
-///
-/// Le clip, contrairement à la vignette, n'est PAS transporté dans
-/// l'événement : quelques secondes de vidéo pèsent des mégaoctets, qui
-/// n'auraient aucune raison de traverser le broker pour un clip que personne
-/// n'ouvrira peut-être jamais. L'événement ne porte donc que de quoi aller le
-/// chercher.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "ts",
-    derive(TS),
-    ts(export, export_to = "../../../ui/src/generated/")
-)]
-pub struct ClipRef {
-    /// Nom du fichier d'enregistrement, tel qu'attendu par les routes
-    /// `GET /recordings/{file}` (les données) et `GET /play/{file}` (la page
-    /// de lecture) de la caméra.
-    pub file: String,
-
-    /// URL de base HTTP de la caméra (ex. `http://192.168.1.42:8080`),
-    /// telle que la caméra elle-même la déclare (`[server] public_url`).
+    /// Nom du fichier d'enregistrement couvrant la détection, s'il y en a un.
     ///
-    /// VIDE quand elle n'est pas configurée : la caméra ne peut pas la
-    /// deviner (elle écoute en général sur `0.0.0.0`, et son adresse vue du
-    /// navigateur dépend du réseau et d'un éventuel proxy). Le manager
-    /// n'expose alors pas de lien de lecture plutôt que d'en fabriquer un qui
-    /// ne mènerait nulle part.
+    /// Le clip lui-même n'est PAS transporté : quelques secondes de vidéo
+    /// pèsent des mégaoctets, qui n'auraient aucune raison de traverser le
+    /// broker pour un clip que personne n'ouvrira peut-être jamais.
+    /// L'événement ne porte que de quoi aller le chercher.
     #[serde(default)]
-    pub base_url: String,
-}
-
-impl ClipRef {
-    /// URL de la page de LECTURE du clip sur la caméra, ou `None` si celle-ci
-    /// n'a pas déclaré son URL publique.
-    ///
-    /// Elle pointe vers `/play/<fichier>` et non vers le fichier lui-même :
-    /// les enregistrements FoxGuard sont dans un format maison (une suite de
-    /// JPEG horodatés, voir `capture::recording` côté caméra) qu'aucun
-    /// navigateur ne sait jouer tel quel. C'est la caméra qui sert la page
-    /// capable de le lire — elle est le seul composant à connaître ce format,
-    /// et la seule origine autorisée à en lire les fichiers.
-    pub fn url(&self) -> Option<String> {
-        if self.base_url.is_empty() {
-            return None;
-        }
-
-        Some(format!(
-            "{}/play/{}",
-            self.base_url.trim_end_matches('/'),
-            self.file
-        ))
-    }
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub clip: Option<String>,
 }
 
 impl DetectionEvent {
@@ -199,6 +168,7 @@ impl DetectionEvent {
             timestamp: Local::now(),
             status,
             thumbnail: None,
+            base_url: None,
             clip: None,
         }
     }
@@ -210,10 +180,20 @@ impl DetectionEvent {
         self
     }
 
-    /// Attache la référence du clip vidéo couvrant la détection.
+    /// Déclare l'URL de base de la caméra émettrice.
+    ///
+    /// Une chaîne vide est traitée comme une absence : c'est la valeur par
+    /// défaut de `[server] public_url`, et elle ne décrit rien.
     #[must_use]
-    pub fn with_clip(mut self, clip: ClipRef) -> Self {
-        self.clip = Some(clip);
+    pub fn with_base_url(mut self, base_url: &str) -> Self {
+        self.base_url = (!base_url.is_empty()).then(|| base_url.to_string());
+        self
+    }
+
+    /// Attache le nom du fichier de clip couvrant la détection.
+    #[must_use]
+    pub fn with_clip(mut self, clip: impl Into<String>) -> Self {
+        self.clip = Some(clip.into());
         self
     }
 
@@ -221,6 +201,36 @@ impl DetectionEvent {
     /// est illisible).
     pub fn decoded_thumbnail(&self) -> Option<Vec<u8>> {
         decode_thumbnail(self.thumbnail.as_deref()?)
+    }
+
+    /// URL de la page de LECTURE du clip sur la caméra.
+    ///
+    /// Elle pointe vers `/play/<fichier>` et non vers le fichier lui-même :
+    /// un enregistrement peut être dans le format maison de FoxGuard, qu'aucun
+    /// navigateur ne sait jouer tel quel. C'est la caméra qui sert la page
+    /// capable de le lire — elle est le seul composant à connaître ses
+    /// formats, et la seule origine autorisée à en lire les fichiers.
+    pub fn clip_url(&self) -> Option<String> {
+        Some(format!(
+            "{}/play/{}",
+            self.camera_base()?,
+            self.clip.as_ref()?
+        ))
+    }
+
+    /// URL de la page de DIRECT de la caméra émettrice.
+    ///
+    /// Indépendante du clip : une caméra sans détection enregistrée se
+    /// regarde quand même.
+    pub fn live_url(&self) -> Option<String> {
+        Some(format!("{}/live", self.camera_base()?))
+    }
+
+    /// URL de base, débarrassée d'une éventuelle barre oblique finale.
+    fn camera_base(&self) -> Option<&str> {
+        let base_url = self.base_url.as_deref()?.trim_end_matches('/');
+
+        (!base_url.is_empty()).then_some(base_url)
     }
 }
 
@@ -258,6 +268,7 @@ mod tests {
                 .into(),
             status,
             thumbnail: None,
+            base_url: None,
             clip: None,
         }
     }
@@ -412,64 +423,88 @@ mod tests {
 
     #[test]
     fn a_clip_reference_survives_a_round_trip() {
-        let clip = ClipRef {
-            file: "evt_20260918_154207_inconnu.mjpeg".to_string(),
-            base_url: "http://192.168.1.42:8080".to_string(),
-        };
+        let original = event(PersonStatus::Unknown)
+            .with_base_url("http://192.168.1.42:8080")
+            .with_clip("evt_20260918_154207123.mp4");
 
-        let original = event(PersonStatus::Unknown).with_clip(clip.clone());
         let json = serde_json::to_string(&original).expect("sérialisation");
         let parsed: DetectionEvent = serde_json::from_str(&json).expect("désérialisation");
 
-        assert_eq!(parsed.clip, Some(clip));
+        assert_eq!(parsed.clip.as_deref(), Some("evt_20260918_154207123.mp4"));
+        assert_eq!(parsed.base_url.as_deref(), Some("http://192.168.1.42:8080"));
     }
 
     #[test]
     fn a_clip_url_points_at_the_cameras_player_page() {
-        let clip = ClipRef {
-            file: "evt.mjpeg".to_string(),
-            base_url: "http://192.168.1.42:8080".to_string(),
-        };
+        let event = event(PersonStatus::Unknown)
+            .with_base_url("http://192.168.1.42:8080")
+            .with_clip("evt.mp4");
 
         assert_eq!(
-            clip.url().as_deref(),
-            Some("http://192.168.1.42:8080/play/evt.mjpeg")
+            event.clip_url().as_deref(),
+            Some("http://192.168.1.42:8080/play/evt.mp4")
+        );
+    }
+
+    #[test]
+    fn a_live_url_does_not_depend_on_a_clip() {
+        // Une caméra sans détection enregistrée se regarde quand même : c'est
+        // la raison pour laquelle l'URL de base décrit la caméra et non le
+        // clip.
+        let event = event(PersonStatus::Unknown).with_base_url("http://192.168.1.42:8080");
+
+        assert_eq!(event.clip_url(), None);
+        assert_eq!(
+            event.live_url().as_deref(),
+            Some("http://192.168.1.42:8080/live")
         );
     }
 
     #[test]
     fn a_trailing_slash_in_the_public_url_does_not_double_up() {
-        let clip = ClipRef {
-            file: "evt.mjpeg".to_string(),
-            base_url: "http://cam.local/".to_string(),
-        };
+        let event = event(PersonStatus::Unknown)
+            .with_base_url("http://cam.local/")
+            .with_clip("evt.mp4");
 
         assert_eq!(
-            clip.url().as_deref(),
-            Some("http://cam.local/play/evt.mjpeg")
+            event.clip_url().as_deref(),
+            Some("http://cam.local/play/evt.mp4")
         );
+        assert_eq!(event.live_url().as_deref(), Some("http://cam.local/live"));
     }
 
     #[test]
-    fn a_clip_without_a_public_url_yields_no_link() {
+    fn a_camera_without_a_public_url_yields_no_link() {
         // La caméra ne peut pas deviner son URL vue du navigateur : mieux
         // vaut pas de lien qu'un lien mort.
-        let clip = ClipRef {
-            file: "evt.mjpeg".to_string(),
-            base_url: String::new(),
-        };
+        let event = event(PersonStatus::Unknown).with_clip("evt.mp4");
 
-        assert_eq!(clip.url(), None);
+        assert_eq!(event.clip_url(), None);
+        assert_eq!(event.live_url(), None);
     }
 
     #[test]
-    fn a_clip_reference_without_a_base_url_field_still_parses() {
-        // Compatibilité : `base_url` est `#[serde(default)]`, une caméra qui
-        // ne le renseigne pas reste comprise.
-        let raw = r#"{"camera":"e","timestamp":"2026-09-18T15:42:07+02:00","status":"unknown","clip":{"file":"evt.mjpeg"}}"#;
+    fn an_empty_public_url_is_treated_as_absent() {
+        // C'est la valeur par défaut de `[server] public_url` : elle ne
+        // décrit rien, et ne doit pas produire une URL commençant par `/`.
+        let event = event(PersonStatus::Unknown)
+            .with_base_url("")
+            .with_clip("evt.mp4");
 
-        let parsed: DetectionEvent = serde_json::from_str(raw).expect("clip sans base_url");
+        assert_eq!(event.base_url, None);
+        assert_eq!(event.clip_url(), None);
+    }
 
-        assert_eq!(parsed.clip.and_then(|c| c.url()), None);
+    #[test]
+    fn an_event_from_a_camera_without_media_fields_still_parses() {
+        // Compatibilité : les deux champs sont `#[serde(default)]`, une
+        // caméra qui ne les renseigne pas reste comprise.
+        let raw = r#"{"camera":"e","timestamp":"2026-09-18T15:42:07+02:00","status":"unknown"}"#;
+
+        let parsed: DetectionEvent = serde_json::from_str(raw).expect("format historique");
+
+        assert_eq!(parsed.base_url, None);
+        assert_eq!(parsed.clip, None);
+        assert_eq!(parsed.clip_url(), None);
     }
 }

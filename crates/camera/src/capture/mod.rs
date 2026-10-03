@@ -31,6 +31,7 @@ mod tracking;
 mod worker;
 
 pub use clips::ClipRecorder;
+pub use recording::RecordingFormat;
 pub use state::SharedState;
 
 use anyhow::Result;
@@ -43,8 +44,7 @@ use v4l::prelude::*;
 use v4l::video::Capture;
 
 use crate::config::Config;
-use crate::h264::H264Encoder;
-use crate::rtsp::RtspStream;
+use crate::h264::{H264Encoder, H264Stream};
 use crate::vision::BoundingBox;
 
 use capture_loop::{H264Output, Pipeline};
@@ -63,7 +63,7 @@ pub fn start_camera_loop(
     config: Config,
     state: Arc<SharedState>,
     clips: Arc<Mutex<ClipRecorder>>,
-    rtsp: Option<Arc<RtspStream>>,
+    rtsp: Option<Arc<H264Stream>>,
 ) -> Result<()> {
     // Initialisation dynamique du périphérique V4L2
     //
@@ -144,16 +144,16 @@ fn build_h264_output(
     config: &Config,
     width: u32,
     height: u32,
-    stream: Arc<RtspStream>,
+    stream: Arc<H264Stream>,
 ) -> Option<H264Output> {
-    let fps = config.rtsp.fps.clamp(1, 120);
+    let fps = config.h264.fps.clamp(1, 120);
 
     let encoder = H264Encoder::new(
         width,
         height,
         fps,
-        config.rtsp.bitrate_kbps,
-        config.rtsp.keyframe_interval_secs,
+        config.h264.bitrate_kbps,
+        config.h264.keyframe_interval_secs,
     )
     .inspect_err(|e| warn!("⚠️ Encodeur H.264 non initialisé : {e:#}"))
     .ok()?;
@@ -161,8 +161,8 @@ fn build_h264_output(
     let (encoded_width, encoded_height) = encoder.dimensions();
 
     info!(
-        "🎞️ Encodage H.264 prêt : {}x{} à {} im/s, {} kb/s (aucune frame n'est encodée tant qu'aucun lecteur n'est connecté).",
-        encoded_width, encoded_height, fps, config.rtsp.bitrate_kbps
+        "🎞️ Encodage H.264 prêt : {}x{} à {} im/s, {} kb/s (aucune frame n'est encodée tant que personne ne regarde).",
+        encoded_width, encoded_height, fps, config.h264.bitrate_kbps
     );
 
     Some(H264Output {
@@ -173,5 +173,6 @@ fn build_h264_output(
         // cherche à contenir.
         frame_interval: Duration::from_micros(1_000_000 / u64::from(fps)),
         source_width: width,
+        fps,
     })
 }

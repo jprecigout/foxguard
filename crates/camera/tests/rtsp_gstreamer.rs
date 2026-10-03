@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use foxguard_camera::config::RtspConfig;
-use foxguard_camera::h264::H264Encoder;
-use foxguard_camera::rtsp::{self, RtspStream};
+use foxguard_camera::h264::{H264Encoder, H264Stream};
+use foxguard_camera::rtsp;
 
 const TOKEN: &str = "jeton-de-test";
 // Petite résolution et cadence modeste : la conversion vers le format de
@@ -110,7 +110,7 @@ fn fill_moving_frame(image: &mut image::RgbImage, frame: u32) {
 /// test (voir [`StopFeeding`]).
 async fn start_encoded_stream() -> (u16, StopFeeding) {
     let port = free_port();
-    let stream = Arc::new(RtspStream::new());
+    let stream = Arc::new(H264Stream::new());
 
     rtsp::spawn(
         RtspConfig {
@@ -119,9 +119,6 @@ async fn start_encoded_stream() -> (u16, StopFeeding) {
             port,
             path: "stream".to_string(),
             require_token: true,
-            fps: FPS,
-            bitrate_kbps: 800,
-            keyframe_interval_secs: 1,
         },
         TOKEN.to_string(),
         "salon".to_string(),

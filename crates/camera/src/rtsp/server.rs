@@ -31,12 +31,11 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
 use crate::config::RtspConfig;
-use crate::h264::AccessUnit;
+use crate::h264::{AccessUnit, H264Stream};
 
 use super::message::{self, Incoming, ParseOutcome, Request};
 use super::rtp::Packetizer;
 use super::sdp;
-use super::stream::RtspStream;
 use super::transport::Transport;
 
 /// Méthodes annoncées en réponse à `OPTIONS`.
@@ -55,7 +54,7 @@ const RTCP_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Ce qui est partagé par toutes les connexions.
 struct ServerContext {
-    stream: Arc<RtspStream>,
+    stream: Arc<H264Stream>,
     /// Jeton attendu dans la chaîne de requête, ou `None` si
     /// l'authentification est désactivée.
     api_token: Option<String>,
@@ -71,7 +70,7 @@ struct ServerContext {
 /// fonctionnalité annexe, et la caméra doit continuer à surveiller, à
 /// enregistrer et à diffuser son flux WebSocket même si le port 8554 est
 /// occupé par autre chose. L'échec est journalisé en `warn!`.
-pub fn spawn(config: RtspConfig, api_token: String, camera_name: String, stream: Arc<RtspStream>) {
+pub fn spawn(config: RtspConfig, api_token: String, camera_name: String, stream: Arc<H264Stream>) {
     if !config.enabled {
         return;
     }

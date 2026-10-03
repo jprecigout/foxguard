@@ -12,7 +12,6 @@
 
 use std::sync::{Arc, Mutex, mpsc};
 
-use foxguard_protocol::ClipRef;
 use image::RgbImage;
 use tracing::{debug, error};
 
@@ -196,21 +195,17 @@ fn publish_events(changes: &[StatusChange], image: &RgbImage, publishing: &Event
         return;
     }
 
-    let clip = publishing
-        .clips
-        .lock_or_recover()
-        .start_or_extend()
-        .map(|file| ClipRef {
-            file,
-            base_url: publishing.public_url.clone(),
-        });
+    let clip = publishing.clips.lock_or_recover().start_or_extend();
 
     let Some(mqtt) = &publishing.mqtt else {
         return;
     };
 
     for change in changes {
-        let mut event = DetectionEvent::now(&publishing.camera_name, change.status.clone());
+        let mut event = DetectionEvent::now(&publishing.camera_name, change.status.clone())
+            // Déclarée même sans clip : elle décrit la CAMÉRA, et c'est elle
+            // qui permet au manager de proposer aussi son direct.
+            .with_base_url(&publishing.public_url);
 
         if let Some(jpeg) = thumbnail::encode(image, Some(change.bbox)) {
             event = event.with_thumbnail(&jpeg);

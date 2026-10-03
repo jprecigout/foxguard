@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, NaiveDate, TimeZone};
-use foxguard_protocol::{ClipRef, DetectionEvent, PersonStatus};
+use foxguard_protocol::{DetectionEvent, PersonStatus};
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
 use tracing::info;
@@ -28,8 +28,17 @@ const STATUS_KNOWN: &str = "known";
 /// besoin. L'interface reçoit l'URL de chaque vignette et les demande une par
 /// une, au fil du défilement (voir [`EventRepository::thumbnail`]).
 const LIST_COLUMNS: &str = "id, camera, occurred_at, status, person_name, \
-                            clip_file, clip_base_url, \
+                            base_url, clip_file, \
                             (thumbnail IS NOT NULL) AS has_thumbnail";
+
+/// Une caméra connue de l'historique.
+#[derive(Debug, Clone)]
+pub struct Camera {
+    pub name: String,
+    /// URL de base la plus récemment déclarée par cette caméra, si elle en
+    /// déclare une (`[server] public_url`).
+    pub base_url: Option<String>,
+}
 
 /// Un événement tel qu'il est CONSERVÉ : celui du protocole, plus ce que
 /// seule la base connaît.
@@ -89,11 +98,10 @@ impl EventRepository {
     pub async fn record(&self, event: &DetectionEvent) -> Result<()> {
         let (status, person_name) = status_to_columns(&event.status);
         let thumbnail = event.decoded_thumbnail();
-        let (clip_file, clip_base_url) = clip_to_columns(event.clip.as_ref());
 
         sqlx::query(
             "INSERT INTO detection_events \
-             (camera, occurred_at, status, person_name, thumbnail, clip_file, clip_base_url) \
+             (camera, occurred_at, status, person_name, thumbnail, base_url, clip_file) \
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(&event.camera)
@@ -101,8 +109,8 @@ impl EventRepository {
         .bind(status)
         .bind(person_name)
         .bind(thumbnail)
-        .bind(clip_file)
-        .bind(clip_base_url)
+        .bind(non_empty(event.base_url.as_deref()))
+        .bind(non_empty(event.clip.as_deref()))
         .execute(&self.pool)
         .await
         .context("insertion de l'événement impossible")?;
@@ -182,15 +190,29 @@ impl EventRepository {
         Ok(row.try_get("n")?)
     }
 
-    /// Noms des caméras ayant déjà émis au moins un événement, triés.
-    pub async fn cameras(&self) -> Result<Vec<String>> {
-        let rows = sqlx::query("SELECT DISTINCT camera FROM detection_events ORDER BY camera")
-            .fetch_all(&self.pool)
-            .await
-            .context("lecture des caméras impossible")?;
+    /// Caméras ayant déjà émis au moins un événement, triées, avec leur URL
+    /// de base la plus RÉCEMMENT connue.
+    ///
+    /// La plus récente, et non une quelconque : une caméra qui change
+    /// d'adresse doit pouvoir être rejointe à la nouvelle. Les événements
+    /// passés gardent la leur, qui décrit où elle était joignable à l'époque
+    /// (voir la migration `0003`).
+    pub async fn cameras(&self) -> Result<Vec<Camera>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT ON (camera) camera, base_url FROM detection_events \
+             ORDER BY camera, occurred_at DESC, id DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("lecture des caméras impossible")?;
 
         rows.iter()
-            .map(|row| row.try_get::<String, _>("camera").map_err(Into::into))
+            .map(|row| {
+                Ok(Camera {
+                    name: row.try_get("camera")?,
+                    base_url: row.try_get("base_url")?,
+                })
+            })
             .collect()
     }
 
@@ -270,43 +292,18 @@ fn status_from_columns(status: &str, person_name: Option<String>) -> PersonStatu
     }
 }
 
-/// Traduit la référence d'un clip vers les colonnes `clip_file` et
-/// `clip_base_url`.
+/// Écarte les chaînes vides, qui ne décrivent rien.
 ///
-/// Extraite pour être testable sans base, comme [`status_to_columns`].
-fn clip_to_columns(clip: Option<&ClipRef>) -> (Option<&str>, Option<&str>) {
-    match clip {
-        // Un nom de fichier vide ne référence rien : autant ne rien
-        // enregistrer, pour que `clip_file IS NOT NULL` garde son sens.
-        Some(clip) if !clip.file.is_empty() => (Some(clip.file.as_str()), {
-            if clip.base_url.is_empty() {
-                None
-            } else {
-                Some(clip.base_url.as_str())
-            }
-        }),
-        _ => (None, None),
-    }
-}
-
-/// Reconstruit la référence d'un clip à partir des colonnes lues.
-///
-/// Sans `clip_file`, il n'y a pas de clip. Sans `clip_base_url`, il y en a un
-/// mais on ne sait pas où le joindre : la référence est conservée telle
-/// quelle, et c'est `ClipRef::url` qui décidera de ne pas produire de lien.
-fn clip_from_columns(file: Option<String>, base_url: Option<String>) -> Option<ClipRef> {
-    let file = file.filter(|file| !file.is_empty())?;
-
-    Some(ClipRef {
-        file,
-        base_url: base_url.unwrap_or_default(),
-    })
+/// `[server] public_url` vaut la chaîne vide par défaut côté caméra : la
+/// stocker telle quelle ferait répondre « oui » à `base_url IS NOT NULL` pour
+/// une caméra qui n'a rien déclaré.
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.is_empty())
 }
 
 /// Convertit une ligne lue en événement conservé.
 fn row_to_stored_event(row: &PgRow) -> Result<StoredEvent> {
     let status = status_from_columns(row.try_get("status")?, row.try_get("person_name")?);
-    let clip = clip_from_columns(row.try_get("clip_file")?, row.try_get("clip_base_url")?);
 
     Ok(StoredEvent {
         id: row.try_get("id")?,
@@ -317,7 +314,8 @@ fn row_to_stored_event(row: &PgRow) -> Result<StoredEvent> {
             // Jamais lue par les requêtes de liste (voir `LIST_COLUMNS`) :
             // l'interface la demande séparément, par son URL.
             thumbnail: None,
-            clip,
+            base_url: row.try_get("base_url")?,
+            clip: row.try_get("clip_file")?,
         },
         has_thumbnail: row.try_get("has_thumbnail")?,
     })

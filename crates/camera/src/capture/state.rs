@@ -1,9 +1,12 @@
 //! État partagé de la caméra, exposé au serveur HTTP / WebSocket (voir
 //! `crate::api`) pour piloter et consulter l'état de la surveillance.
 
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::broadcast;
+
+use crate::h264::H264Stream;
 
 /// État partagé de la caméra pour la gestion par le WebSocket
 pub struct SharedState {
@@ -15,6 +18,15 @@ pub struct SharedState {
     pub api_token: String,
     // Canal de diffusion des frames JPEG encodées vers tous les clients WS
     pub tx: broadcast::Sender<Vec<u8>>,
+
+    /// Flux H.264 encodé, si l'encodage est activé (voir
+    /// `Config::h264_enabled`).
+    ///
+    /// Porté par l'état parce que le serveur HTTP en est, lui aussi, un
+    /// consommateur : `GET /ws/h264` y abonne les navigateurs, qui décodent
+    /// le flux eux-mêmes (voir `crate::api`). S'y abonner suffit à déclencher
+    /// l'encodage, et s'en désabonner à l'arrêter.
+    pub h264: Option<Arc<H264Stream>>,
 
     // Nom en attente de capture pour une nouvelle photo de référence
     // (voir ClientCommand::CaptureReference dans api.rs). La boucle caméra

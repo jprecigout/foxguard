@@ -17,6 +17,7 @@ use tower::ServiceExt;
 
 use foxguard_camera::api::create_router;
 use foxguard_camera::capture::SharedState;
+use foxguard_camera::h264::H264Stream;
 
 /// Construit un [`SharedState`] minimal pour les tests, avec le jeton API
 /// donné, aucune surveillance/enregistrement actifs, et un dossier
@@ -32,12 +33,24 @@ use foxguard_camera::capture::SharedState;
 /// son `Drop` : l'appelant doit le garder vivant tant qu'il utilise le
 /// routeur.
 fn test_state_in(token: &str, dir: &std::path::Path) -> Arc<SharedState> {
+    state_with_h264(token, dir, None)
+}
+
+/// Comme [`test_state_in`], en choisissant si l'encodage H.264 est
+/// disponible : c'est lui qui décide du sort de `GET /ws/h264` et de ce
+/// qu'annonce `GET /api/capabilities`.
+fn state_with_h264(
+    token: &str,
+    dir: &std::path::Path,
+    h264: Option<Arc<H264Stream>>,
+) -> Arc<SharedState> {
     let (tx, _rx) = tokio::sync::broadcast::channel(16);
     Arc::new(SharedState {
         detection_enabled: AtomicBool::new(false),
         recording_enabled: AtomicBool::new(false),
         api_token: token.to_string(),
         tx,
+        h264,
         pending_enrollment: Mutex::new(None),
         recordings_dir: dir.to_string_lossy().to_string(),
     })
@@ -65,6 +78,167 @@ fn delete(uri: &str) -> Request<Body> {
         .uri(uri)
         .body(Body::empty())
         .expect("requête DELETE valide")
+}
+
+// --- Service des enregistrements ---
+
+#[tokio::test]
+async fn an_mp4_recording_is_served_as_a_video() {
+    // Le type de contenu décide de tout côté navigateur : avec
+    // `application/octet-stream`, un `<video>` refuse de lire le fichier.
+    let dir = tempfile::tempdir().expect("dossier temporaire");
+    std::fs::write(dir.path().join("rec_20260101_000000000.mp4"), b"faux mp4").expect("écriture");
+
+    let app = create_router(test_state_in("secret", dir.path()));
+    let response = app
+        .oneshot(get("/recordings/rec_20260101_000000000.mp4"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "video/mp4");
+}
+
+#[tokio::test]
+async fn a_recording_announces_that_it_accepts_byte_ranges() {
+    // Sans cette annonce, un `<video>` lit du début à la fin sans jamais
+    // pouvoir se déplacer — inexploitable sur un enregistrement de plusieurs
+    // heures.
+    let dir = tempfile::tempdir().expect("dossier temporaire");
+    std::fs::write(dir.path().join("rec_20260101_000000000.mp4"), b"0123456789").expect("écriture");
+
+    let app = create_router(test_state_in("secret", dir.path()));
+    let response = app
+        .oneshot(get("/recordings/rec_20260101_000000000.mp4"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.headers()["accept-ranges"], "bytes");
+}
+
+#[tokio::test]
+async fn a_byte_range_request_returns_only_that_range() {
+    let dir = tempfile::tempdir().expect("dossier temporaire");
+    std::fs::write(dir.path().join("rec_20260101_000000000.mp4"), b"0123456789").expect("écriture");
+
+    let app = create_router(test_state_in("secret", dir.path()));
+    let request = Request::builder()
+        .uri("/recordings/rec_20260101_000000000.mp4")
+        .header("Range", "bytes=2-5")
+        .body(Body::empty())
+        .expect("requête");
+
+    let response = app.oneshot(request).await.expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("corps de réponse")
+        .to_bytes();
+
+    assert_eq!(&body[..], b"2345");
+}
+
+#[tokio::test]
+async fn a_legacy_recording_is_still_served() {
+    // Les enregistrements écrits avant le passage au MP4 restent sur les
+    // caméras déployées : ils doivent continuer d'être servis.
+    let dir = tempfile::tempdir().expect("dossier temporaire");
+    std::fs::write(dir.path().join("rec_20260101_000000000.mjpeg"), b"ancien").expect("écriture");
+
+    let app = create_router(test_state_in("secret", dir.path()));
+    let response = app
+        .oneshot(get("/recordings/rec_20260101_000000000.mjpeg"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+// --- Flux H.264 des interfaces web ---
+
+#[tokio::test]
+async fn capabilities_report_no_h264_when_encoding_is_disabled() {
+    // C'est sur cette réponse que l'interface décide de se rabattre sur le
+    // MJPEG, sans tenter une connexion vouée à l'échec.
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
+
+    let response = app
+        .oneshot(get("/api/capabilities"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("corps de réponse")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("JSON valide");
+
+    assert_eq!(json["h264"], false);
+    // Le MJPEG est toujours là : c'est le repli de l'interface.
+    assert_eq!(json["mjpeg"], true);
+}
+
+#[tokio::test]
+async fn capabilities_report_h264_when_encoding_is_enabled() {
+    let dir = tempfile::tempdir().expect("dossier temporaire");
+    let state = state_with_h264("secret", dir.path(), Some(Arc::new(H264Stream::new())));
+    let app = create_router(state);
+
+    let response = app
+        .oneshot(get("/api/capabilities"))
+        .await
+        .expect("réponse HTTP");
+
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("corps de réponse")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("JSON valide");
+
+    assert_eq!(json["h264"], true);
+}
+
+// Les trois tests qui suivent passent par un VRAI serveur TCP, comme ceux du
+// WebSocket MJPEG : l'upgrade WebSocket exige un état bas niveau que
+// `oneshot` ne fournit pas (voir la note plus bas).
+
+#[tokio::test]
+async fn the_h264_socket_is_rejected_without_a_token() {
+    // Le flux H.264 montre la même image que le MJPEG, qui est authentifié.
+    let addr = spawn_test_server_with_h264("secret", Some(Arc::new(H264Stream::new()))).await;
+    let status = ws_upgrade_status(addr, "/ws/h264").await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED.as_u16());
+}
+
+#[tokio::test]
+async fn the_h264_socket_reports_503_when_encoding_is_disabled() {
+    // 503 et non 404 : la route existe, c'est l'encodage qui est éteint.
+    // L'interface sait ainsi qu'elle doit se rabattre sur le MJPEG, et non
+    // qu'elle s'est trompée d'adresse.
+    let addr = spawn_test_server("secret").await;
+    let status = ws_upgrade_status(addr, "/ws/h264?token=secret").await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+}
+
+#[tokio::test]
+async fn the_h264_socket_accepts_the_upgrade_with_the_right_token() {
+    let addr = spawn_test_server_with_h264("secret", Some(Arc::new(H264Stream::new()))).await;
+    let status = ws_upgrade_status(addr, "/ws/h264?token=secret").await;
+
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS.as_u16());
 }
 
 #[tokio::test]
@@ -215,11 +389,17 @@ async fn recording_download_returns_404_for_a_legit_but_missing_file() {
 /// Démarre `create_router` sur un vrai `TcpListener` (port éphémère) via
 /// `axum::serve`, exactement comme `src/main.rs`, et retourne son adresse.
 async fn spawn_test_server(token: &str) -> SocketAddr {
+    spawn_test_server_with_h264(token, None).await
+}
+
+/// Comme [`spawn_test_server`], en choisissant si l'encodage H.264 est
+/// disponible : c'est lui qui décide du sort de `GET /ws/h264`.
+async fn spawn_test_server_with_h264(token: &str, h264: Option<Arc<H264Stream>>) -> SocketAddr {
     // Dossier volontairement « fuité » (`keep`) : le serveur vit dans une
     // tâche détachée qui survit au test, donc le supprimer ici le lui
     // retirerait sous les pieds.
     let dir = tempfile::tempdir().expect("dossier temporaire").keep();
-    let app = create_router(test_state_in(token, &dir));
+    let app = create_router(state_with_h264(token, &dir, h264));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("liaison sur un port éphémère");

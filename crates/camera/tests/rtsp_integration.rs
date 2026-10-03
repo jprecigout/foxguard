@@ -24,8 +24,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use foxguard_camera::config::RtspConfig;
-use foxguard_camera::h264::{AccessUnit, ParameterSets};
-use foxguard_camera::rtsp::{self, RtspStream};
+use foxguard_camera::h264::{AccessUnit, H264Stream, ParameterSets};
+use foxguard_camera::rtsp;
 
 const TOKEN: &str = "jeton-de-test";
 
@@ -41,9 +41,9 @@ fn free_port() -> u16 {
 }
 
 /// Démarre un serveur RTSP de test et retourne son flux et son port.
-async fn start_server(require_token: bool) -> (Arc<RtspStream>, u16) {
+async fn start_server(require_token: bool) -> (Arc<H264Stream>, u16) {
     let port = free_port();
-    let stream = Arc::new(RtspStream::new());
+    let stream = Arc::new(H264Stream::new());
 
     rtsp::spawn(
         RtspConfig {
@@ -52,9 +52,6 @@ async fn start_server(require_token: bool) -> (Arc<RtspStream>, u16) {
             port,
             path: "stream".to_string(),
             require_token,
-            fps: 25,
-            bitrate_kbps: 512,
-            keyframe_interval_secs: 2,
         },
         TOKEN.to_string(),
         "salon".to_string(),
@@ -680,7 +677,7 @@ async fn a_keepalive_during_playback_is_answered_without_disturbing_the_stream()
 #[tokio::test(flavor = "multi_thread")]
 async fn a_disabled_rtsp_server_does_not_listen_at_all() {
     let port = free_port();
-    let stream = Arc::new(RtspStream::new());
+    let stream = Arc::new(H264Stream::new());
 
     rtsp::spawn(
         RtspConfig {

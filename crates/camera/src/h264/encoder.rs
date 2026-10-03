@@ -144,10 +144,16 @@ impl H264Encoder {
             .intra_frame_period(IntraFramePeriod::from_num_frames(
                 fps * keyframe_interval_secs.clamp(1, 60),
             ))
-            // SPS/PPS répétés à chaque image clé, et non une seule fois au
-            // début du flux : un client qui se branche en cours de route
-            // DOIT les recevoir, sans quoi il ne décodera jamais rien.
-            .sps_pps_strategy(SpsPpsStrategy::IncreasingId)
+            // Identifiants de jeux de paramètres CONSTANTS (toujours 0).
+            //
+            // `openh264` réémet de toute façon les SPS/PPS avec chaque image
+            // clé, quelle que soit cette stratégie — c'est ce qui permet à un
+            // client branché en cours de route de décoder. Ce réglage ne
+            // concerne que leurs identifiants, et les garder constants est
+            // nécessaire au conteneur MP4 : les paramètres y sont déclarés
+            // UNE fois, dans la boîte `avcC`, et une tranche qui en
+            // référencerait un autre serait indécodable (voir `crate::mp4`).
+            .sps_pps_strategy(SpsPpsStrategy::ConstantId)
             // Le flux n'est pas journalisé par `openh264` lui-même : ses
             // messages partiraient sur stderr, hors du `tracing` du reste de
             // l'application (voir `init_tracing` dans `main.rs`).
@@ -382,6 +388,76 @@ mod tests {
                 &nal[..4.min(nal.len())]
             );
         }
+    }
+
+    #[test]
+    fn parameter_sets_accompany_every_keyframe() {
+        // C'est l'invariant dont dépendent à la fois le client qui se branche
+        // en cours de route et le conteneur MP4 : une image clé sans ses
+        // paramètres n'est décodable par personne.
+        let mut encoder = H264Encoder::new(64, 64, 25, 512, 1).expect("encodeur");
+
+        let mut keyframes = 0;
+
+        for frame in 0..60 {
+            let Some(unit) = encoder
+                .encode_rgb(&moving_frame(64, 64, frame))
+                .expect("encodage")
+            else {
+                continue;
+            };
+
+            if !unit.keyframe {
+                continue;
+            }
+
+            keyframes += 1;
+            assert!(
+                unit.nals.iter().any(|nal| nal_type(nal) == Some(NAL_SPS)),
+                "image clé {frame} sans SPS"
+            );
+            assert!(
+                unit.nals.iter().any(|nal| nal_type(nal) == Some(NAL_PPS)),
+                "image clé {frame} sans PPS"
+            );
+        }
+
+        assert!(
+            keyframes >= 2,
+            "il faut plusieurs images clés pour que le test ait un sens ({keyframes})"
+        );
+    }
+
+    #[test]
+    fn parameter_set_identifiers_stay_constant() {
+        // Le dernier octet utile du PPS porte son identifiant. Le conteneur
+        // MP4 ne déclare les paramètres qu'une fois : s'ils changeaient
+        // d'identifiant en cours de flux, les tranches en référenceraient un
+        // que le décodeur n'a jamais vu.
+        let mut encoder = H264Encoder::new(64, 64, 25, 512, 1).expect("encodeur");
+
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+
+        for frame in 0..60 {
+            let Some(unit) = encoder
+                .encode_rgb(&moving_frame(64, 64, frame))
+                .expect("encodage")
+            else {
+                continue;
+            };
+
+            for nal in &unit.nals {
+                if nal_type(nal) == Some(NAL_PPS) && !seen.contains(nal) {
+                    seen.push(nal.clone());
+                }
+            }
+        }
+
+        assert_eq!(
+            seen.len(),
+            1,
+            "les PPS ne doivent pas varier d'une image clé à l'autre : {seen:02x?}"
+        );
     }
 
     #[test]

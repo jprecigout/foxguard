@@ -18,7 +18,7 @@ use axum::http::{Request, StatusCode};
 use chrono::Local;
 use foxguard_manager::api::{self, AppState};
 use foxguard_manager::db::EventRepository;
-use foxguard_protocol::{ClipRef, DetectionEvent, PersonStatus};
+use foxguard_protocol::{DetectionEvent, PersonStatus};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -133,6 +133,7 @@ fn event(camera: &str, name: Option<&str>) -> DetectionEvent {
         timestamp: Local::now(),
         status,
         thumbnail: None,
+        base_url: None,
         clip: None,
     }
 }
@@ -230,10 +231,11 @@ async fn the_events_list_never_carries_thumbnail_bytes() {
 async fn a_clip_url_points_at_the_camera_that_wrote_it() {
     let repo = repo_or_skip!();
 
-    repo.record(&event("salon", None).with_clip(ClipRef {
-        file: "evt_20260918_154207123.mjpeg".to_string(),
-        base_url: "http://192.168.1.42:8080".to_string(),
-    }))
+    repo.record(
+        &event("salon", None)
+            .with_base_url("http://192.168.1.42:8080")
+            .with_clip("evt_20260918_154207123.mp4"),
+    )
     .await
     .expect("écriture");
 
@@ -241,7 +243,7 @@ async fn a_clip_url_points_at_the_camera_that_wrote_it() {
 
     assert_eq!(
         body["events"][0]["clip_url"].as_str(),
-        Some("http://192.168.1.42:8080/play/evt_20260918_154207123.mjpeg")
+        Some("http://192.168.1.42:8080/play/evt_20260918_154207123.mp4")
     );
 }
 
@@ -251,12 +253,9 @@ async fn a_clip_without_a_public_url_exposes_no_link() {
     // son adresse vue du navigateur.
     let repo = repo_or_skip!();
 
-    repo.record(&event("salon", None).with_clip(ClipRef {
-        file: "evt.mjpeg".to_string(),
-        base_url: String::new(),
-    }))
-    .await
-    .expect("écriture");
+    repo.record(&event("salon", None).with_clip("evt.mp4"))
+        .await
+        .expect("écriture");
 
     let body = get_json(repo, "/api/events").await;
 
@@ -359,7 +358,35 @@ async fn the_cameras_route_lists_the_emitters() {
 
     let body = get_json(repo, "/api/cameras").await;
 
-    assert_eq!(body, serde_json::json!(["entree", "salon"]));
+    assert_eq!(body[0]["name"], "entree");
+    assert_eq!(body[1]["name"], "salon");
+}
+
+#[tokio::test]
+async fn a_camera_exposes_the_url_of_its_live_view() {
+    // C'est par là que la timeline donne accès au direct : la page est
+    // servie par la CAMÉRA, dont le manager n'a pas le jeton.
+    let repo = repo_or_skip!();
+    repo.record(&event("salon", None).with_base_url("http://192.168.1.42:8080"))
+        .await
+        .expect("écriture");
+
+    let body = get_json(repo, "/api/cameras").await;
+
+    assert_eq!(
+        body[0]["live_url"].as_str(),
+        Some("http://192.168.1.42:8080/live")
+    );
+}
+
+#[tokio::test]
+async fn a_camera_without_a_public_url_exposes_no_live_link() {
+    let repo = repo_or_skip!();
+    repo.record(&event("salon", None)).await.expect("écriture");
+
+    let body = get_json(repo, "/api/cameras").await;
+
+    assert!(body[0]["live_url"].is_null());
 }
 
 #[tokio::test]

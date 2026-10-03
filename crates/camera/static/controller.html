@@ -116,11 +116,27 @@
             position: relative;
         }
 
-        .video-card img {
+        .video-card img,
+        .video-card canvas {
             width: 100%;
             height: auto;
             display: block;
             object-fit: contain;
+        }
+
+        /* Indique lequel des deux flux est à l'écran. Discret : c'est un
+           diagnostic, pas une information de surveillance. */
+        .stream-badge {
+            position: absolute;
+            top: 10px;
+            right: 12px;
+            padding: 2px 8px;
+            border-radius: 999px;
+            background: rgba(0, 0, 0, 0.55);
+            color: var(--text-muted);
+            font-size: 0.7rem;
+            letter-spacing: 0.04em;
+            pointer-events: none;
         }
 
         .placeholder {
@@ -433,8 +449,14 @@
     <div class="container">
         <!-- Zone Flux Vidéo WebSocket -->
         <div class="video-card">
+            <!-- Deux supports pour un seul flux : le H.264 est décodé par le
+                 navigateur et dessiné dans le <canvas>, le MJPEG historique
+                 reste affiché par l'<img>. Un seul des deux est visible à la
+                 fois (voir `startStream` plus bas). -->
+            <canvas id="videoCanvas" style="display: none;"></canvas>
             <img id="videoStream" alt="Flux vidéo en direct" style="display: none;">
             <div id="placeholder" class="placeholder">Connexion au flux vidéo...</div>
+            <span id="streamBadge" class="stream-badge" style="display: none;"></span>
         </div>
 
         <!-- Zone Commandes -->
@@ -500,6 +522,12 @@
                     <span>Fermer</span>
                 </button>
             </div>
+            <!-- Deux lecteurs, choisis d'après l'extension du fichier : un
+                 `<video>` natif pour les enregistrements MP4, et le canvas
+                 pour le format historique, qu'aucun navigateur ne sait lire
+                 (voir `playVideo`). -->
+            <video id="recordingVideo" controls playsinline
+                   style="width: 100%; border-radius: 8px; background: #000; display: none;"></video>
             <canvas id="mjpegCanvas" style="width: 100%; border-radius: 8px; background: #000;"></canvas>
         </div>
     </div>
@@ -515,10 +543,212 @@
         let currentlyPlaying = null;
 
         const streamImg = document.getElementById('videoStream');
+        const videoCanvas = document.getElementById('videoCanvas');
+        const streamBadge = document.getElementById('streamBadge');
         const placeholder = document.getElementById('placeholder');
         const statusDot = document.getElementById('statusDot');
         const statusText = document.getElementById('statusText');
 
+        // --- Choix du flux ---------------------------------------------
+        //
+        // La caméra sait diffuser son direct de deux façons :
+        //
+        //  - en H.264 (`/ws/h264`), décodé par le navigateur lui-même avec
+        //    WebCodecs et dessiné dans un <canvas>. C'est le bon flux : une
+        //    scène de surveillance est immobile l'essentiel du temps, et
+        //    H.264 ne transmet que ce qui change ;
+        //  - en MJPEG (`/ws`), une image complète par frame. Dix fois plus
+        //    lourd, mais il marche partout.
+        //
+        // Le MJPEG RESTE le repli, et ce n'est pas une facilité : cette
+        // interface est le secours qui doit encore fonctionner quand tout le
+        // reste est en panne. Elle ne peut pas dépendre d'une API que le
+        // navigateur de secours n'aurait pas.
+        //
+        // Aucun navigateur n'implémente RTSP : le flux RTSP de la caméra
+        // s'adresse aux lecteurs vidéo du réseau, pas à cette page.
+
+        let h264Decoder = null;
+
+        /** Vrai si ce navigateur sait décoder du H.264 lui-même. */
+        function supportsWebCodecs() {
+            return typeof window.VideoDecoder === 'function'
+                && typeof window.EncodedVideoChunk === 'function';
+        }
+
+        /** Bascule l'affichage sur l'un des deux supports. */
+        function showStream(kind) {
+            const h264 = kind === 'h264';
+
+            videoCanvas.style.display = h264 ? 'block' : 'none';
+            streamImg.style.display = h264 ? 'none' : 'block';
+            placeholder.style.display = 'none';
+
+            streamBadge.innerText = h264 ? 'H.264' : 'MJPEG';
+            streamBadge.style.display = 'block';
+        }
+
+        /**
+         * Démarre le direct : H.264 si la caméra l'encode ET si le navigateur
+         * sait le décoder, MJPEG sinon.
+         *
+         * Les deux conditions sont demandées AVANT de se connecter — la
+         * première au serveur (`/api/capabilities`), la seconde au navigateur
+         * — plutôt que déduites d'un échec : tenter puis se rabattre coûterait
+         * un aller-retour et remplirait la console d'erreurs à chaque
+         * chargement sur une caméra où l'encodage est simplement désactivé.
+         */
+        async function startStream() {
+            if (supportsWebCodecs()) {
+                try {
+                    const response = await fetch('/api/capabilities');
+
+                    if (response.ok && (await response.json()).h264) {
+                        connectH264();
+                        return;
+                    }
+                } catch (err) {
+                    console.warn('Capacités de la caméra indisponibles :', err);
+                }
+            }
+
+            connectWebSocket();
+        }
+
+        /**
+         * Direct en H.264 : les unités d'accès arrivent par WebSocket, le
+         * navigateur les décode et on dessine chaque image dans le canvas.
+         *
+         * Format des messages, défini par `crate::api` côté serveur :
+         *
+         *  - un message TEXTE en premier, `{"type":"config","codec":"avc1…"}`.
+         *    Le décodeur ne peut pas se configurer sans cette chaîne, et elle
+         *    se lit dans le SPS que seul le serveur a sous la main ;
+         *  - puis des messages BINAIRES :
+         *    `[u8 image clé][u64 horodatage µs][NAL en Annex-B]`.
+         */
+        function connectH264() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws/h264?token=${API_TOKEN}`);
+            ws.binaryType = 'arraybuffer';
+
+            const context = videoCanvas.getContext('2d');
+            let fallenBack = false;
+
+            // Un échec de décodage ne doit pas laisser un écran noir : on
+            // repart sur le MJPEG, qui marche partout. `fallenBack` évite d'y
+            // basculer deux fois (l'erreur du décodeur ferme la connexion,
+            // dont la fermeture déclencherait une seconde bascule).
+            const fallBackToMjpeg = (reason) => {
+                if (fallenBack) return;
+                fallenBack = true;
+
+                console.warn('Flux H.264 abandonné, repli sur MJPEG :', reason);
+
+                if (h264Decoder) {
+                    try { h264Decoder.close(); } catch (_) { /* déjà fermé */ }
+                    h264Decoder = null;
+                }
+
+                try { ws.close(); } catch (_) { /* déjà fermée */ }
+                connectWebSocket();
+            };
+
+            ws.onopen = () => {
+                statusDot.className = 'status-dot connected';
+                statusText.innerText = 'En direct';
+            };
+
+            ws.onmessage = (event) => {
+                // Message texte : la configuration du décodeur.
+                if (typeof event.data === 'string') {
+                    let announcement;
+
+                    try {
+                        announcement = JSON.parse(event.data);
+                    } catch (err) {
+                        fallBackToMjpeg(err);
+                        return;
+                    }
+
+                    if (announcement.type !== 'config') return;
+
+                    h264Decoder = new VideoDecoder({
+                        output: (frame) => {
+                            // La taille du canvas suit celle du flux : la
+                            // caméra peut très bien ne pas être en 640x480.
+                            if (videoCanvas.width !== frame.displayWidth) {
+                                videoCanvas.width = frame.displayWidth;
+                                videoCanvas.height = frame.displayHeight;
+                            }
+
+                            context.drawImage(frame, 0, 0);
+                            // `close()` est OBLIGATOIRE : une VideoFrame
+                            // retient de la mémoire graphique que le
+                            // ramasse-miettes ne libère pas, et le décodeur
+                            // finit par se bloquer faute de tampons.
+                            frame.close();
+
+                            showStream('h264');
+                        },
+                        error: fallBackToMjpeg,
+                    });
+
+                    h264Decoder.configure({
+                        codec: announcement.codec,
+                        // Pas de `description` : le flux est en Annex-B, et
+                        // le décodeur y lit lui-même les paramètres, réémis
+                        // avec chaque image clé.
+                        optimizeForLatency: true,
+                    });
+
+                    return;
+                }
+
+                if (!(event.data instanceof ArrayBuffer) || !h264Decoder) return;
+
+                const view = new DataView(event.data);
+                const isKeyframe = view.getUint8(0) === 1;
+                // `getBigUint64` : l'horodatage est sur 64 bits, et
+                // `EncodedVideoChunk` attend un nombre ordinaire.
+                const timestamp = Number(view.getBigUint64(1));
+
+                try {
+                    h264Decoder.decode(new EncodedVideoChunk({
+                        type: isKeyframe ? 'key' : 'delta',
+                        timestamp,
+                        data: new Uint8Array(event.data, 9),
+                    }));
+                } catch (err) {
+                    fallBackToMjpeg(err);
+                }
+            };
+
+            ws.onclose = () => {
+                if (fallenBack) return;
+
+                statusDot.className = 'status-dot disconnected';
+                statusText.innerText = 'Déconnecté';
+                placeholder.innerText = 'Reconnexion au flux...';
+                placeholder.style.display = 'block';
+                videoCanvas.style.display = 'none';
+                streamBadge.style.display = 'none';
+
+                if (h264Decoder) {
+                    try { h264Decoder.close(); } catch (_) { /* déjà fermé */ }
+                    h264Decoder = null;
+                }
+
+                setTimeout(connectH264, 2000);
+            };
+
+            ws.onerror = (err) => {
+                console.error('Erreur WebSocket H.264:', err);
+                ws.close();
+            };
+        }
+
+        /** Direct en MJPEG : une image JPEG complète par frame. */
         function connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${protocol}//${window.location.host}/ws?token=${API_TOKEN}`;
@@ -529,19 +759,27 @@
             ws.onopen = () => {
                 statusDot.className = 'status-dot connected';
                 statusText.innerText = 'En direct';
-                placeholder.style.display = 'none';
-                streamImg.style.display = 'block';
+                showStream('mjpeg');
             };
 
             ws.onmessage = (event) => {
                 if (event.data instanceof ArrayBuffer) {
-                    let bytes = new Uint8Array(event.data);
-                    let binary = '';
-                    for (let i = 0; i < bytes.byteLength; i++) {
-                        binary += String.fromCharCode(bytes[i]);
+                    // Blob + URL d'objet plutôt qu'une data URL en base64 :
+                    // cette dernière encodait chaque frame caractère par
+                    // caractère en JavaScript, et ajoutait un tiers au poids
+                    // déjà conséquent du MJPEG.
+                    const url = URL.createObjectURL(
+                        new Blob([event.data], { type: 'image/jpeg' })
+                    );
+                    const previous = streamImg.src;
+
+                    streamImg.src = url;
+
+                    // L'URL précédente est révoquée APRÈS avoir posé la
+                    // nouvelle : la révoquer avant ferait clignoter l'image.
+                    if (previous.startsWith('blob:')) {
+                        URL.revokeObjectURL(previous);
                     }
-                    let base64 = window.btoa(binary);
-                    streamImg.src = 'data:image/jpeg;base64,' + base64;
                 }
             };
 
@@ -551,6 +789,7 @@
                 placeholder.innerText = 'Reconnexion au flux...';
                 placeholder.style.display = 'block';
                 streamImg.style.display = 'none';
+                streamBadge.style.display = 'none';
                 setTimeout(connectWebSocket, 2000);
             };
 
@@ -741,6 +980,14 @@
 
         function closePlayer() {
             stopPlayback();
+
+            // Le `<video>` continuerait de lire — et de télécharger — un
+            // enregistrement que plus personne ne regarde.
+            const video = document.getElementById('recordingVideo');
+            video.pause();
+            video.removeAttribute('src');
+            video.load();
+
             currentlyPlaying = null;
             document.getElementById('playerCard').style.display = 'none';
         }
@@ -792,9 +1039,66 @@
             return frames;
         }
 
+        /**
+         * Lance la lecture d'un enregistrement.
+         *
+         * Deux formats cohabitent dans `output_record/`, et c'est l'extension
+         * qui tranche :
+         *
+         *  - `.mp4` : un `<video>` natif suffit, et apporte gratuitement le
+         *    déplacement, le plein écran et le décodage matériel ;
+         *  - `.mjpeg` : le format historique, que ce script décode lui-même.
+         *
+         * Les deux restent nécessaires : une caméra mise à jour continue de
+         * servir les enregistrements qu'elle a écrits avant.
+         */
         async function playVideo(filename) {
+            if (filename.toLowerCase().endsWith('.mp4')) {
+                playMp4Recording(filename);
+                return;
+            }
+
+            playFramedRecording(filename);
+        }
+
+        /** Lecture d'un enregistrement MP4 par le lecteur du navigateur. */
+        function playMp4Recording(filename) {
             const playerCard = document.getElementById('playerCard');
+            const video = document.getElementById('recordingVideo');
             const canvas = document.getElementById('mjpegCanvas');
+            const title = document.getElementById('playingTitle');
+
+            // Une lecture du format historique peut être en cours : elle
+            // dessine dans le canvas, et continuerait de le faire.
+            stopPlayback();
+
+            canvas.style.display = 'none';
+            video.style.display = 'block';
+            video.src = `/recordings/${encodeURIComponent(filename)}`;
+            video.play().catch(() => { /* lecture refusée : les contrôles restent */ });
+
+            if (title) {
+                title.innerHTML = `<span class="icon icon-clapperboard"></span> ${filename}`;
+            }
+
+            playerCard.style.display = 'block';
+            playerCard.scrollIntoView({ behavior: 'smooth' });
+            currentlyPlaying = filename;
+        }
+
+        /** Lecture du format historique : des images JPEG horodatées. */
+        async function playFramedRecording(filename) {
+            const playerCard = document.getElementById('playerCard');
+            const video = document.getElementById('recordingVideo');
+            const canvas = document.getElementById('mjpegCanvas');
+
+            // Un MP4 peut être en cours de lecture : l'arrêter, sinon son son
+            // et son image continueraient derrière le canvas.
+            video.pause();
+            video.removeAttribute('src');
+            video.load();
+            video.style.display = 'none';
+            canvas.style.display = 'block';
             const ctx = canvas.getContext('2d');
             const title = document.getElementById('playingTitle');
 
@@ -872,7 +1176,7 @@
             }
         }
 
-        connectWebSocket();
+        startStream();
         loadRecordings();
     </script>
 </body>

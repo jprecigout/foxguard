@@ -3,14 +3,20 @@ host = "0.0.0.0"
 port = 8080
 api_token = "secret123"
 # URL de base par laquelle CETTE caméra est joignable depuis un navigateur,
-# ex. "http://192.168.1.42:8080". Publiée dans les événements MQTT pour que la
-# timeline de l'interface du manager offre un lien direct vers le clip de
-# chaque détection.
+# ex. "http://192.168.1.42:8080". Publiée dans les événements MQTT pour que
+# l'interface du manager offre deux accès directs à cette caméra :
 #
-# La caméra ne peut pas la deviner : elle écoute sur 0.0.0.0, et son adresse
-# vue du navigateur dépend du réseau et d'un éventuel proxy. Laissée VIDE (le
-# défaut), les événements ne portent pas de lien de lecture — la vignette,
-# elle, voyage dans l'événement et reste visible dans tous les cas.
+#   - le CLIP de chaque détection (page servie par la caméra) ;
+#   - son DIRECT, indépendamment de toute détection.
+#
+# Dans les deux cas c'est la CAMÉRA qui sert la page, affichée dans un cadre
+# par le manager : les vidéos restent où elles sont, et le jeton d'API ne
+# quitte jamais la caméra.
+#
+# Elle ne peut pas la deviner : elle écoute sur 0.0.0.0, et son adresse vue du
+# navigateur dépend du réseau et d'un éventuel proxy. Laissée VIDE (le
+# défaut), aucun de ces liens n'est proposé — la vignette, elle, voyage dans
+# l'événement et reste visible dans tous les cas.
 public_url = ""
 
 [camera]
@@ -62,6 +68,10 @@ topic = "foxguard/detections"
 
 # Section entièrement optionnelle : un camera-config.toml sans [recording] du tout
 # continue de fonctionner, avec 7 jours de conservation.
+# Le FORMAT des enregistrements suit [h264] : MP4 fragmenté quand l'encodage
+# est actif, format d'images JPEG horodatées (.mjpeg) sinon. Les deux
+# cohabitent dans le dossier — une caméra mise à jour continue de servir et de
+# purger ce qu'elle a écrit avant.
 [recording]
 # Dossier où sont écrits, listés et purgés les enregistrements. Relatif au
 # répertoire de travail par défaut. Le renseigner en ABSOLU est recommandé
@@ -79,8 +89,8 @@ retention_days = 7
 cleanup_interval_secs = 3600
 
 # Clips d'événement : quelques secondes de vidéo autour de chaque détection,
-# écrites dans le même dossier et soumises à la même rétention que les
-# enregistrements ci-dessus. C'est ce qui donne à la timeline de l'interface
+# écrites dans le même dossier, dans le même format et soumises à la même
+# rétention que les enregistrements ci-dessus. C'est ce qui donne à la timeline de l'interface
 # du manager un accès direct à ce qui s'est passé.
 #
 # Indépendants de l'enregistrement continu, qui lui est piloté à la main
@@ -132,16 +142,48 @@ hold_secs = 3
 # 0 DÉSACTIVE ce passage périodique.
 max_idle_secs = 20
 
-# Section entièrement optionnelle : encodage H.264 du flux et mise à
-# disposition en RTSP, pour les lecteurs vidéo et enregistreurs du réseau
-# (VLC, ffmpeg, Home Assistant, Frigate, un NVR...).
+# Section entièrement optionnelle : encodage H.264 du flux caméra.
+#
+# C'est LE réglage qui décide de presque tout, parce que le flux encodé sert
+# trois consommateurs :
+#
+#   - le DIRECT des interfaces web, décodé par le navigateur lui-même
+#     (WebCodecs). Aucun navigateur n'implémente RTSP : c'est par là que les
+#     interfaces reçoivent du H.264 ;
+#   - les ENREGISTREMENTS et les clips, qui deviennent des MP4 — une vingtaine
+#     de fois plus légers que le format d'images JPEG historique, et lisibles
+#     par n'importe quel lecteur ;
+#   - le flux RTSP, s'il est activé ci-dessous.
+#
+# DÉSACTIVÉ par défaut : l'encodage est logiciel, donc coûteux en CPU. Rien
+# n'est encodé tant que personne ne regarde ET qu'aucun enregistrement n'est
+# en cours, mais le réglage reste explicite.
+#
+# Laissé à false, tout continue comme avant : direct en MJPEG, enregistrements
+# au format .mjpeg horodaté.
+[h264]
+enabled = false
+# Cadence cible du flux encodé. Volontairement inférieure à la cadence de
+# capture : c'est le réglage qui pèse le plus sur le coût de l'encodage, et
+# 12 im/s suffisent largement à une scène de surveillance. Elle s'applique
+# aussi aux enregistrements.
+fps = 12
+# Débit cible, en kilobits par seconde.
+bitrate_kbps = 1500
+# Intervalle entre deux images clés, en secondes. Borne le temps qu'un lecteur
+# qui vient de se connecter passe devant un écran noir. Une image clé est de
+# toute façon produite à la demande dès qu'un consommateur arrive.
+keyframe_interval_secs = 2
+
+# Section entièrement optionnelle : mise à disposition du flux encodé en RTSP,
+# pour les lecteurs vidéo et enregistreurs du réseau (VLC, ffmpeg, Home
+# Assistant, Frigate, un NVR...).
 #
 #   vlc "rtsp://192.168.1.42:8554/stream?token=secret123"
 #   ffplay -rtsp_transport tcp "rtsp://192.168.1.42:8554/stream?token=secret123"
 #
-# DÉSACTIVÉE par défaut : l'encodage est logiciel, donc coûteux en CPU. Rien
-# n'est encodé tant qu'aucun lecteur n'est connecté, mais le réglage reste
-# explicite.
+# L'activer active aussi l'encodage [h264] ci-dessus : un serveur RTSP sans
+# flux à servir n'aurait aucun sens.
 [rtsp]
 enabled = false
 host = "0.0.0.0"
@@ -152,17 +194,7 @@ port = 8554
 path = "stream"
 # Exiger le jeton de [server] api_token dans la chaîne de requête de l'URL.
 #
-# ACTIF par défaut : ce flux montre exactement la même image que le WebSocket,
-# qui est lui authentifié. L'ouvrir sans contrôle serait une régression de
-# confidentialité, pas une simplification.
+# ACTIF par défaut : ce flux montre exactement la même image que les
+# interfaces web, qui sont elles authentifiées. L'ouvrir sans contrôle serait
+# une régression de confidentialité, pas une simplification.
 require_token = true
-# Cadence cible du flux encodé. Volontairement inférieure à la cadence de
-# capture : c'est le réglage qui pèse le plus sur le coût de l'encodage, et
-# 12 im/s suffisent largement à une scène de surveillance.
-fps = 12
-# Débit cible, en kilobits par seconde.
-bitrate_kbps = 1500
-# Intervalle entre deux images clés, en secondes. Borne le temps qu'un lecteur
-# qui vient de se connecter passe devant un écran noir. Une image clé est de
-# toute façon produite à la demande dès qu'une lecture démarre.
-keyframe_interval_secs = 2

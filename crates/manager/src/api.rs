@@ -111,6 +111,22 @@ pub struct EventRecord {
     pub clip_url: Option<String>,
 }
 
+/// Une caméra connue, telle que l'interface la reçoit.
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct CameraInfo {
+    /// Nom déclaré par la caméra (`[camera] name`).
+    pub name: String,
+
+    /// URL de la vue en DIRECT de cette caméra, ou `null` si elle n'a pas
+    /// déclaré son URL publique.
+    ///
+    /// Elle pointe vers la caméra, qui sert elle-même cette page : son flux
+    /// est authentifié par un jeton que le manager n'a pas — et qu'il n'a
+    /// aucune raison d'avoir (voir `live_handler` côté caméra).
+    pub live_url: Option<String>,
+}
+
 impl EventRecord {
     /// Construit la vue d'API d'un événement conservé.
     fn from_stored(stored: StoredEvent) -> Self {
@@ -118,7 +134,7 @@ impl EventRecord {
             thumbnail_url: stored
                 .has_thumbnail
                 .then(|| format!("/api/events/{}/thumbnail", stored.id)),
-            clip_url: stored.event.clip.as_ref().and_then(|clip| clip.url()),
+            clip_url: stored.event.clip_url(),
             id: stored.id,
             camera: stored.event.camera,
             timestamp: stored.event.timestamp,
@@ -231,7 +247,19 @@ async fn thumbnail_handler(State(state): State<Arc<AppState>>, Path(id): Path<i6
 /// l'historique.
 async fn cameras_handler(State(state): State<Arc<AppState>>) -> Response {
     match state.repository.cameras().await {
-        Ok(cameras) => Json(cameras).into_response(),
+        Ok(cameras) => Json(
+            cameras
+                .into_iter()
+                .map(|camera| CameraInfo {
+                    live_url: camera
+                        .base_url
+                        .as_deref()
+                        .map(|base| format!("{}/live", base.trim_end_matches('/'))),
+                    name: camera.name,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
         Err(e) => internal_error("Lecture des caméras", e),
     }
 }

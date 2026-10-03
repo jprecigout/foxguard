@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use chrono::{Duration, Local, NaiveDate};
 use foxguard_manager::db::EventRepository;
-use foxguard_protocol::{ClipRef, DetectionEvent, PersonStatus};
+use foxguard_protocol::{DetectionEvent, PersonStatus};
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -80,6 +80,7 @@ fn event(camera: &str, name: Option<&str>, minutes_ago: i64) -> DetectionEvent {
         timestamp: Local::now() - Duration::minutes(minutes_ago),
         status,
         thumbnail: None,
+        base_url: None,
         clip: None,
     }
 }
@@ -192,10 +193,15 @@ async fn cameras_are_listed_once_each_and_sorted() {
     repo.record(&event("entree", Some("lou"), 0)).await.unwrap();
     repo.record(&event("salon", Some("mael"), 0)).await.unwrap();
 
-    assert_eq!(
-        repo.cameras().await.expect("caméras"),
-        vec!["entree", "salon"]
-    );
+    let names: Vec<String> = repo
+        .cameras()
+        .await
+        .expect("caméras")
+        .into_iter()
+        .map(|camera| camera.name)
+        .collect();
+
+    assert_eq!(names, vec!["entree", "salon"]);
 }
 
 // --- events_for_day ---
@@ -381,26 +387,19 @@ async fn an_unknown_identifier_has_no_thumbnail_rather_than_an_error() {
 async fn a_clip_reference_survives_the_round_trip() {
     let repo = repo_or_skip!();
 
-    let clip = ClipRef {
-        file: "evt_20260918_154207123.mjpeg".to_string(),
-        base_url: "http://192.168.1.42:8080".to_string(),
-    };
-
-    repo.record(&event("salon", None, 0).with_clip(clip.clone()))
-        .await
-        .expect("écriture");
+    repo.record(
+        &event("salon", None, 0)
+            .with_base_url("http://192.168.1.42:8080")
+            .with_clip("evt_20260918_154207123.mp4"),
+    )
+    .await
+    .expect("écriture");
 
     let events = repo.recent(1).await.expect("lecture");
 
-    assert_eq!(events[0].event.clip.as_ref(), Some(&clip));
     assert_eq!(
-        events[0]
-            .event
-            .clip
-            .as_ref()
-            .and_then(|c| c.url())
-            .as_deref(),
-        Some("http://192.168.1.42:8080/play/evt_20260918_154207123.mjpeg")
+        events[0].event.clip_url().as_deref(),
+        Some("http://192.168.1.42:8080/play/evt_20260918_154207123.mp4")
     );
 }
 
@@ -410,18 +409,64 @@ async fn a_clip_from_a_camera_without_a_public_url_yields_no_link() {
     // vaut aucun lien qu'un lien mort.
     let repo = repo_or_skip!();
 
-    repo.record(&event("salon", None, 0).with_clip(ClipRef {
-        file: "evt.mjpeg".to_string(),
-        base_url: String::new(),
-    }))
-    .await
-    .expect("écriture");
+    repo.record(&event("salon", None, 0).with_clip("evt.mp4"))
+        .await
+        .expect("écriture");
 
     let events = repo.recent(1).await.expect("lecture");
-    let clip = events[0].event.clip.as_ref().expect("clip conservé");
 
-    assert_eq!(clip.file, "evt.mjpeg");
-    assert_eq!(clip.url(), None);
+    assert_eq!(events[0].event.clip.as_deref(), Some("evt.mp4"));
+    assert_eq!(events[0].event.clip_url(), None);
+}
+
+#[tokio::test]
+async fn a_camera_reports_its_most_recent_base_url() {
+    // Une caméra qui change d'adresse doit pouvoir être rejointe à la
+    // nouvelle, pas à celle de son premier événement.
+    let repo = repo_or_skip!();
+
+    repo.record(&event("salon", None, 60).with_base_url("http://ancienne:8080"))
+        .await
+        .expect("écriture");
+    repo.record(&event("salon", None, 1).with_base_url("http://nouvelle:8080"))
+        .await
+        .expect("écriture");
+
+    let cameras = repo.cameras().await.expect("caméras");
+
+    assert_eq!(cameras.len(), 1);
+    assert_eq!(cameras[0].base_url.as_deref(), Some("http://nouvelle:8080"));
+}
+
+#[tokio::test]
+async fn a_camera_that_declares_no_url_reports_none() {
+    let repo = repo_or_skip!();
+
+    repo.record(&event("salon", None, 0))
+        .await
+        .expect("écriture");
+
+    let cameras = repo.cameras().await.expect("caméras");
+    assert_eq!(cameras[0].base_url, None);
+}
+
+#[tokio::test]
+async fn the_live_url_does_not_depend_on_a_clip() {
+    // Une caméra dont aucune détection n'a produit de clip se regarde quand
+    // même : c'est toute la raison d'avoir sorti l'URL de base du clip.
+    let repo = repo_or_skip!();
+
+    repo.record(&event("salon", None, 0).with_base_url("http://192.168.1.42:8080"))
+        .await
+        .expect("écriture");
+
+    let events = repo.recent(1).await.expect("lecture");
+
+    assert_eq!(events[0].event.clip_url(), None);
+    assert_eq!(
+        events[0].event.live_url().as_deref(),
+        Some("http://192.168.1.42:8080/live")
+    );
 }
 
 #[tokio::test]

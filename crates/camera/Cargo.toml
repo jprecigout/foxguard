@@ -16,7 +16,12 @@ futures-util = "0.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
-tower-http = { workspace = true }
+tower-http = { workspace = true, features = ["fs"] }
+# `ServiceExt::oneshot`, pour déléguer le service d'un fichier
+# d'enregistrement à `tower_http::services::ServeFile` (voir src/api.rs).
+# Déjà présent dans le graphe de dépendances via axum : aucun coût de
+# compilation supplémentaire.
+tower = { version = "0.5", features = ["util"] }
 rayon = "1.10"
 
 # Traitement image & V4L2

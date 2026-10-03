@@ -7,8 +7,11 @@
 //! `ui/`).
 //!
 //! ÉTAT : la chaîne caméra → MQTT → manager → PostgreSQL → HTTP → interface
-//! marche de bout en bout, vignettes et clips des détections compris. L'API
-//! reste en LECTURE SEULE — le pilotage d'une caméra passe par son interface
+//! marche de bout en bout, vignettes et clips des détections compris, ainsi
+//! que l'accès au flux en DIRECT de chaque caméra. L'API reste en LECTURE
+//! SEULE, et le direct n'y transite pas : le manager ne publie que l'URL de
+//! la page que la caméra sert elle-même, dont le jeton ne lui est jamais
+//! confié. Le pilotage d'une caméra passe de même par son interface
 //! embarquée, qui doit rester le secours disponible quand ce serveur est en
 //! panne. Restent à construire : les notifications.
 

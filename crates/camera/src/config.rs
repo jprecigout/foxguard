@@ -28,9 +28,24 @@ pub struct Config {
     // Section entière optionnelle : pré-filtre de mouvement devant YOLO.
     #[serde(default)]
     pub motion: MotionConfig,
-    // Section entière optionnelle : encodage H.264 et flux RTSP.
+    // Section entière optionnelle : encodage H.264 du flux.
+    #[serde(default)]
+    pub h264: H264Config,
+    // Section entière optionnelle : serveur RTSP.
     #[serde(default)]
     pub rtsp: RtspConfig,
+}
+
+impl Config {
+    /// Vrai si le flux doit être encodé en H.264.
+    ///
+    /// `[rtsp] enabled` l'implique : un serveur RTSP sans flux à servir n'a
+    /// aucun sens. C'est aussi ce qui garde valide un `camera-config.toml`
+    /// antérieur à l'apparition de la section `[h264]`, où le flux RTSP
+    /// s'activait à lui seul.
+    pub fn h264_enabled(&self) -> bool {
+        self.h264.enabled || self.rtsp.enabled
+    }
 }
 
 /// Pré-filtre de mouvement placé DEVANT l'inférence YOLO (voir
@@ -130,14 +145,82 @@ fn default_motion_max_idle_secs() -> u64 {
     20
 }
 
-/// Encodage H.264 du flux caméra et sa mise à disposition en RTSP (voir
-/// `crate::h264` et `crate::rtsp`).
+/// Encodage H.264 du flux caméra (voir `crate::h264`).
+///
+/// Ces réglages ne sont PAS dans `[rtsp]`, bien qu'ils y aient commencé : le
+/// flux encodé sert aujourd'hui trois consommateurs — les lecteurs RTSP du
+/// réseau, le direct des interfaces web (décodé par le navigateur), et les
+/// enregistrements. Les laisser sous `[rtsp]` laisserait croire qu'ils ne
+/// concernent que le premier.
 ///
 /// Section entièrement optionnelle et DÉSACTIVÉE par défaut : l'encodage est
-/// logiciel, donc coûteux en CPU, et une installation qui se contente de
-/// l'interface web embarquée n'a aucune raison de le payer. Rien n'est
-/// encodé tant qu'aucun lecteur n'est effectivement connecté, mais le
-/// réglage reste explicite.
+/// logiciel, donc coûteux en CPU, et une installation qui se contente du flux
+/// MJPEG historique n'a aucune raison de le payer. Rien n'est encodé tant
+/// qu'aucun consommateur n'est effectivement abonné, mais le réglage reste
+/// explicite.
+#[derive(Debug, Clone, Deserialize)]
+pub struct H264Config {
+    /// Encodage disponible ou non.
+    ///
+    /// `[rtsp] enabled = true` l'implique (voir [`Config::h264_enabled`]) :
+    /// il n'est donc à activer explicitement que pour servir les interfaces
+    /// web sans ouvrir de port RTSP sur le réseau.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Cadence cible du flux encodé, en images par seconde.
+    ///
+    /// Volontairement INFÉRIEURE à la cadence de capture par défaut : c'est
+    /// le réglage qui pèse le plus sur le coût de l'encodage, et 12 im/s
+    /// suffisent largement à une scène de surveillance. Les frames en trop
+    /// sont écartées avant l'encodeur (voir `crate::capture::capture_loop`).
+    #[serde(default = "default_h264_fps")]
+    pub fps: u32,
+
+    /// Débit cible, en kilobits par seconde.
+    #[serde(default = "default_h264_bitrate_kbps")]
+    pub bitrate_kbps: u32,
+
+    /// Intervalle entre deux images clés, en secondes.
+    ///
+    /// Borne le temps qu'un consommateur qui vient de s'abonner passe devant
+    /// un écran noir : une image clé est le seul point d'entrée d'un
+    /// décodeur. Courte, les images clés mangent le débit ; longue, le
+    /// démarrage traîne. Une image clé est de toute façon produite à la
+    /// demande dès qu'un consommateur arrive.
+    #[serde(default = "default_h264_keyframe_interval_secs")]
+    pub keyframe_interval_secs: u32,
+}
+
+impl Default for H264Config {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            fps: default_h264_fps(),
+            bitrate_kbps: default_h264_bitrate_kbps(),
+            keyframe_interval_secs: default_h264_keyframe_interval_secs(),
+        }
+    }
+}
+
+fn default_h264_fps() -> u32 {
+    12
+}
+
+fn default_h264_bitrate_kbps() -> u32 {
+    1500
+}
+
+fn default_h264_keyframe_interval_secs() -> u32 {
+    2
+}
+
+/// Mise à disposition du flux encodé en RTSP (voir `crate::rtsp`), pour les
+/// lecteurs vidéo et enregistreurs du réseau.
+///
+/// Section entièrement optionnelle et désactivée par défaut. L'activer active
+/// aussi l'encodage (voir [`Config::h264_enabled`]) : les réglages de
+/// l'encodeur, eux, sont dans `[h264]`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RtspConfig {
     #[serde(default)]
@@ -167,28 +250,6 @@ pub struct RtspConfig {
     /// régression de confidentialité, pas une simplification.
     #[serde(default = "default_true")]
     pub require_token: bool,
-
-    /// Cadence cible du flux encodé, en images par seconde.
-    ///
-    /// Volontairement INFÉRIEURE à la cadence de capture par défaut : c'est
-    /// le réglage qui pèse le plus sur le coût de l'encodage, et 12 im/s
-    /// suffisent largement à une scène de surveillance. Les frames en trop
-    /// sont écartées avant l'encodeur (voir `crate::capture::capture_loop`).
-    #[serde(default = "default_rtsp_fps")]
-    pub fps: u32,
-
-    /// Débit cible, en kilobits par seconde.
-    #[serde(default = "default_rtsp_bitrate_kbps")]
-    pub bitrate_kbps: u32,
-
-    /// Intervalle entre deux images clés, en secondes.
-    ///
-    /// Borne le temps qu'un lecteur qui vient de se connecter passe devant un
-    /// écran noir. Court, les images clés mangent le débit ; long, le
-    /// démarrage traîne. Une image clé est de toute façon produite à la
-    /// demande dès qu'une session démarre (voir `crate::rtsp`).
-    #[serde(default = "default_rtsp_keyframe_interval_secs")]
-    pub keyframe_interval_secs: u32,
 }
 
 impl Default for RtspConfig {
@@ -199,9 +260,6 @@ impl Default for RtspConfig {
             port: default_rtsp_port(),
             path: default_rtsp_path(),
             require_token: true,
-            fps: default_rtsp_fps(),
-            bitrate_kbps: default_rtsp_bitrate_kbps(),
-            keyframe_interval_secs: default_rtsp_keyframe_interval_secs(),
         }
     }
 }
@@ -216,18 +274,6 @@ fn default_rtsp_port() -> u16 {
 
 fn default_rtsp_path() -> String {
     "stream".to_string()
-}
-
-fn default_rtsp_fps() -> u32 {
-    12
-}
-
-fn default_rtsp_bitrate_kbps() -> u32 {
-    1500
-}
-
-fn default_rtsp_keyframe_interval_secs() -> u32 {
-    2
 }
 
 /// Paramètres des enregistrements vidéo : durée de conservation et fréquence
@@ -341,13 +387,14 @@ pub struct ServerConfig {
     ///
     /// Publiée dans les événements MQTT pour que la timeline de l'interface
     /// du manager puisse offrir un lien direct vers le clip d'une détection
-    /// (voir `foxguard_protocol::ClipRef`).
+    /// ET vers la vue en direct de la caméra (voir
+    /// `foxguard_protocol::DetectionEvent::clip_url` et `::live_url`).
     ///
     /// La caméra NE PEUT PAS la deviner : elle écoute en général sur
     /// `0.0.0.0`, et son adresse vue du navigateur dépend du réseau et d'un
     /// éventuel proxy. Laissée vide (le défaut), les événements ne portent
-    /// pas de lien de lecture — la vignette, elle, voyage dans l'événement
-    /// et reste visible dans tous les cas.
+    /// ni lien de lecture ni lien de direct — la vignette, elle, voyage dans
+    /// l'événement et reste visible dans tous les cas.
     #[serde(default)]
     pub public_url: String,
 }
@@ -787,9 +834,48 @@ mod tests {
         let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
 
         assert!(!config.rtsp.enabled);
+        assert!(!config.h264.enabled);
         assert_eq!(config.rtsp.port, 8554);
         assert_eq!(config.rtsp.path, "stream");
-        assert_eq!(config.rtsp.fps, 12);
+        assert_eq!(config.h264.fps, 12);
+    }
+
+    #[test]
+    fn enabling_rtsp_implies_enabling_the_encoder() {
+        // Un serveur RTSP sans flux à servir n'a aucun sens — et c'est ce qui
+        // garde valide un `camera-config.toml` antérieur à la section
+        // `[h264]`, où le flux RTSP s'activait à lui seul.
+        let toml = format!("{VALID_TOML}\n[rtsp]\nenabled = true\n");
+        let file = write_temp_toml(&toml);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert!(!config.h264.enabled, "la section [h264] reste à son défaut");
+        assert!(config.h264_enabled(), "mais l'encodage doit être actif");
+    }
+
+    #[test]
+    fn the_encoder_can_be_enabled_without_opening_an_rtsp_port() {
+        // Le cas d'une installation qui veut le H.264 dans ses interfaces web
+        // sans exposer de flux sur le réseau.
+        let toml = format!("{VALID_TOML}\n[h264]\nenabled = true\n");
+        let file = write_temp_toml(&toml);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert!(config.h264_enabled());
+        assert!(!config.rtsp.enabled);
+    }
+
+    #[test]
+    fn the_encoder_settings_can_be_tuned() {
+        let toml = format!(
+            "{VALID_TOML}\n[h264]\nenabled = true\nfps = 25\nbitrate_kbps = 3000\nkeyframe_interval_secs = 1\n"
+        );
+        let file = write_temp_toml(&toml);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert_eq!(config.h264.fps, 25);
+        assert_eq!(config.h264.bitrate_kbps, 3000);
+        assert_eq!(config.h264.keyframe_interval_secs, 1);
     }
 
     #[test]
@@ -814,9 +900,6 @@ mod tests {
                 port = 554
                 path = "/salon/live/"
                 require_token = false
-                fps = 25
-                bitrate_kbps = 3000
-                keyframe_interval_secs = 1
             "#
         );
         let file = write_temp_toml(&toml);
@@ -827,9 +910,6 @@ mod tests {
         assert_eq!(config.rtsp.port, 554);
         assert_eq!(config.rtsp.path, "/salon/live/");
         assert!(!config.rtsp.require_token);
-        assert_eq!(config.rtsp.fps, 25);
-        assert_eq!(config.rtsp.bitrate_kbps, 3000);
-        assert_eq!(config.rtsp.keyframe_interval_secs, 1);
     }
 
     // --- Clips d'événement et URL publique ---

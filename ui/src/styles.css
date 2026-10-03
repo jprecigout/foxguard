@@ -180,6 +180,19 @@ input[type="date"] {
   color: var(--danger);
 }
 
+/* Bouton d'accès au direct d'une caméra. Le point rouge est la convention
+   universelle de l'enregistrement en cours ; ici, du flux en cours. */
+button.live {
+  border-color: var(--accent-red);
+  color: var(--accent-red);
+  font-size: 0.78rem;
+  padding: 3px 10px;
+}
+
+button.live:hover:not(:disabled) {
+  background: rgba(229, 57, 53, 0.14);
+}
+
 /* --- Timeline : bande de 24 heures -----------------------------------
  *
  * Une piste en position relative, dans laquelle graduations, marques et

@@ -1,22 +1,23 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { ApiError, fetchCameras, fetchEventsForDay } from "./api";
-import type { EventsResponse } from "./api";
+import type { CameraInfo, EventsResponse } from "./api";
+import { CameraFrameDialog } from "./components/CameraFrameDialog";
 import { CameraTimeline } from "./components/CameraTimeline";
-import { ClipDialog } from "./components/ClipDialog";
 import { DayBar } from "./components/DayBar";
 import { today } from "./dates";
 import { groupByCamera } from "./grouping";
 
-/** Le clip actuellement ouvert dans le lecteur. */
-interface OpenClip {
+/** La page de caméra actuellement affichée dans le cadre. */
+interface OpenFrame {
   url: string;
   title: string;
+  hint: string;
 }
 
 export default function App() {
   const [day, setDay] = useState(today);
-  const [cameras, setCameras] = useState<string[]>([]);
+  const [cameras, setCameras] = useState<CameraInfo[]>([]);
   const [response, setResponse] = useState<EventsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -25,7 +26,7 @@ export default function App() {
   // pellicule de vignettes : cliquer une marque désigne une vignette, et
   // réciproquement.
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [openClip, setOpenClip] = useState<OpenClip | null>(null);
+  const [openFrame, setOpenFrame] = useState<OpenFrame | null>(null);
 
   const load = useCallback(
     async (signal: AbortSignal) => {
@@ -127,16 +128,30 @@ export default function App() {
             cameraDay={cameraDay}
             selectedId={selectedId}
             onSelect={setSelectedId}
-            onPlay={(url, title) => setOpenClip({ url, title })}
+            onPlay={(url, title) =>
+              setOpenFrame({
+                url,
+                title,
+                hint: "Le clip est lu depuis la caméra elle-même : elle doit être joignable depuis ce navigateur.",
+              })
+            }
+            onWatchLive={(url, camera) =>
+              setOpenFrame({
+                url,
+                title: `${camera} — direct`,
+                hint: "Le direct vient de la caméra elle-même, qui l'encode en H.264 quand le navigateur sait le décoder.",
+              })
+            }
           />
         ))}
       </div>
 
-      {openClip && (
-        <ClipDialog
-          url={openClip.url}
-          title={openClip.title}
-          onClose={() => setOpenClip(null)}
+      {openFrame && (
+        <CameraFrameDialog
+          url={openFrame.url}
+          title={openFrame.title}
+          hint={openFrame.hint}
+          onClose={() => setOpenFrame(null)}
         />
       )}
     </div>

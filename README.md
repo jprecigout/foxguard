@@ -11,15 +11,15 @@
 * **Reconnaissance faciale** : Détection et alignement du visage (YuNet, recadré en 112x112) puis extraction d'une empreinte faciale (ArcFace / MobileFaceNet), comparée par similarité cosinus à une base de visages connus.
 * **Capture de photo de référence depuis l'interface web** : Un bouton « Capturer » enregistre la frame webcam courante comme nouveau gabarit de référence pour un nom donné. Plusieurs captures (angles/poses différents) s'accumulent pour la même personne au lieu de se remplacer, ce qui rend la reconnaissance plus fiable (voir `known_faces/`).
 * **Interface Web de Contrôle** : Panneau de contrôle moderne intégré et servi via le framework web Axum (`crates/camera/static/controller.html`).
-* **Streaming Vidéo en Direct** : Diffusion par WebSockets (`/ws`) avec une optimisation de type *pass-through* (transmission directe du buffer MJPEG sans décodage/ré-encodage CPU superflu lorsque la détection est inactive).
-* **Flux H.264 / RTSP (optionnel)** : Le même flux, encodé en H.264 et servi en RTSP (`rtsp://<caméra>:8554/stream?token=...`), lisible par n'importe quel lecteur ou enregistreur vidéo (VLC, ffmpeg, Home Assistant, Frigate, un NVR). Encodage logiciel (openh264), **aucune frame n'est encodée tant qu'aucun lecteur n'est connecté**. Désactivé par défaut (voir `[rtsp]`).
+* **Streaming Vidéo en Direct** : Diffusion par WebSockets, en **H.264 décodé par le navigateur** (WebCodecs) quand l'encodage est actif, avec repli automatique sur le MJPEG historique (`/ws`) — lequel conserve son optimisation de type *pass-through* (transmission directe du buffer sans décodage/ré-encodage CPU superflu lorsque la détection est inactive).
+* **Flux H.264 / RTSP (optionnel)** : Le même flux, servi en RTSP (`rtsp://<caméra>:8554/stream?token=...`), lisible par n'importe quel lecteur ou enregistreur vidéo (VLC, ffmpeg, Home Assistant, Frigate, un NVR). Encodage logiciel (openh264), **aucune frame n'est encodée tant que personne ne regarde et qu'aucun enregistrement n'est en cours**. Désactivé par défaut (voir `[h264]` et `[rtsp]`).
 * **Pré-filtre de mouvement** : YOLO n'est relancé que si l'image a réellement changé. Une caméra de surveillance regarde une scène immobile l'essentiel du temps, et l'inférence est de loin le poste de dépense dominant sur un Raspberry Pi ; comparer deux miniatures coûte quatre ordres de grandeur de moins. Deux garde-fous évitent que cette économie se paie en détections manquées (voir `[motion]`).
 * **Clips d'événement** : Quelques secondes de vidéo autour de chaque détection, **pré-enregistrement compris**, écrites dans le dossier des enregistrements et soumises à la même rétention. C'est ce qui donne à la timeline de l'interface du manager un accès direct à ce qui s'est passé.
 * **Gestion des enregistrements** : Suppression manuelle depuis l'interface web (bouton par enregistrement, avec confirmation), et purge automatique des enregistrements dépassant la durée de conservation configurée (voir `[recording]`).
-* **Enregistrement Vidéo** : Sauvegarde des flux en fichiers `.mjpeg` (dossier `output_record/`), activable dynamiquement depuis l'interface web, avec liste et relecture des enregistrements directement dans l'UI. Chaque frame est horodatée à l'enregistrement, pour une relecture fidèle au FPS réel de capture (qui peut varier, par exemple en basse luminosité) plutôt qu'à un débit fixe supposé.
+* **Enregistrement Vidéo** : Sauvegarde en **MP4 fragmenté** (H.264) dès que l'encodage est actif — une vingtaine de fois plus léger que le format historique, lisible par un `<video>` de navigateur comme par VLC, et *résistant à la troncature* : une coupure de courant n'y coûte que le dernier fragment, là où un MP4 ordinaire serait intégralement perdu. Sans encodage, le format d'images JPEG horodatées (`.mjpeg`) est conservé. Activable dynamiquement depuis l'interface web, avec liste et relecture directement dans l'UI.
 * **Alertes par E-mail** : Notification HTML automatique (avec logo et photo de la détection en pièces jointes inline) en cas de détection, avec gestion de délai (*cooldown*) pour éviter le spam.
 * **Publication MQTT (optionnelle)** : Publie un message JSON sur un broker MQTT à chaque *changement* d'état de reconnaissance d'une personne suivie (nouvelle personne inconnue, ou identification/perte d'identification), avec le nom de la caméra, l'horodatage, le nom de la personne si elle est connue, une **vignette** de la détection et la référence du **clip** correspondant. Désactivée par défaut, activable via `[mqtt] enabled = true` (voir Configuration ci-dessous).
-* **Timeline des détections (interface du manager)** : Pour chaque caméra, une bande de 24 heures qui situe les détections dans la journée, et une pellicule de vignettes qui montre ce qui s'est passé. Un clic ouvre le clip correspondant.
+* **Timeline des détections (interface du manager)** : Pour chaque caméra, une bande de 24 heures qui situe les détections dans la journée, et une pellicule de vignettes qui montre ce qui s'est passé. Un clic ouvre le clip correspondant — et un bouton donne accès au **direct** de la caméra, servi par elle et affiché dans un cadre.
 * **Overlay Graphique Natif** : Dessin de boîtes englobantes (*bounding boxes*) et de libellés textuels optimisés grâce à la police bitmap `font8x8`.
 
 ---
@@ -111,14 +111,17 @@ de travail.
   * **`thumbnail.rs`** : Vignette d'une détection, recadrée sur la personne, embarquée dans l'événement MQTT.
   * **`clips.rs`** : Clips vidéo d'événement — tampon circulaire de pré-enregistrement et écriture du clip autour de chaque détection.
   * **`codec.rs`** : Décodage YUYV → RGB, parallélisé avec Rayon.
-  * **`recording.rs`** : Écriture des enregistrements `output_record/*.mjpeg`, avec un horodatage réel par frame pour une relecture fidèle à la vitesse de capture (au lieu d'un débit fixe supposé).
+  * **`recording.rs`** : Écriture des enregistrements et des clips, dans l'un ou l'autre des deux formats (`.mp4` ou `.mjpeg`), avec une durée réelle par image dans les deux cas.
   * **`capture_loop.rs`** : Boucle principale de lecture V4L2 — incrustation des boîtes, alerte e-mail, alimentation des clips, encodage H.264, enregistrement disque et diffusion WebSocket. Le décodage de la frame n'y a lieu **qu'une fois et que si quelqu'un en a l'usage**, ce qui préserve le *pass-through* du flux MJPEG.
-* **`crates/camera/src/api.rs`** : Routage Axum, page de contrôle (`GET /`), upgrade WebSocket authentifié par jeton (`GET /ws?token=...`), commandes JSON entrantes (`set_monitoring`, `set_detection`, `set_recording`, `capture_reference`), liste (`GET /api/recordings`), téléchargement (`GET /recordings/{filename}`) et suppression (`DELETE /api/recordings/{filename}?token=...`, seule route destructive, authentifiée par le même jeton que le WebSocket) des enregistrements (le fichier `.mjpeg` est servi tel quel ; la relecture, avec son cadencement réel, se fait côté client).
+* **`crates/camera/src/api.rs`** : Routage Axum, page de contrôle (`GET /`), vue en direct seule (`GET /live`) et lecteur d'un enregistrement (`GET /play/{filename}`), deux WebSockets vidéo authentifiés par jeton — H.264 (`GET /ws/h264?token=...`) et MJPEG historique (`GET /ws?token=...`) —, capacités de la caméra (`GET /api/capabilities`, ce qui permet à une interface de choisir le premier et de se replier sur le second), commandes JSON entrantes (`set_monitoring`, `set_detection`, `set_recording`, `capture_reference`, acceptées indifféremment sur l'un ou l'autre socket), liste (`GET /api/recordings`), téléchargement (`GET /recordings/{filename}`, délégué à `ServeFile` donc servi par plages d'octets, ce dont un `<video>` a besoin pour se déplacer dans un MP4) et suppression (`DELETE /api/recordings/{filename}?token=...`, seule route destructive, authentifiée par le même jeton que les WebSockets) des enregistrements.
 * **`crates/camera/src/h264/`** : Encodage H.264 du flux (openh264), sans aucune connaissance du réseau.
   * **`i420.rs`** : Conversion vers le format d'entrée de l'encodeur, depuis le YUYV brut de la caméra (chemin le moins coûteux) ou depuis une image RGB déjà incrustée des boîtes de détection.
-  * **`encoder.rs`** : L'encodeur lui-même, les unités d'accès produites et les jeux de paramètres (SPS/PPS) annoncés dans le SDP.
+  * **`encoder.rs`** : L'encodeur lui-même, les unités d'accès produites et les jeux de paramètres (SPS/PPS).
+  * **`stream.rs`** : Le flux partagé entre la boucle de capture (qui produit) et ses trois consommateurs — RTSP, WebSocket des interfaces, enregistrements. C'est lui qui sait si quelqu'un regarde, et donc s'il faut encoder.
+* **`crates/camera/src/mp4/`** : Écriture de MP4 fragmentés contenant ce flux.
+  * **`boxes.rs`** : Les briques du format ISO-BMFF — une boîte déclare sa taille avant son contenu, donc on écrit d'abord et on renseigne ensuite.
+  * **`writer.rs`** : Le segment d'initialisation et les fragments, un par groupe d'images.
 * **`crates/camera/src/rtsp/`** : Serveur RTSP qui distribue ce flux aux lecteurs du réseau.
-  * **`stream.rs`** : Le flux partagé entre la boucle de capture (qui produit) et les sessions (qui consomment) — c'est lui qui sait si quelqu'un regarde, et donc s'il faut encoder.
   * **`server.rs`** : Acceptation des lecteurs et dialogue RTSP (`OPTIONS`, `DESCRIBE`, `SETUP`, `PLAY`, `TEARDOWN`).
   * **`message.rs`** : Analyse des messages RTSP, y compris les paquets binaires entrelacés que les lecteurs renvoient sur la même connexion.
   * **`transport.rs`** : Négociation du transport (RTP dans la connexion TCP, ou en UDP).
@@ -132,50 +135,66 @@ de travail.
   * **`types.rs`** : Types partagés du pipeline (`BoundingBox`, `KnownPerson`).
 * **`crates/camera/models/`** : Les 3 modèles ONNX embarqués (`yolov8n.onnx`, `face_detection_yunet_2023mar.onnx`, `arcface-mobilefacenet.onnx`).
 * **`crates/camera/src/geometry.rs`** : Calcul d'intersection sur union (IoU), utilitaire partagé entre le tracking (`capture/tracking.rs`) et la détection d'objets/visages (`vision/object_detector.rs`, `vision/face_detector.rs`), pour éviter de dupliquer ce calcul.
-* **`crates/camera/src/config.rs`** : Chargement et structures de `camera-config.toml` (serveur, caméra, détection, e-mail, MQTT, enregistrements et clips, mouvement, RTSP).
+* **`crates/camera/src/config.rs`** : Chargement et structures de `camera-config.toml` (serveur, caméra, détection, e-mail, MQTT, enregistrements et clips, mouvement, encodage H.264, RTSP).
 * **`crates/camera/src/mail.rs`** : Construction et envoi des alertes e-mail (HTML multipart avec logo et photo de la détection).
 * **`crates/camera/src/retention.rs`** : Tâche de fond qui supprime les enregistrements dépassant la durée de conservation configurée (`[recording] retention_days`), et prédicat partagé `is_recording_file` qui définit ce qui est un enregistrement pour la liste, le téléchargement, la suppression et la purge.
 * **`crates/camera/src/mqtt.rs`** : Connexion à un broker MQTT et publication des événements de détection (nom de caméra, horodatage, statut connu/inconnu) à chaque changement d'état ; fonctionnalité optionnelle (voir `[mqtt]` dans `camera-config.toml`).
 * **`crates/camera/src/util.rs`** : Petits utilitaires transverses (verrouillage de mutex tolérant à l'empoisonnement).
-* **`crates/camera/static/controller.html`** : Interface utilisateur web — flux vidéo, interrupteurs, capture de photo de référence, liste et lecture des enregistrements (relecture calée sur l'horodatage réel des frames).
-* **`crates/camera/static/clip-player.html`** : Lecteur autonome d'un enregistrement, servi par `GET /play/{fichier}`. C'est par lui que la timeline de l'interface du manager donne accès aux clips : ils restent sur la caméra, qui est donc la seule origine autorisée à les lire (voir « La timeline et les clips » plus bas).
+* **`crates/camera/static/controller.html`** : Interface utilisateur web — flux vidéo (H.264 décodé par WebCodecs si la caméra l'annonce, repli automatique sur le MJPEG sinon), interrupteurs, capture de photo de référence, liste et lecture des enregistrements (un `<video>` pour les MP4 ; pour le format historique, une relecture calée sur l'horodatage réel des frames).
+* **`crates/camera/static/clip-player.html`** : Lecteur autonome d'un enregistrement, servi par `GET /play/{fichier}`. Un `<video>` natif pour les MP4, le décodeur maison pour le format historique.
+* **`crates/camera/static/live.html`** : Vue en direct SEULE, servie par `GET /live`. C'est par elle que l'interface du manager affiche le direct d'une caméra, sans jamais recevoir son jeton d'API (voir « La timeline, les clips et le direct » plus bas).
 * **`crates/camera/assets/logo.svg`** : Logo FoxGuard — affiché dans ce README et embarqué dans le binaire (`include_bytes!`) pour les e-mails d'alerte.
 * **`known_faces/`** : Photos de référence pour la reconnaissance faciale, nommées `<nom>_<horodatage>.jpg` (plusieurs fichiers possibles par personne).
-* **`output_record/`** : Enregistrements vidéo `.mjpeg` générés par l'application.
+* **`output_record/`** : Enregistrements vidéo générés par l'application — `.mp4` quand l'encodage H.264 est actif, `.mjpeg` sinon (voir « Les enregistrements »).
 * **`crates/manager/`** : Le manager — `config.rs` (sa configuration `manager-config.toml`), `ingest.rs` (abonnement MQTT et décodage des événements), `db.rs` (persistance PostgreSQL), `retention.rs` (purge des événements trop anciens), `api.rs` (API HTTP de consultation et service du bundle de l'interface), `migrations/` (schéma, appliqué au démarrage).
 * **`crates/protocol/`** : `DetectionEvent` et `PersonStatus`, le contrat partagé entre la caméra et le manager.
-* **`ui/`** : Interface React du manager — `App.tsx` (composition), `components/` (barre de jour, timeline d'une caméra, lecteur de clip), `timeline.ts` (géométrie temporelle de la bande de 24 h), `grouping.ts` (regroupement par caméra), `generated/` (types d'API générés depuis le Rust). Voir `ui/README.md`.
+* **`ui/`** : Interface React du manager — `App.tsx` (composition), `components/` (barre de jour, timeline d'une caméra, cadre de lecture d'un clip ou du direct), `timeline.ts` (géométrie temporelle de la bande de 24 h), `grouping.ts` (regroupement par caméra), `generated/` (types d'API générés depuis le Rust). Voir `ui/README.md`.
 * **`deploy/camera/`** : `Dockerfile` de l'image Raspberry Pi.
 * **`deploy/server/`** : `Dockerfile` du manager, `compose.yml` (manager + broker MQTT) et `mosquitto.conf`.
 
 ---
 
-## 🎬 Le flux H.264 / RTSP (`[rtsp]`)
+## 🎬 L'encodage H.264 (`[h264]`)
 
-L'interface embarquée de la caméra diffuse déjà son flux par WebSocket, mais
-sous une forme qui n'appartient qu'à elle : des images JPEG successives, lues
-par une page écrite pour ça. Rien d'autre ne sait l'ouvrir. **RTSP est le
-protocole que tous les outils vidéo savent lire** : le même flux devient
-consultable depuis un lecteur, enregistrable par un NVR, intégrable dans une
-domotique, sans écrire une ligne de code pour chacun.
+C'est le réglage qui décide de presque tout, parce que le flux encodé sert
+**trois consommateurs**, et qu'il n'est encodé qu'une fois pour les trois :
 
-```bash
-vlc   "rtsp://192.168.1.42:8554/stream?token=secret123"
-ffplay -rtsp_transport tcp "rtsp://192.168.1.42:8554/stream?token=secret123"
-```
+| Consommateur | Ce qu'il en fait |
+| --- | --- |
+| Les **interfaces web** | Le direct, décodé par le navigateur lui-même (WebCodecs) et dessiné dans un `<canvas>` |
+| Les **enregistrements** | Des MP4, une vingtaine de fois plus légers que le format historique |
+| Le **serveur RTSP** | Le flux que lisent VLC, ffmpeg, un NVR, une domotique |
 
-Le flux montre **exactement ce que montre l'interface embarquée**, boîtes de
-détection incrustées comprises.
+Mesuré sur une scène de bureau en 640x360 : **1651 kb/s en MJPEG contre 76
+kb/s en H.264**, soit 21 fois moins.
+
+### Pourquoi les interfaces web ne « lisent pas le RTSP »
+
+**Aucun navigateur n'implémente RTSP.** Le flux RTSP s'adresse aux lecteurs
+vidéo du réseau, pas aux pages web. Pour afficher du H.264 dans une page, il
+faut le lui apporter par un transport qu'elle connaît et le faire décoder par
+elle : les unités d'accès partent donc sur un **WebSocket** (`/ws/h264`), et
+`VideoDecoder` (WebCodecs) les décode côté navigateur.
+
+C'est la voie la moins coûteuse des trois possibles : pas de conteneur à
+écrire (contrairement au MP4 fragmenté qu'exigerait un `<video>` en direct), et
+pas de pile WebRTC — dont les dépendances cryptographiques sont précisément ce
+que la compilation croisée ARM64 de ce dépôt s'applique à éviter.
+
+**Le MJPEG reste le repli**, et ce n'est pas une facilité : l'interface
+embarquée est le secours qui doit encore fonctionner quand tout le reste est
+en panne. Elle ne peut pas dépendre d'une API que le navigateur de secours
+n'aurait pas. La bascule est automatique, dans les deux sens.
 
 ### Ce que ça coûte, et ce qui le borne
 
 L'encodage est **logiciel** (openh264). C'est la dépense la plus lourde qu'on
 puisse ajouter à un Raspberry Pi, d'où trois garde-fous :
 
-1. la fonctionnalité est **désactivée par défaut** (`[rtsp] enabled = false`) ;
-2. **aucune frame n'est encodée tant qu'aucun lecteur n'est connecté** — le
-   flux sait s'il est regardé, et la boucle de capture ne l'alimente que dans
-   ce cas ;
+1. la fonctionnalité est **désactivée par défaut** (`[h264] enabled = false`) ;
+2. **aucune frame n'est encodée tant que personne ne regarde et qu'aucun
+   enregistrement n'est en cours** — le flux sait s'il a des abonnés, et la
+   boucle de capture ne l'alimente que dans ce cas ;
 3. la cadence du flux (`fps`, 12 par défaut) est **indépendante** de celle de
    la capture : les frames en trop sont écartées avant l'encodeur.
 
@@ -185,18 +204,40 @@ l'identique sur le poste de développement et sur le Pi — donc qu'il est
 testable — et qu'il ne dépend ni d'une version de noyau ni d'un réglage de
 `config.txt`.
 
+À noter : activer l'encodage change l'arbitrage. Les enregistrements en MJPEG
+écrivaient ~200 Ko/s sur la carte SD en permanence ; en H.264 c'est ~9 Ko/s,
+au prix du temps CPU de l'encodeur. Sur un Raspberry Pi, l'usure de la carte
+SD n'est pas un détail.
+
 > **Compilation croisée** : contrairement à `ring` et `native-tls` (voir plus
 > haut), `openh264` ne pose pas de problème sous QEMU ARM64. Son script de
 > compilation ne cherche d'assembleur que pour x86/x86\_64 et construit du C++
 > portable pour tout le reste. `OPENH264_NO_ASM=1` le désactive même sur x86,
 > si un environnement se montrait récalcitrant.
 
+---
+
+## 📡 Le flux RTSP (`[rtsp]`)
+
+RTSP est le protocole que tous les outils vidéo savent lire : le flux de la
+caméra devient consultable depuis un lecteur, enregistrable par un NVR,
+intégrable dans une domotique, sans écrire une ligne de code pour chacun.
+
+```bash
+vlc   "rtsp://192.168.1.42:8554/stream?token=secret123"
+ffplay -rtsp_transport tcp "rtsp://192.168.1.42:8554/stream?token=secret123"
+```
+
+Le flux montre **exactement ce que montrent les interfaces web**, boîtes de
+détection incrustées comprises. L'activer active aussi `[h264]` : un serveur
+RTSP sans flux à servir n'aurait aucun sens.
+
 ### Authentification
 
 `require_token = true` par défaut : le jeton de `[server] api_token` est
 attendu dans la chaîne de requête de l'URL. Ce flux montre la même image que
-le WebSocket, qui est lui authentifié — l'ouvrir sans contrôle serait une
-régression de confidentialité, pas une simplification.
+les interfaces web, qui sont elles authentifiées — l'ouvrir sans contrôle
+serait une régression de confidentialité, pas une simplification.
 
 Le jeton est vérifié **une fois par connexion** : un lecteur ne reprend pas
 l'URL du `DESCRIBE` pour son `SETUP`, il la reconstruit depuis le SDP, et la
@@ -219,6 +260,47 @@ foxguard-camera --test rtsp_gstreamer`). Il s'ignore de lui-même si
 `gst-launch-1.0` n'est pas installé. C'est lui qui a révélé deux
 incompatibilités qu'aucune assertion maison n'aurait vues — un lecteur
 n'utilise pas la même URL pour son `DESCRIBE`, son `SETUP` et son `PLAY`.
+
+---
+
+## 💾 Les enregistrements
+
+Deux formats cohabitent dans `output_record/`, et c'est l'extension qui
+tranche — pour la lecture comme pour la purge :
+
+| Format | Quand | Pourquoi |
+| --- | --- | --- |
+| **`.mp4`** | `[h264] enabled = true` | Une vingtaine de fois plus léger, lisible par un `<video>` de navigateur comme par VLC |
+| **`.mjpeg`** | sinon | Le format historique : des images JPEG horodatées. Sans encodeur, il n'y a pas de flux H.264 à écrire |
+
+Une caméra mise à jour continue de servir, relire et purger les
+enregistrements qu'elle a écrits avant : les deux lecteurs sont conservés.
+
+### Pourquoi FRAGMENTÉ
+
+Un MP4 ordinaire place sa table des matières à la fin, une fois toutes les
+tailles connues. C'est rédhibitoire ici : un enregistrement de
+vidéosurveillance peut être interrompu par une coupure de courant, un disque
+plein ou un redémarrage — et un MP4 ordinaire amputé de sa fin n'est pas « un
+peu abîmé », il est **entièrement illisible**, pas une image ne peut en être
+tirée.
+
+Le MP4 fragmenté écrit au contraire un segment d'initialisation complet dès
+l'ouverture, puis des fragments autonomes. Un fichier tronqué perd son dernier
+fragment, et rien d'autre. Un test le vérifie en coupant volontairement un
+fichier en deux et en le faisant décoder.
+
+### Les durées sont réelles
+
+La cadence d'une caméra n'est pas constante — une webcam UVC la réduit en
+basse luminosité. Chaque image porte donc sa durée propre, mesurée, et non une
+cadence supposée. C'était déjà la propriété du format historique ; elle n'est
+pas perdue en passant au MP4.
+
+La durée totale, elle, est inscrite à la FERMETURE du fichier. Un fMP4
+l'annonce nulle tant qu'il est ouvert ; sans cette correction finale, chaque
+lecteur devrait la deviner en parcourant les fragments, et afficherait en
+attendant une durée approximative et une barre de progression qui saute.
 
 ---
 
@@ -304,7 +386,7 @@ qu'il reçoit, ce qui est pire qu'un échec franc.
 > journalisés en `ERROR`. Une file de reprise sur disque serait la parade si
 > le besoin se confirme.
 
-### La timeline et les clips
+### La timeline, les clips et le direct
 
 Chaque détection s'accompagne de deux choses, qui ne voyagent **pas** par le
 même chemin — et c'est le point de conception à retenir :
@@ -326,7 +408,17 @@ authentifiées.
 cadre. La politique de même origine est respectée sans rien assouplir, et le
 format d'enregistrement reste connu du seul composant qui l'écrit.
 
-Pour que le lien existe, la caméra doit déclarer par quelle URL elle est
+**Le direct passe par le même chemin, pour une raison de plus.** La timeline
+propose aussi, par caméra, un bouton qui ouvre son flux en direct — et ce flux
+est servi par la page `GET /live` de la caméra, affichée dans le même genre de
+cadre. Au-delà de la même origine, il y a ici un jeton en jeu : le WebSocket
+vidéo de la caméra est authentifié, et c'est la caméra qui injecte son propre
+jeton dans la page qu'elle sert. **Le manager ne le reçoit jamais**, ni son
+interface, ni sa base. Lui confier le jeton de chaque caméra ferait du serveur
+annexe — la pièce la plus exposée du système — le point unique dont la
+compromission donne la main sur toutes les caméras.
+
+Pour que ces liens existent, la caméra doit déclarer par quelle URL elle est
 joignable depuis un navigateur — elle ne peut pas la deviner :
 
 ```toml
@@ -334,7 +426,7 @@ joignable depuis un navigateur — elle ne peut pas la deviner :
 public_url = "http://192.168.1.42:8080"
 ```
 
-Laissée vide, aucun lien de lecture n'est proposé : mieux vaut pas de lien
+Laissée vide, ni lecture ni direct ne sont proposés : mieux vaut pas de lien
 qu'un lien mort. La vignette, elle, reste visible dans tous les cas.
 
 ### Déploiement
@@ -507,8 +599,11 @@ deux questions différentes :
   le facteur ou un inconnu dans le jardin.
 
 Les deux sont reliées — cliquer une marque met en évidence la vignette
-correspondante, et réciproquement — et un clic sur une vignette ouvre le clip
-(voir « La timeline et les clips » plus haut).
+correspondante, et réciproquement — et un clic sur une vignette ouvre le clip.
+Un bouton par caméra ouvre par ailleurs son **flux en direct**, dans le même
+cadre, parce que la question qui suit « que s'est-il passé ? » est très
+souvent « et maintenant, qu'est-ce qu'on voit ? » (voir « La timeline, les
+clips et le direct » plus haut).
 
 Le bundle est produit par une étape Node du `Dockerfile` du manager : l'image
 ne dépend d'aucun `npm run build` lancé à la main.
@@ -600,7 +695,7 @@ copiée à côté du binaire, et non du code qui voyage dans le crate.
 
 Partez de `camera-config-sample.toml` pour créer votre propre `camera-config.toml`.
 
-* **`[server]`** : `host`, `port`, `api_token` (jeton exigé en paramètre `?token=` pour se connecter au WebSocket et, si `[rtsp] require_token`, au flux RTSP), `public_url` (URL par laquelle cette caméra est joignable depuis un navigateur, ex. `"http://192.168.1.42:8080"` — publiée dans les événements pour que la timeline du manager offre un lien vers les clips ; vide par défaut, auquel cas aucun lien n'est proposé).
+* **`[server]`** : `host`, `port`, `api_token` (jeton exigé en paramètre `?token=` pour se connecter au WebSocket et, si `[rtsp] require_token`, au flux RTSP), `public_url` (URL par laquelle cette caméra est joignable depuis un navigateur, ex. `"http://192.168.1.42:8080"` — publiée dans les événements pour que la timeline du manager offre un lien vers les clips **et vers le direct de la caméra** ; vide par défaut, auquel cas aucun lien n'est proposé).
 * **`[camera]`** : `device_index` (index du périphérique V4L2, ex. `0` pour `/dev/video0`), `name` (nom de la caméra inclus dans les événements MQTT, optionnel — `"foxguard"` par défaut).
 * **`[detection]`** : `enabled` (surveillance active au démarrage), chemins des 3 modèles ONNX (`model_path`, `model_detect_face_path`, `model_face_path`, tous dans `crates/camera/models/`), tailles d'entrée (`input_size` pour YOLO, `input_face_size` pour ArcFace), `confidence_threshold` (seuil de détection YOLO), `email_cooldown_secs` et `known_faces_dir` (dossier des photos de référence, `"known_faces"` par défaut, relatif au répertoire de travail — à renseigner en absolu pour un déploiement en conteneur ou en service systemd).
 * **`[email]`** : `enabled`, identifiants SMTP (`smtp_server`, `smtp_user`, `smtp_password`), `from_address`, `to_address`.
@@ -608,11 +703,12 @@ Partez de `camera-config-sample.toml` pour créer votre propre `camera-config.to
 * **`[mqtt]`** *(optionnel, section entière absente = désactivé)* : `enabled`, `broker_host`, `broker_port` (`1883` par défaut), `username`/`password` (authentification optionnelle, pas de TLS), `topic` (`"foxguard/detections"` par défaut). Publie un message JSON à chaque changement d'état de reconnaissance, par exemple :
   ```json
   {"camera": "salon", "timestamp": "2026-09-18T15:42:07+02:00", "status": "known", "name": "jerome",
-   "thumbnail": "<JPEG en base64>", "clip": {"file": "evt_20260918_154207123.mjpeg", "base_url": "http://192.168.1.42:8080"}}
-  {"camera": "salon", "timestamp": "2026-09-18T15:45:12+02:00", "status": "unknown", "thumbnail": null, "clip": null}
+   "thumbnail": "<JPEG en base64>", "base_url": "http://192.168.1.42:8080", "clip": "evt_20260918_154207123.mp4"}
+  {"camera": "salon", "timestamp": "2026-09-18T15:45:12+02:00", "status": "unknown", "thumbnail": null, "base_url": null, "clip": null}
   ```
 * **`[motion]`** *(optionnel, section entière absente = **actif** avec ses valeurs par défaut)* : `enabled`, `pixel_threshold` (écart de luminance à partir duquel un pixel a changé, `20`), `min_changed_ratio` (proportion de l'image qui doit avoir changé, `0.006`), `hold_secs` (durée pendant laquelle YOLO continue après le dernier mouvement, `3`) et `max_idle_secs` (délai maximal entre deux passages même sans mouvement, `20` — **`0` désactive ce passage périodique**). Voir « Le pré-filtre de mouvement » plus haut pour le rôle des deux derniers.
-* **`[rtsp]`** *(optionnel, section entière absente = désactivé)* : `enabled`, `host`, `port` (`8554`), `path` (`"stream"`), `require_token` (`true`), `fps` (`12`), `bitrate_kbps` (`1500`) et `keyframe_interval_secs` (`2`). Voir « Le flux H.264 / RTSP » plus haut.
+* **`[h264]`** *(optionnel, section entière absente = désactivé)* : `enabled`, `fps` (`12`), `bitrate_kbps` (`1500`) et `keyframe_interval_secs` (`2`). Ces réglages pilotent l'encodeur, dont le flux alimente **trois** consommateurs : le RTSP, le WebSocket des interfaces web et les enregistrements. Ils vivent donc ici et non dans `[rtsp]`, qui n'en est qu'un des trois. `[rtsp] enabled = true` active l'encodage même si cette section est absente, par compatibilité avec les configurations antérieures. Voir « L'encodage H.264 » plus haut.
+* **`[rtsp]`** *(optionnel, section entière absente = désactivé)* : `enabled`, `host`, `port` (`8554`), `path` (`"stream"`) et `require_token` (`true`) — uniquement les réglages RÉSEAU du serveur RTSP. Voir « Le flux RTSP » plus haut.
 
 ---
 
@@ -859,11 +955,15 @@ Chaque caméra embarque **sa propre** interface, servie directement par le
 Raspberry Pi. Elle reste le poste de pilotage d'une caméra donnée — et le
 secours qui fonctionne encore quand le serveur annexe est en panne ou
 injoignable. L'interface d'ENSEMBLE (plusieurs caméras, timeline des
-détections avec vignettes et clips) est celle du manager (voir `ui/`).
+détections avec vignettes, clips et accès au direct) est celle du manager
+(voir `ui/`).
 
 Ouvrez votre navigateur web et rendez-vous sur l'adresse de la caméra (par exemple : http://localhost:8080 ou http://foxguard.local:8080).
 
-Le flux vidéo s'établit automatiquement via WebSocket.
+Le flux vidéo s'établit automatiquement via WebSocket : en **H.264** décodé
+par le navigateur (WebCodecs) si la caméra annonce un encodeur actif, en MJPEG
+sinon. Le repli est automatique et silencieux — un navigateur sans WebCodecs
+voit la même image, simplement plus lourde sur le réseau.
 
 Utilisez l'interface pour :
 

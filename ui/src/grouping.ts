@@ -3,10 +3,12 @@
 // Volontairement séparé des composants : c'est la seule logique métier de
 // l'interface, et la seule chose qui mérite d'être relue attentivement.
 
-import type { EventRecord } from "./api";
+import type { CameraInfo, EventRecord } from "./api";
 
 export interface CameraDay {
   camera: string;
+  /** Vue en direct de cette caméra, si elle est joignable. */
+  liveUrl: string | null;
   /** Du plus récent au plus ancien. */
   events: EventRecord[];
   /** Détections dont le visage n'a PAS été reconnu. */
@@ -27,11 +29,12 @@ export interface CameraDay {
  * sont ajoutées malgré tout — une caméra branchée aujourd'hui ne doit pas
  * être invisible en attendant le rafraîchissement de la liste.
  */
-export function groupByCamera(events: EventRecord[], knownCameras: string[]): CameraDay[] {
+export function groupByCamera(events: EventRecord[], knownCameras: CameraInfo[]): CameraDay[] {
   const byCamera = new Map<string, EventRecord[]>();
+  const liveUrls = new Map(knownCameras.map((camera) => [camera.name, camera.live_url]));
 
   for (const camera of knownCameras) {
-    byCamera.set(camera, []);
+    byCamera.set(camera.name, []);
   }
 
   for (const event of events) {
@@ -46,6 +49,7 @@ export function groupByCamera(events: EventRecord[], knownCameras: string[]): Ca
   return [...byCamera.entries()]
     .map(([camera, cameraEvents]) => ({
       camera,
+      liveUrl: liveUrls.get(camera) ?? null,
       events: cameraEvents,
       unknownCount: cameraEvents.filter((e) => e.status === "unknown").length,
       // Le test porte sur `status` et non sur la présence de `name` : le type

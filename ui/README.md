@@ -4,8 +4,8 @@ Interface web du **manager** (React), déployée sur le serveur annexe.
 
 Elle affiche, pour une journée donnée, la **timeline des détections de chaque
 caméra** : une bande de 24 heures qui situe les événements, une pellicule de
-vignettes qui montre ce qui s'est passé, et un accès direct au clip de chaque
-détection.
+vignettes qui montre ce qui s'est passé, un accès direct au clip de chaque
+détection, et un bouton par caméra vers son **flux en direct**.
 
 ## Ce que ce n'est pas
 
@@ -42,7 +42,7 @@ SVG de 3 Ko, la duplication coûte moins cher que le couplage — mais si le log
 | `src/App.tsx` | composition : chargement d'une journée, état partagé entre la bande et la pellicule, ouverture du lecteur |
 | `src/components/DayBar.tsx` | navigation entre les journées |
 | `src/components/CameraTimeline.tsx` | la timeline d'une caméra : bande de 24 h et pellicule de vignettes |
-| `src/components/ClipDialog.tsx` | lecteur du clip d'une détection |
+| `src/components/CameraFrameDialog.tsx` | cadre affichant une page servie par la CAMÉRA : le clip d'une détection, ou son flux en direct |
 | `src/timeline.ts` | géométrie temporelle de la bande (position d'un horodatage, graduations, repère « maintenant ») |
 | `src/grouping.ts` | regroupement des événements par caméra |
 | `src/dates.ts` | manipulation des journées, en heure locale |
@@ -53,22 +53,40 @@ La logique vit dans `timeline.ts`, `grouping.ts` et `dates.ts` plutôt que dans
 les composants : ce sont des fonctions pures, et ce sont les seules choses de
 l'interface qui méritent d'être relues attentivement.
 
-## Les clips
+## Les clips et le direct
 
-La timeline donne un accès direct au clip de chaque détection, mais ne le lit
-pas elle-même : les clips restent **sur la caméra**, donc sur une autre
-origine que cette interface. C'est la caméra qui sert la page capable de lire
-son format d'enregistrement (`GET /play/<fichier>`), et `ClipDialog` l'affiche
-dans un cadre.
+Cette interface donne accès à deux médias qu'elle ne lit **pas elle-même** :
+le clip d'une détection, et le flux en direct d'une caméra. Les deux vivent
+sur la caméra, donc sur une autre origine, et c'est la caméra qui sert la page
+capable de les afficher. `CameraFrameDialog` ne fait que mettre cette page
+dans un cadre :
+
+| Média | Page servie par la caméra | D'où vient l'URL |
+| --- | --- | --- |
+| Le clip d'une détection | `GET /play/<fichier>` | `clip_url` de l'`EventRecord` |
+| Le flux en direct | `GET /live` | `live_url` du `CameraInfo` |
 
 Ouvrir les enregistrements de la caméra à toutes les origines serait une bien
 mauvaise façon de contourner la politique de même origine, d'autant que ces
-routes ne sont déjà pas authentifiées. Voir la section « La timeline et les
-clips » du README principal.
+routes ne sont déjà pas authentifiées.
 
-Conséquence assumée : la lecture demande que la **caméra** soit joignable
-depuis le navigateur. La vignette, elle, vient de la base du manager et reste
-visible dans tous les cas.
+Pour le direct, il y a une raison de plus, et elle pèse plus lourd : le
+WebSocket vidéo de la caméra **est** authentifié par un jeton. C'est la caméra
+qui injecte son propre jeton dans la page `/live` qu'elle sert, côté serveur.
+Ni cette interface, ni le manager, ni sa base ne le voient jamais passer — et
+c'est heureux, car le serveur annexe est la pièce la plus exposée du système.
+Voir la section « La timeline, les clips et le direct » du README principal.
+
+Conséquence assumée : clip comme direct demandent que la **caméra** soit
+joignable depuis le navigateur, et l'un comme l'autre n'est proposé que si
+elle a déclaré son URL publique (`clip_url` et `live_url` valent `null`
+sinon). La vignette, elle, vient de la base du manager et reste visible dans
+tous les cas.
+
+C'est volontairement la caméra qui décide **comment** afficher son direct :
+elle sert le H.264 décodé par WebCodecs quand son encodeur est actif, et se
+replie sur le MJPEG historique sinon. Cette interface n'a pas à connaître les
+formats vidéo de la caméra, ni à suivre leurs évolutions.
 
 ## Toolchain
 
@@ -87,7 +105,7 @@ Le manager sert le bundle statique à la racine, et son API sous `/api/*`
 | `GET /api/health` | sonde de disponibilité                          |
 | `GET /api/events` | événements récents (`?limit=`) ou d'une journée (`?date=`) |
 | `GET /api/events/{id}/thumbnail` | vignette JPEG d'une détection   |
-| `GET /api/cameras`| caméras ayant émis au moins un événement        |
+| `GET /api/cameras`| caméras ayant émis au moins un événement, avec l'URL de leur direct |
 
 Un seul conteneur, une seule origine : **pas de CORS à configurer**, pas de
 nginx supplémentaire.
@@ -103,11 +121,11 @@ cargo test --workspace                # régénère src/generated/
 ```
 
 `--workspace` et non `-p foxguard-manager` : `ts-rs` installe un test par type
-dérivant `TS`, **dans le crate où ce type est défini**. `EventRecord` et
-`EventsResponse` vivent dans le manager, mais `DetectionEvent`, `PersonStatus`
-et `ClipRef` vivent dans `foxguard-protocol` — et leurs tests ne sont compilés
-que si la feature `ts` y est active, ce que l'unification des features du
-workspace assure.
+dérivant `TS`, **dans le crate où ce type est défini**. `EventRecord`,
+`EventsResponse` et `CameraInfo` vivent dans le manager, mais
+`DetectionEvent` et `PersonStatus` vivent dans `foxguard-protocol` — et leurs
+tests ne sont compilés que si la feature `ts` y est active, ce que
+l'unification des features du workspace assure.
 
 Les fichiers générés sont **commités** : l'interface se construit sans chaîne
 Rust, et une revue voit passer les changements de contrat. Si vous modifiez un

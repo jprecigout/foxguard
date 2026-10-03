@@ -24,8 +24,8 @@ use v4l::io::traits::CaptureStream;
 use v4l::prelude::*;
 
 use crate::h264::H264Encoder;
+use crate::h264::H264Stream;
 use crate::mail::Mailer;
-use crate::rtsp::RtspStream;
 use crate::util::MutexExt;
 use crate::vision::{BoundingBox, FaceDetectorYuNet, FaceEmbedder, KnownPerson};
 
@@ -33,13 +33,13 @@ use super::clips::ClipRecorder;
 use super::codec::decode_yuyv_to_rgb;
 use super::known_faces::try_capture_reference;
 use super::overlay::draw_detections;
-use super::recording::RecordingWriter;
+use super::recording::{Frame, RecordingFormat, RecordingWriter};
 use super::state::SharedState;
 
 /// Encodage H.264 du flux, quand `[rtsp] enabled = true`.
 pub(super) struct H264Output {
     pub(super) encoder: H264Encoder,
-    pub(super) stream: Arc<RtspStream>,
+    pub(super) stream: Arc<H264Stream>,
     /// Intervalle minimal entre deux frames encodées, déduit de
     /// `[rtsp] fps`.
     pub(super) frame_interval: Duration,
@@ -49,6 +49,8 @@ pub(super) struct H264Output {
     /// la largeur SOURCE qui donne le pas des lignes d'un buffer YUYV, et les
     /// confondre cisaillerait l'image sur une caméra à résolution impaire.
     pub(super) source_width: u32,
+    /// Cadence annoncée aux fichiers MP4 produits.
+    pub(super) fps: u32,
 }
 
 /// Ce que la boucle de capture doit savoir du reste du système, regroupé
@@ -84,6 +86,11 @@ pub(super) fn run(
     let mut last_email_time = Instant::now() - email_cooldown;
     let mut last_encoded: Option<Instant> = None;
 
+    // Format des enregistrements. Connu d'emblée sans encodage ; en H.264, il
+    // attend la première image clé et ses jeux de paramètres.
+    let mut recording_format: Option<RecordingFormat> =
+        pipeline.h264.is_none().then_some(RecordingFormat::Mjpeg);
+
     info!("📹 Boucle Caméra démarrée avec succès.");
 
     loop {
@@ -98,14 +105,28 @@ pub(super) fn run(
 
         // Faut-il une frame H.264 ?
         //
-        // Deux conditions, et les deux comptent : qu'un lecteur RTSP soit
-        // effectivement connecté — l'encodage logiciel est la dépense la plus
-        // lourde du système, personne ne doit la payer pour un flux que
-        // personne ne regarde — et que la cadence configurée soit échue.
-        let wants_h264 = pipeline.h264.as_ref().is_some_and(|output| {
-            output.stream.has_viewers()
-                && last_encoded.is_none_or(|last| last.elapsed() >= output.frame_interval)
+        // Deux conditions, et les deux comptent.
+        //
+        // D'ABORD, quelqu'un doit en avoir l'usage. L'encodage logiciel est
+        // la dépense la plus lourde du système : personne ne doit la payer
+        // pour un flux que personne ne regarde. Trois usages possibles :
+        //
+        //  - un lecteur abonné (RTSP, ou un onglet sur une interface web) ;
+        //  - un enregistrement continu en cours ;
+        //  - la surveillance active, qui peut déclencher un clip à tout
+        //    instant — et un clip doit pouvoir montrer ce qui a PRÉCÉDÉ la
+        //    détection, donc son pré-enregistrement doit déjà exister.
+        //
+        // ENSUITE, la cadence configurée doit être échue : les frames en trop
+        // sont écartées avant l'encodeur.
+        let h264_is_wanted = pipeline.h264.as_ref().is_some_and(|output| {
+            output.stream.has_viewers() || is_recording_active || is_detection_active
         });
+
+        let wants_h264 = h264_is_wanted
+            && pipeline.h264.as_ref().is_some_and(|output| {
+                last_encoded.is_none_or(|last| last.elapsed() >= output.frame_interval)
+            });
 
         // DÉCODAGE, au plus une fois par frame.
         //
@@ -139,41 +160,124 @@ pub(super) fn run(
             (encode_jpeg_or_passthrough(buf, decoded.as_ref()), decoded)
         };
 
+        // ENCODAGE H.264
+        //
+        // Avant les clips et l'enregistrement : ce sont eux qui consomment la
+        // frame encodée quand l'encodage est actif.
+        let encoded = if wants_h264 {
+            last_encoded = Some(Instant::now());
+            encode_h264_frame(&mut pipeline, buf, decoded.as_ref(), is_jpeg)
+        } else {
+            None
+        };
+
+        // Le format des enregistrements se décide à la première image clé :
+        // c'est elle qui porte les jeux de paramètres dont un MP4 a besoin
+        // pour s'ouvrir.
+        if let (Some(unit), Some(output)) = (&encoded, pipeline.h264.as_ref())
+            && recording_format.is_none()
+        {
+            let (width, height) = output.encoder.dimensions();
+            recording_format = RecordingFormat::from_keyframe(unit, width, height, output.fps);
+
+            if let Some(format) = &recording_format {
+                pipeline.clips.lock_or_recover().set_format(format.clone());
+            }
+        }
+
         // CLIPS D'ÉVÉNEMENT
         //
-        // Avant l'enregistrement continu et la diffusion : le tampon de
-        // pré-enregistrement doit contenir la frame même si un clip est
-        // déclenché par le thread de reconnaissance dans l'instant qui suit
-        // (voir `super::clips`).
+        // Le tampon de pré-enregistrement doit contenir la frame même si un
+        // clip est déclenché par le thread de reconnaissance dans l'instant
+        // qui suit (voir `super::clips`).
         //
         // `is_detection_active` arme le pré-enregistrement : surveillance
         // éteinte, aucun événement ne peut survenir, et le tampon est rendu à
         // la mémoire du Raspberry Pi.
-        pipeline
-            .clips
-            .lock_or_recover()
-            .push_frame(&jpeg_bytes, is_detection_active);
+        {
+            let mut clips = pipeline.clips.lock_or_recover();
 
-        // FLUX H.264 / RTSP
-        if wants_h264 {
-            encode_h264_frame(&mut pipeline, buf, decoded.as_ref(), is_jpeg);
-            last_encoded = Some(Instant::now());
+            match (&encoded, pipeline.h264.is_some()) {
+                (Some(unit), _) => clips.push_h264(unit, is_detection_active),
+                // Sans encodage, les clips restent au format historique.
+                (None, false) => clips.push_jpeg(&jpeg_bytes, is_detection_active),
+                // Encodage actif mais rien à encoder sur cette frame (cadence
+                // non échue) : il n'y a rien à mettre au tampon, et surtout
+                // pas une image JPEG que le fichier MP4 ne saurait pas
+                // accueillir.
+                (None, true) => {}
+            }
         }
 
         if is_recording_active {
-            if recording.is_none() {
-                recording = Some(RecordingWriter::create(&state.recordings_dir)?);
-            }
-            if let Some(ref mut writer) = recording {
-                let _ = writer.write_frame(&jpeg_bytes);
-            }
-        } else if recording.is_some() {
+            recording = write_recording_frame(
+                recording,
+                &state.recordings_dir,
+                recording_format.as_ref(),
+                &encoded,
+                &jpeg_bytes,
+                pipeline.h264.is_some(),
+            )?;
+        } else if let Some(writer) = recording.take() {
             info!("💾 Arrêt de l'enregistrement.");
-            recording = None;
+
+            if let Err(e) = writer.finish() {
+                warn!("⚠️ Enregistrement mal refermé : {e}");
+            }
         }
 
         let _ = state.tx.send(jpeg_bytes);
     }
+}
+
+/// Écrit une frame dans l'enregistrement continu, en l'ouvrant si besoin.
+///
+/// Retourne l'enregistrement, ouvert ou non : en MP4, il ne peut commencer
+/// qu'une fois le format connu (donc à la première image clé), et la
+/// surveillance peut très bien être activée avant.
+fn write_recording_frame(
+    recording: Option<RecordingWriter>,
+    dir: &str,
+    format: Option<&RecordingFormat>,
+    encoded: &Option<crate::h264::AccessUnit>,
+    jpeg_bytes: &[u8],
+    h264: bool,
+) -> Result<Option<RecordingWriter>> {
+    // Ce qu'on a à écrire sur CETTE frame. En H.264, une frame non encodée
+    // (cadence non échue) n'apporte rien.
+    let frame = match (encoded, h264) {
+        (Some(unit), _) => Frame::H264 {
+            nals: &unit.nals,
+            keyframe: unit.keyframe,
+        },
+        (None, false) => Frame::Jpeg(jpeg_bytes),
+        (None, true) => return Ok(recording),
+    };
+
+    let Some(format) = format else {
+        // Format pas encore connu : l'encodeur n'a pas produit d'image clé.
+        // La prochaine arrive au plus tard à l'intervalle configuré.
+        return Ok(recording);
+    };
+
+    let mut writer = match recording {
+        Some(writer) => writer,
+        None => {
+            // Un enregistrement MP4 doit COMMENCER par une image clé : c'est
+            // la seule sur laquelle un décodeur peut démarrer.
+            if h264 && !matches!(frame, Frame::H264 { keyframe: true, .. }) {
+                return Ok(None);
+            }
+
+            RecordingWriter::create(dir, format)?
+        }
+    };
+
+    if let Err(e) = writer.write_frame(frame) {
+        warn!("⚠️ Écriture de l'enregistrement interrompue : {e}");
+    }
+
+    Ok(Some(writer))
 }
 
 /// Décode une frame caméra en RGB, quel que soit son format d'origine.
@@ -272,10 +376,8 @@ fn encode_h264_frame(
     buf: &[u8],
     decoded: Option<&RgbImage>,
     is_jpeg: bool,
-) {
-    let Some(output) = pipeline.h264.as_mut() else {
-        return;
-    };
+) -> Option<crate::h264::AccessUnit> {
+    let output = pipeline.h264.as_mut()?;
 
     // Une session RTSP qui démarre, ou un lecteur qui a décroché, réclame une
     // image clé : c'est la seule frame sur laquelle un décodeur peut
@@ -294,11 +396,16 @@ fn encode_h264_frame(
     match encoded {
         Ok(Some(unit)) => {
             let parameters = output.encoder.parameters().cloned();
-            output.stream.publish(unit, parameters.as_ref());
+            // Publié aux abonnés (RTSP, interfaces web) ET rendu à la boucle,
+            // qui s'en sert pour les clips et l'enregistrement : l'encodage a
+            // lieu une fois, quel que soit le nombre de consommateurs.
+            output.stream.publish(unit.clone(), parameters.as_ref());
+            Some(unit)
         }
-        Ok(None) => {}
+        Ok(None) => None,
         Err(e) => {
             warn!("⚠️ Encodage H.264 interrompu pour cette frame : {e:#}");
+            None
         }
     }
 }

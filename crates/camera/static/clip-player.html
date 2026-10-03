@@ -25,11 +25,22 @@
       assouplir, et le format d'enregistrement reste connu du seul composant
       qui l'écrit.
 
-      Le format justement : `[u32 timestamp_ms][u32 frame_len][frame JPEG]`
-      par frame (voir `capture::recording` côté Rust). L'horodatage par frame
-      permet de restituer la vitesse RÉELLE de capture, qui n'est pas
-      forcément celle qu'on croit — une webcam UVC réduit son FPS en basse
-      luminosité.
+      Deux formats cohabitent, et la page choisit d'après l'extension :
+
+      - `.mp4` : un MP4 fragmenté contenant du H.264 (le format des
+        installations où l'encodage est actif). Un `<video>` natif suffit, et
+        apporte gratuitement le plein écran, le déplacement et le décodage
+        matériel ;
+
+      - `.mjpeg` : le format historique, `[u32 timestamp_ms][u32 frame_len]
+        [frame JPEG]` par frame (voir `capture::recording` côté Rust). Aucun
+        navigateur ne sait le lire : c'est ce script qui le décode et le
+        dessine. L'horodatage par frame permet d'en restituer la vitesse
+        RÉELLE de capture, qui n'est pas forcément celle qu'on croit — une
+        webcam UVC réduit son FPS en basse luminosité.
+
+      Les deux restent nécessaires : une caméra mise à jour continue de
+      servir les enregistrements qu'elle a écrits avant.
     -->
     <style>
         :root {
@@ -114,7 +125,8 @@
             padding: 16px;
         }
 
-        canvas {
+        canvas,
+        video {
             max-width: 100%;
             max-height: 100%;
             background: #000;
@@ -169,6 +181,9 @@
 
     <main>
         <p class="status" id="status">Chargement du clip…</p>
+        <!-- Un MP4 se lit nativement ; le format historique est décodé par le
+             script et dessiné dans le canvas. Un seul des deux est utilisé. -->
+        <video id="video" hidden controls autoplay playsinline></video>
         <canvas id="canvas" hidden></canvas>
     </main>
 
@@ -180,6 +195,7 @@
 
     <script>
         const statusEl = document.getElementById('status');
+        const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
         const context = canvas.getContext('2d');
         const controls = document.getElementById('controls');
@@ -270,14 +286,53 @@
             return `${(milliseconds / 1000).toFixed(1).replace('.', ',')} s`;
         }
 
+        /** Affiche un message d'erreur à la place du lecteur. */
+        function fail(message) {
+            statusEl.textContent = message;
+            statusEl.classList.add('error');
+            statusEl.hidden = false;
+            video.hidden = true;
+            canvas.hidden = true;
+            controls.hidden = true;
+        }
+
+        /**
+         * Lecture d'un MP4 : le navigateur sait tout faire.
+         *
+         * Les contrôles natifs du `<video>` remplacent ceux de la page, d'où
+         * leur masquage — en réimplémenter de moins bons n'aurait aucun sens.
+         */
+        function playMp4(filename) {
+            video.src = `/recordings/${encodeURIComponent(filename)}`;
+
+            video.addEventListener('loadeddata', () => {
+                statusEl.hidden = true;
+                video.hidden = false;
+            });
+
+            video.addEventListener('error', () => {
+                // 404 : le clip a été purgé par la rétention automatique
+                // (`[recording] retention_days`), ou n'a jamais existé.
+                fail(
+                    video.error && video.error.code === MediaError.MEDIA_ERR_NETWORK
+                        ? 'Clip injoignable depuis ce navigateur.'
+                        : 'Ce clip n’est plus lisible (purgé, ou interrompu avant d’être écrit).'
+                );
+            });
+        }
+
         async function main() {
             const filename = clipFilename();
             filenameEl.textContent = filename;
             document.title = `FoxGuard — ${filename}`;
 
             if (!filename) {
-                statusEl.textContent = 'Aucun clip demandé.';
-                statusEl.classList.add('error');
+                fail('Aucun clip demandé.');
+                return;
+            }
+
+            if (filename.toLowerCase().endsWith('.mp4')) {
+                playMp4(filename);
                 return;
             }
 
@@ -289,10 +344,9 @@
                 if (!response.ok) {
                     // 404 : le clip a été purgé par la rétention
                     // (`[recording] retention_days`), ou n'a jamais existé.
-                    statusEl.textContent = response.status === 404
+                    fail(response.status === 404
                         ? 'Ce clip n’existe plus sur la caméra (purgé par la rétention automatique).'
-                        : `La caméra a répondu ${response.status}.`;
-                    statusEl.classList.add('error');
+                        : `La caméra a répondu ${response.status}.`);
                     return;
                 }
 
@@ -300,16 +354,14 @@
                 const frames = extractFramedRecording(buffer) || extractLegacyRecording(buffer);
 
                 if (frames.length === 0) {
-                    statusEl.textContent = 'Clip illisible : aucune image trouvée.';
-                    statusEl.classList.add('error');
+                    fail('Clip illisible : aucune image trouvée.');
                     return;
                 }
 
                 decoded = await decodeFrames(frames);
             } catch (error) {
                 console.error(error);
-                statusEl.textContent = 'Clip injoignable depuis ce navigateur.';
-                statusEl.classList.add('error');
+                fail('Clip injoignable depuis ce navigateur.');
                 return;
             }
 

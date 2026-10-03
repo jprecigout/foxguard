@@ -13,6 +13,7 @@ pub mod config;
 pub mod geometry;
 pub mod h264;
 pub mod mail;
+pub mod mp4;
 pub mod mqtt;
 pub mod retention;
 pub mod rtsp;

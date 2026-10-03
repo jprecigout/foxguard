@@ -23,7 +23,7 @@ use crate::config::MqttConfig;
 //
 // `PersonStatus` est ré-exporté pour que le reste de la caméra (notamment
 // `crate::capture::tracking`) continue de l'importer depuis ce module.
-pub use foxguard_protocol::{ClipRef, DetectionEvent, PersonStatus};
+pub use foxguard_protocol::{DetectionEvent, PersonStatus};
 
 /// Client MQTT connecté en tâche de fond, utilisé pour publier les
 /// événements de détection. Construit une seule fois au démarrage par

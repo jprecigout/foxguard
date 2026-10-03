@@ -15,10 +15,12 @@
 // HTTP, le second celui du fil MQTT. L'interface a besoin d'un identifiant
 // (pour demander la vignette) et d'URL de média prêtes à l'emploi — voir
 // `crates/manager/src/api.rs` pour le pourquoi de cette distinction.
+export type { CameraInfo } from "./generated/CameraInfo";
 export type { EventRecord } from "./generated/EventRecord";
 export type { EventsResponse } from "./generated/EventsResponse";
 export type { PersonStatus } from "./generated/PersonStatus";
 
+import type { CameraInfo } from "./generated/CameraInfo";
 import type { EventsResponse } from "./generated/EventsResponse";
 
 /** Erreur portant le code HTTP, pour distinguer « serveur injoignable » de « 500 ». */
@@ -50,9 +52,12 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   return (await response.json()) as T;
 }
 
-/** Caméras ayant déjà émis au moins un événement encore conservé. */
-export function fetchCameras(signal?: AbortSignal): Promise<string[]> {
-  return getJson<string[]>("/api/cameras", signal);
+/**
+ * Caméras ayant déjà émis au moins un événement encore conservé, avec l'URL
+ * de leur vue en direct quand elles en déclarent une.
+ */
+export function fetchCameras(signal?: AbortSignal): Promise<CameraInfo[]> {
+  return getJson<CameraInfo[]>("/api/cameras", signal);
 }
 
 /**

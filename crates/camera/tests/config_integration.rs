@@ -43,9 +43,10 @@ fn load_reads_config_sample_toml_shipped_with_the_repo() {
     );
 
     assert!(
-        !config.rtsp.enabled,
-        "le flux RTSP est désactivé par défaut (encodage logiciel)"
+        !config.h264_enabled(),
+        "l'encodage H.264 est désactivé par défaut (il est logiciel)"
     );
+    assert!(!config.rtsp.enabled);
     assert!(
         config.rtsp.require_token,
         "le flux RTSP montre la même image que le WebSocket, qui est authentifié"

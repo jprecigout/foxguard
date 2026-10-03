@@ -12,9 +12,13 @@
 //! lecteur, enregistrable par un NVR, intégrable dans une domotique, sans
 //! écrire une ligne de code pour chacun.
 //!
+//! Le flux encodé lui-même ne vit PAS ici : il est partagé avec les
+//! interfaces web et les enregistrements, et habite donc
+//! [`crate::h264::H264Stream`]. Ce module n'en est qu'un abonné parmi
+//! d'autres.
+//!
 //! # Découpage
 //!
-//! - [`stream`] : le flux partagé entre la boucle de capture et les sessions.
 //! - [`server`] : l'acceptation des lecteurs et le dialogue RTSP.
 //! - [`message`] : l'analyse et le formatage des messages RTSP.
 //! - [`transport`] : la négociation du transport (TCP entrelacé ou UDP).
@@ -25,8 +29,6 @@ mod message;
 mod rtp;
 mod sdp;
 mod server;
-mod stream;
 mod transport;
 
 pub use server::spawn;
-pub use stream::RtspStream;
