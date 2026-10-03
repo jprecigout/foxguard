@@ -11,7 +11,11 @@
 // Les fichiers générés sont COMMITÉS : l'interface se construit sans chaîne
 // Rust. Ils sont régénérés par `cargo test -p foxguard-manager`.
 
-export type { DetectionEvent } from "./generated/DetectionEvent";
+// `EventRecord` et non `DetectionEvent` : le premier est le format de l'API
+// HTTP, le second celui du fil MQTT. L'interface a besoin d'un identifiant
+// (pour demander la vignette) et d'URL de média prêtes à l'emploi — voir
+// `crates/manager/src/api.rs` pour le pourquoi de cette distinction.
+export type { EventRecord } from "./generated/EventRecord";
 export type { EventsResponse } from "./generated/EventsResponse";
 export type { PersonStatus } from "./generated/PersonStatus";
 

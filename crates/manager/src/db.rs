@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, NaiveDate, TimeZone};
-use foxguard_protocol::{DetectionEvent, PersonStatus};
+use foxguard_protocol::{ClipRef, DetectionEvent, PersonStatus};
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
 use tracing::info;
@@ -19,6 +19,33 @@ use tracing::info;
 const STATUS_UNKNOWN: &str = "unknown";
 /// Valeur de la colonne `status` pour une personne identifiée.
 const STATUS_KNOWN: &str = "known";
+
+/// Colonnes lues par toutes les requêtes de LISTE.
+///
+/// `thumbnail IS NOT NULL` et non `thumbnail` : une journée chargée compte
+/// des centaines d'événements, et rapatrier leurs vignettes pour en afficher
+/// la liste ferait passer des mégaoctets dans une réponse qui n'en a pas
+/// besoin. L'interface reçoit l'URL de chaque vignette et les demande une par
+/// une, au fil du défilement (voir [`EventRepository::thumbnail`]).
+const LIST_COLUMNS: &str = "id, camera, occurred_at, status, person_name, \
+                            clip_file, clip_base_url, \
+                            (thumbnail IS NOT NULL) AS has_thumbnail";
+
+/// Un événement tel qu'il est CONSERVÉ : celui du protocole, plus ce que
+/// seule la base connaît.
+#[derive(Debug, Clone)]
+pub struct StoredEvent {
+    /// Identifiant en base, par lequel l'interface demande la vignette.
+    pub id: i64,
+
+    /// L'événement lui-même. Son champ `thumbnail` est toujours `None` ici
+    /// (voir [`LIST_COLUMNS`]) ; [`Self::has_thumbnail`] dit s'il en existe
+    /// une.
+    pub event: DetectionEvent,
+
+    /// Vrai si une vignette est conservée pour cet événement.
+    pub has_thumbnail: bool,
+}
 
 /// Accès à la table des événements de détection.
 #[derive(Clone)]
@@ -52,18 +79,30 @@ impl EventRepository {
         Ok(Self { pool })
     }
 
-    /// Enregistre un événement reçu d'une caméra.
+    /// Enregistre un événement reçu d'une caméra, avec son média éventuel.
+    ///
+    /// Une vignette illisible (base64 corrompu sur le fil) est enregistrée
+    /// comme ABSENTE plutôt que de faire échouer l'insertion : c'est
+    /// l'événement qui porte l'information, la vignette n'est qu'un agrément
+    /// (même tolérance que le décodage du protocole, voir
+    /// `foxguard_protocol::decode_thumbnail`).
     pub async fn record(&self, event: &DetectionEvent) -> Result<()> {
         let (status, person_name) = status_to_columns(&event.status);
+        let thumbnail = event.decoded_thumbnail();
+        let (clip_file, clip_base_url) = clip_to_columns(event.clip.as_ref());
 
         sqlx::query(
-            "INSERT INTO detection_events (camera, occurred_at, status, person_name) \
-             VALUES ($1, $2, $3, $4)",
+            "INSERT INTO detection_events \
+             (camera, occurred_at, status, person_name, thumbnail, clip_file, clip_base_url) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(&event.camera)
         .bind(event.timestamp)
         .bind(status)
         .bind(person_name)
+        .bind(thumbnail)
+        .bind(clip_file)
+        .bind(clip_base_url)
         .execute(&self.pool)
         .await
         .context("insertion de l'événement impossible")?;
@@ -71,19 +110,38 @@ impl EventRepository {
         Ok(())
     }
 
+    /// Vignette d'un événement, ou `None` si l'événement n'existe pas ou
+    /// n'en a pas.
+    ///
+    /// Requête SÉPARÉE des listes, et c'est tout l'intérêt : l'interface ne
+    /// télécharge que les vignettes qu'elle affiche réellement.
+    pub async fn thumbnail(&self, id: i64) -> Result<Option<Vec<u8>>> {
+        let row = sqlx::query("SELECT thumbnail FROM detection_events WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .context("lecture de la vignette impossible")?;
+
+        Ok(row.and_then(|row| {
+            row.try_get::<Option<Vec<u8>>, _>("thumbnail")
+                .ok()
+                .flatten()
+        }))
+    }
+
     /// Les `limit` événements les plus RÉCENTS, du plus récent au plus
     /// ancien — l'ordre dans lequel une interface les affiche.
-    pub async fn recent(&self, limit: i64) -> Result<Vec<DetectionEvent>> {
-        let rows = sqlx::query(
-            "SELECT camera, occurred_at, status, person_name FROM detection_events \
-             ORDER BY occurred_at DESC, id DESC LIMIT $1",
-        )
+    pub async fn recent(&self, limit: i64) -> Result<Vec<StoredEvent>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {LIST_COLUMNS} FROM detection_events \
+             ORDER BY occurred_at DESC, id DESC LIMIT $1"
+        ))
         .bind(limit.max(1))
         .fetch_all(&self.pool)
         .await
         .context("lecture des événements impossible")?;
 
-        rows.iter().map(row_to_event).collect()
+        rows.iter().map(row_to_stored_event).collect()
     }
 
     /// Tous les événements d'une JOURNÉE, du plus récent au plus ancien.
@@ -96,14 +154,14 @@ impl EventRepository {
     /// (caméra en boucle sur une détection) ne fasse pas sérialiser des
     /// centaines de milliers de lignes d'un coup. L'appelant sait que le
     /// résultat est tronqué s'il atteint exactement cette limite.
-    pub async fn events_for_day(&self, day: NaiveDate, limit: i64) -> Result<Vec<DetectionEvent>> {
+    pub async fn events_for_day(&self, day: NaiveDate, limit: i64) -> Result<Vec<StoredEvent>> {
         let (start, end) = local_day_bounds(day)?;
 
-        let rows = sqlx::query(
-            "SELECT camera, occurred_at, status, person_name FROM detection_events \
+        let rows = sqlx::query(&format!(
+            "SELECT {LIST_COLUMNS} FROM detection_events \
              WHERE occurred_at >= $1 AND occurred_at < $2 \
-             ORDER BY occurred_at DESC, id DESC LIMIT $3",
-        )
+             ORDER BY occurred_at DESC, id DESC LIMIT $3"
+        ))
         .bind(start)
         .bind(end)
         .bind(limit.max(1))
@@ -111,7 +169,7 @@ impl EventRepository {
         .await
         .context("lecture des événements du jour impossible")?;
 
-        rows.iter().map(row_to_event).collect()
+        rows.iter().map(row_to_stored_event).collect()
     }
 
     /// Nombre total d'événements conservés.
@@ -212,14 +270,56 @@ fn status_from_columns(status: &str, person_name: Option<String>) -> PersonStatu
     }
 }
 
-/// Convertit une ligne lue en événement du protocole.
-fn row_to_event(row: &PgRow) -> Result<DetectionEvent> {
-    let status = status_from_columns(row.try_get("status")?, row.try_get("person_name")?);
+/// Traduit la référence d'un clip vers les colonnes `clip_file` et
+/// `clip_base_url`.
+///
+/// Extraite pour être testable sans base, comme [`status_to_columns`].
+fn clip_to_columns(clip: Option<&ClipRef>) -> (Option<&str>, Option<&str>) {
+    match clip {
+        // Un nom de fichier vide ne référence rien : autant ne rien
+        // enregistrer, pour que `clip_file IS NOT NULL` garde son sens.
+        Some(clip) if !clip.file.is_empty() => (Some(clip.file.as_str()), {
+            if clip.base_url.is_empty() {
+                None
+            } else {
+                Some(clip.base_url.as_str())
+            }
+        }),
+        _ => (None, None),
+    }
+}
 
-    Ok(DetectionEvent {
-        camera: row.try_get("camera")?,
-        timestamp: row.try_get("occurred_at")?,
-        status,
+/// Reconstruit la référence d'un clip à partir des colonnes lues.
+///
+/// Sans `clip_file`, il n'y a pas de clip. Sans `clip_base_url`, il y en a un
+/// mais on ne sait pas où le joindre : la référence est conservée telle
+/// quelle, et c'est `ClipRef::url` qui décidera de ne pas produire de lien.
+fn clip_from_columns(file: Option<String>, base_url: Option<String>) -> Option<ClipRef> {
+    let file = file.filter(|file| !file.is_empty())?;
+
+    Some(ClipRef {
+        file,
+        base_url: base_url.unwrap_or_default(),
+    })
+}
+
+/// Convertit une ligne lue en événement conservé.
+fn row_to_stored_event(row: &PgRow) -> Result<StoredEvent> {
+    let status = status_from_columns(row.try_get("status")?, row.try_get("person_name")?);
+    let clip = clip_from_columns(row.try_get("clip_file")?, row.try_get("clip_base_url")?);
+
+    Ok(StoredEvent {
+        id: row.try_get("id")?,
+        event: DetectionEvent {
+            camera: row.try_get("camera")?,
+            timestamp: row.try_get("occurred_at")?,
+            status,
+            // Jamais lue par les requêtes de liste (voir `LIST_COLUMNS`) :
+            // l'interface la demande séparément, par son URL.
+            thumbnail: None,
+            clip,
+        },
+        has_thumbnail: row.try_get("has_thumbnail")?,
     })
 }
 

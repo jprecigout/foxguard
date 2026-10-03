@@ -180,39 +180,263 @@ input[type="date"] {
   color: var(--danger);
 }
 
-.events {
-  list-style: none;
-  margin: 0;
+/* --- Timeline : bande de 24 heures -----------------------------------
+ *
+ * Une piste en position relative, dans laquelle graduations, marques et
+ * repère « maintenant » sont posés en pourcentage de la largeur (voir
+ * `src/timeline.ts`). Le pourcentage plutôt que des pixels : la bande suit la
+ * largeur de la fenêtre sans qu'aucune mesure n'ait à être refaite en
+ * JavaScript.
+ */
+
+.band {
+  padding: 18px 16px 4px;
+}
+
+.band-track {
+  position: relative;
+  height: 34px;
+  background: var(--card-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.band-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+  /* Les graduations des deux extrémités tomberaient à moitié hors de la
+     piste : on les ramène vers l'intérieur. */
+  transform: translateX(-0.5px);
+}
+
+.band-now {
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  width: 2px;
+  background: var(--accent);
+  transform: translateX(-1px);
+  box-shadow: 0 0 6px var(--accent);
+}
+
+/* Une détection. Assez large pour être cliquable au doigt, et centrée sur sa
+   position exacte. */
+.band-mark {
+  position: absolute;
+  top: 5px;
+  width: 8px;
+  height: 22px;
   padding: 0;
-  max-height: 340px;
-  overflow-y: auto;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  border-radius: 3px;
+  transform: translateX(-4px);
+  cursor: pointer;
+  transition: height 0.12s, top 0.12s;
 }
 
-.events li {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 9px 16px;
-  border-bottom: 1px solid #262626;
-  font-size: 0.9rem;
+.band-mark.known {
+  background: var(--ok);
 }
 
-.events li:last-child {
-  border-bottom: none;
+.band-mark.unknown {
+  background: var(--danger);
 }
 
-.time {
+.band-mark:hover,
+.band-mark.selected {
+  top: 1px;
+  height: 30px;
+  border-color: var(--text);
+}
+
+.band-labels {
+  position: relative;
+  height: 18px;
+  margin-top: 4px;
+}
+
+.band-labels span {
+  position: absolute;
+  transform: translateX(-50%);
+  font-size: 0.7rem;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
-  font-size: 0.85rem;
+  white-space: nowrap;
 }
 
-.who.known {
+/* --- Timeline : pellicule de vignettes ------------------------------- */
+
+.strip {
+  list-style: none;
+  display: flex;
+  gap: 10px;
+  margin: 0;
+  padding: 12px 16px 16px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.shot {
+  flex: 0 0 auto;
+  width: 148px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.shot-frame {
+  position: relative;
+  display: block;
+  width: 100%;
+  /* Rapport des vignettes produites par la caméra (voir
+     `capture::thumbnail`) : l'annoncer ici réserve la place AVANT le
+     chargement de l'image, et la pellicule ne sursaute donc pas au fil du
+     défilement. */
+  aspect-ratio: 4 / 3;
+  padding: 0;
+  overflow: hidden;
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  background: #000;
+  cursor: pointer;
+}
+
+.shot-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.shot.known .shot-frame {
+  border-color: rgba(67, 160, 71, 0.5);
+}
+
+.shot.unknown .shot-frame {
+  border-color: rgba(229, 57, 53, 0.55);
+}
+
+.shot.selected .shot-frame {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(30, 136, 229, 0.35);
+}
+
+.shot-missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 0.7rem;
+  color: var(--muted);
+  text-align: center;
+  padding: 0 8px;
+}
+
+/* Signale les détections dont le clip est consultable — les autres ne sont
+   pas cliquables pour rien. */
+.shot-play {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 0.65rem;
+  padding-left: 2px;
+}
+
+.shot-time {
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.shot-who {
+  font-size: 0.82rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shot.known .shot-who {
   color: var(--ok);
 }
 
-.who.unknown {
+.shot.unknown .shot-who {
   color: var(--danger);
+}
+
+/* --- Lecteur de clip -------------------------------------------------- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(900px, 100%);
+  height: min(620px, 100%);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.dialog > header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.dialog h3 {
+  flex: 1;
+  margin: 0;
+  font-size: 0.95rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dialog a {
+  color: var(--accent);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+/* Le clip est lu par une page servie par la CAMÉRA (voir
+   `ClipDialog.tsx`) : ce cadre est la frontière d'origine, pas un choix
+   esthétique. */
+.dialog iframe {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #000;
+}
+
+.dialog .hint {
+  margin: 0;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.75rem;
 }
 
 .empty {

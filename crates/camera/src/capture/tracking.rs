@@ -47,6 +47,20 @@ struct PersonTrack {
     last_reported_status: Option<PersonStatus>,
 }
 
+/// Un changement d'état de reconnaissance, à publier par l'appelant.
+///
+/// Porte la bounding-box du suivi EN PLUS du statut : l'événement publié
+/// embarque une vignette de la détection (voir
+/// `foxguard_protocol::DetectionEvent::thumbnail`), et une vignette de toute
+/// la scène où la personne occupe trente pixels n'apprendrait rien à qui la
+/// regarde dans la timeline. C'est donc la boîte qui sert à la cadrer (voir
+/// `super::thumbnail`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StatusChange {
+    pub(super) status: PersonStatus,
+    pub(super) bbox: (u32, u32, u32, u32),
+}
+
 /// Statut de reconnaissance courant d'un track, tel que dérivé de son nom
 /// (voir [`PersonTrack::name`]).
 fn status_from_name(name: &Option<String>) -> PersonStatus {
@@ -244,8 +258,8 @@ impl PersonTracker {
 /// lance (en parallèle via Rayon) la reconnaissance faciale YuNet + ArcFace
 /// pour chaque track qui en a besoin (voir [`PersonTrack::needs_recognition`]),
 /// mémorise l'identité retenue sur le track correspondant, et retourne les
-/// changements d'état (inconnu <-> connu-untel) à publier sur MQTT par
-/// l'appelant (voir `super::worker` et `crate::mqtt`). Cette fonction ne
+/// changements d'état (inconnu <-> connu-untel, voir [`StatusChange`]) à
+/// publier sur MQTT par l'appelant (voir `super::worker` et `crate::mqtt`). Cette fonction ne
 /// fait elle-même aucune publication : elle reste, comme le reste de ce
 /// module, dépourvue d'effets de bord réseau.
 #[allow(clippy::too_many_arguments)]
@@ -257,7 +271,7 @@ pub(super) fn process_persons_parallel(
     face_embedder: &FaceEmbedder,
     known_people: &[KnownPerson],
     threshold: f32,
-) -> Vec<PersonStatus> {
+) -> Vec<StatusChange> {
     // Mise à jour du tracking
     let track_ids = tracker.update(person_boxes);
 
@@ -386,7 +400,7 @@ pub(super) fn process_persons_parallel(
 fn apply_recognition_results(
     tracker: &mut PersonTracker,
     results: Vec<(u64, Option<(String, f32)>)>,
-) -> Vec<PersonStatus> {
+) -> Vec<StatusChange> {
     let now = Instant::now();
     let mut status_changes = Vec::new();
 
@@ -432,7 +446,11 @@ fn apply_recognition_results(
 
         if track.last_reported_status.as_ref() != Some(&current_status) {
             track.last_reported_status = Some(current_status.clone());
-            status_changes.push(current_status);
+
+            status_changes.push(StatusChange {
+                status: current_status,
+                bbox: track.bbox,
+            });
         }
     }
 
@@ -662,6 +680,13 @@ mod tests {
 
     // --- apply_recognition_results (changements d'état pour MQTT) ---
 
+    /// Les statuts seuls d'une liste de changements : la plupart des tests
+    /// ci-dessous portent sur « quand publier », pas sur le cadrage de la
+    /// vignette (couvert par son propre test).
+    fn statuses(changes: &[StatusChange]) -> Vec<PersonStatus> {
+        changes.iter().map(|c| c.status.clone()).collect()
+    }
+
     #[test]
     fn first_recognition_attempt_with_no_face_found_reports_unknown_once() {
         let mut tracker = PersonTracker::new();
@@ -669,7 +694,7 @@ mod tests {
 
         let changes = apply_recognition_results(&mut tracker, vec![(ids[0], None)]);
 
-        assert_eq!(changes, vec![PersonStatus::Unknown]);
+        assert_eq!(statuses(&changes), vec![PersonStatus::Unknown]);
         let idx = tracker.find_by_id(ids[0]).unwrap();
         assert_eq!(
             tracker.tracks[idx].last_reported_status,
@@ -688,11 +713,24 @@ mod tests {
         );
 
         assert_eq!(
-            changes,
+            statuses(&changes),
             vec![PersonStatus::Known {
                 name: "jerome".to_string()
             }]
         );
+    }
+
+    #[test]
+    fn the_reported_change_carries_the_bounding_box_that_frames_the_thumbnail() {
+        // La vignette de l'événement est recadrée sur cette boîte : sans
+        // elle, la timeline montrerait toute la scène et la personne y
+        // occuperait trente pixels.
+        let mut tracker = PersonTracker::new();
+        let ids = tracker.update(&[(120, 40, 80, 220)]);
+
+        let changes = apply_recognition_results(&mut tracker, vec![(ids[0], None)]);
+
+        assert_eq!(changes[0].bbox, (120, 40, 80, 220));
     }
 
     #[test]
@@ -701,7 +739,7 @@ mod tests {
         let ids = tracker.update(&[(10, 10, 50, 50)]);
 
         let first = apply_recognition_results(&mut tracker, vec![(ids[0], None)]);
-        assert_eq!(first, vec![PersonStatus::Unknown]);
+        assert_eq!(statuses(&first), vec![PersonStatus::Unknown]);
 
         // Deuxième tentative, toujours sans visage exploitable : le statut
         // ("unknown") n'a pas changé, donc rien à republier.
@@ -721,7 +759,7 @@ mod tests {
         );
 
         assert_eq!(
-            changes,
+            statuses(&changes),
             vec![PersonStatus::Known {
                 name: "jerome".to_string()
             }]
@@ -793,9 +831,9 @@ mod tests {
         );
 
         assert_eq!(changes.len(), 2);
-        assert!(changes.contains(&PersonStatus::Known {
+        assert!(statuses(&changes).contains(&PersonStatus::Known {
             name: "jerome".to_string()
         }));
-        assert!(changes.contains(&PersonStatus::Unknown));
+        assert!(statuses(&changes).contains(&PersonStatus::Unknown));
     }
 }

@@ -25,6 +25,209 @@ pub struct Config {
     // Section entière optionnelle : rétention des enregistrements.
     #[serde(default)]
     pub recording: RecordingConfig,
+    // Section entière optionnelle : pré-filtre de mouvement devant YOLO.
+    #[serde(default)]
+    pub motion: MotionConfig,
+    // Section entière optionnelle : encodage H.264 et flux RTSP.
+    #[serde(default)]
+    pub rtsp: RtspConfig,
+}
+
+/// Pré-filtre de mouvement placé DEVANT l'inférence YOLO (voir
+/// [`crate::capture::motion`]).
+///
+/// Une caméra de surveillance regarde une scène immobile l'immense majorité
+/// du temps. Faire tourner YOLO sur chacune de ces images identiques, c'est
+/// payer en permanence le prix fort — sur un Raspberry Pi, l'inférence est de
+/// loin le poste de dépense dominant — pour apprendre à chaque fois que rien
+/// n'a changé. Comparer deux images miniatures coûte, lui, quelques
+/// microsecondes.
+///
+/// Section entièrement optionnelle, et ACTIVE par défaut : c'est une
+/// économie sans contrepartie fonctionnelle (voir les garde-fous de
+/// [`Self::hold_secs`] et [`Self::max_idle_secs`]).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MotionConfig {
+    /// Pré-filtre actif ou non. `false` rétablit le comportement antérieur :
+    /// YOLO tourne à intervalle fixe, que l'image bouge ou non.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Écart de luminance, sur 0-255, à partir duquel un pixel est considéré
+    /// comme ayant changé.
+    ///
+    /// Trop bas, le bruit du capteur en basse lumière suffit à déclencher ;
+    /// trop haut, une personne habillée dans les tons du décor passe
+    /// inaperçue.
+    #[serde(default = "default_motion_pixel_threshold")]
+    pub pixel_threshold: u8,
+
+    /// Proportion de pixels changés, de 0 à 1, à partir de laquelle on
+    /// considère qu'il y a mouvement.
+    ///
+    /// La comparaison se fait sur une miniature (voir
+    /// [`crate::capture::motion`]) : une personne au loin n'y occupe que
+    /// quelques pixels, d'où une valeur par défaut volontairement basse.
+    #[serde(default = "default_motion_min_changed_ratio")]
+    pub min_changed_ratio: f32,
+
+    /// Durée, en secondes, pendant laquelle YOLO continue de tourner après
+    /// la dernière image jugée en mouvement.
+    ///
+    /// GARDE-FOU ESSENTIEL : quelqu'un qui s'arrête devant la caméra ne
+    /// produit plus de mouvement, mais est toujours là. Sans cette
+    /// rémanence, le suivi le perdrait dès son premier instant d'immobilité
+    /// et le redécouvrirait au moindre geste, en republiant un événement à
+    /// chaque fois.
+    #[serde(default = "default_motion_hold_secs")]
+    pub hold_secs: u64,
+
+    /// Délai maximal, en secondes, entre deux passages de YOLO même en
+    /// l'absence totale de mouvement.
+    ///
+    /// SECOND GARDE-FOU : la détection de mouvement compare deux images
+    /// successives, elle est donc aveugle à une présence parfaitement
+    /// immobile. Ce passage périodique garantit qu'une personne figée finit
+    /// toujours par être vue. `0` le désactive — à n'utiliser que si
+    /// l'économie de CPU primait sur tout le reste.
+    #[serde(default = "default_motion_max_idle_secs")]
+    pub max_idle_secs: u64,
+}
+
+impl Default for MotionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            pixel_threshold: default_motion_pixel_threshold(),
+            min_changed_ratio: default_motion_min_changed_ratio(),
+            hold_secs: default_motion_hold_secs(),
+            max_idle_secs: default_motion_max_idle_secs(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_motion_pixel_threshold() -> u8 {
+    // Au-dessus du bruit de lecture d'un capteur correctement exposé, en
+    // dessous d'un changement de contenu réel.
+    20
+}
+
+fn default_motion_min_changed_ratio() -> f32 {
+    // 0,6 % d'une miniature de 64x48, soit une vingtaine de pixels : l'ordre
+    // de grandeur d'une silhouette au fond du champ.
+    0.006
+}
+
+fn default_motion_hold_secs() -> u64 {
+    3
+}
+
+fn default_motion_max_idle_secs() -> u64 {
+    20
+}
+
+/// Encodage H.264 du flux caméra et sa mise à disposition en RTSP (voir
+/// `crate::h264` et `crate::rtsp`).
+///
+/// Section entièrement optionnelle et DÉSACTIVÉE par défaut : l'encodage est
+/// logiciel, donc coûteux en CPU, et une installation qui se contente de
+/// l'interface web embarquée n'a aucune raison de le payer. Rien n'est
+/// encodé tant qu'aucun lecteur n'est effectivement connecté, mais le
+/// réglage reste explicite.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RtspConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Adresse d'écoute du serveur RTSP.
+    #[serde(default = "default_rtsp_host")]
+    pub host: String,
+
+    /// Port d'écoute. 554 est le port officiel de RTSP, mais il est
+    /// privilégié (inférieur à 1024) : la caméra tournant sous un utilisateur
+    /// sans privilèges (voir `deploy/camera/Dockerfile`), le défaut est 8554,
+    /// la convention pour un RTSP non privilégié.
+    #[serde(default = "default_rtsp_port")]
+    pub port: u16,
+
+    /// Chemin du flux dans l'URL (`rtsp://hôte:8554/<path>`). Les barres
+    /// obliques superflues sont tolérées.
+    #[serde(default = "default_rtsp_path")]
+    pub path: String,
+
+    /// Exiger le jeton de `[server] api_token` dans la chaîne de requête de
+    /// l'URL (`rtsp://hôte:8554/stream?token=…`).
+    ///
+    /// ACTIF par défaut : ce flux montre exactement la même image que le
+    /// WebSocket, qui est lui authentifié. L'ouvrir sans contrôle serait une
+    /// régression de confidentialité, pas une simplification.
+    #[serde(default = "default_true")]
+    pub require_token: bool,
+
+    /// Cadence cible du flux encodé, en images par seconde.
+    ///
+    /// Volontairement INFÉRIEURE à la cadence de capture par défaut : c'est
+    /// le réglage qui pèse le plus sur le coût de l'encodage, et 12 im/s
+    /// suffisent largement à une scène de surveillance. Les frames en trop
+    /// sont écartées avant l'encodeur (voir `crate::capture::capture_loop`).
+    #[serde(default = "default_rtsp_fps")]
+    pub fps: u32,
+
+    /// Débit cible, en kilobits par seconde.
+    #[serde(default = "default_rtsp_bitrate_kbps")]
+    pub bitrate_kbps: u32,
+
+    /// Intervalle entre deux images clés, en secondes.
+    ///
+    /// Borne le temps qu'un lecteur qui vient de se connecter passe devant un
+    /// écran noir. Court, les images clés mangent le débit ; long, le
+    /// démarrage traîne. Une image clé est de toute façon produite à la
+    /// demande dès qu'une session démarre (voir `crate::rtsp`).
+    #[serde(default = "default_rtsp_keyframe_interval_secs")]
+    pub keyframe_interval_secs: u32,
+}
+
+impl Default for RtspConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: default_rtsp_host(),
+            port: default_rtsp_port(),
+            path: default_rtsp_path(),
+            require_token: true,
+            fps: default_rtsp_fps(),
+            bitrate_kbps: default_rtsp_bitrate_kbps(),
+            keyframe_interval_secs: default_rtsp_keyframe_interval_secs(),
+        }
+    }
+}
+
+fn default_rtsp_host() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_rtsp_port() -> u16 {
+    8554
+}
+
+fn default_rtsp_path() -> String {
+    "stream".to_string()
+}
+
+fn default_rtsp_fps() -> u32 {
+    12
+}
+
+fn default_rtsp_bitrate_kbps() -> u32 {
+    1500
+}
+
+fn default_rtsp_keyframe_interval_secs() -> u32 {
+    2
 }
 
 /// Paramètres des enregistrements vidéo : durée de conservation et fréquence
@@ -57,6 +260,31 @@ pub struct RecordingConfig {
     /// attendre le premier intervalle.
     #[serde(default = "default_cleanup_interval_secs")]
     pub cleanup_interval_secs: u64,
+
+    /// Écriture d'un clip par détection, pour la timeline de l'interface du
+    /// manager (voir [`crate::capture::clips`]).
+    ///
+    /// Indépendant de l'enregistrement continu, qui lui est piloté à la main
+    /// depuis l'interface de la caméra : ces clips-ci sont déclenchés par les
+    /// détections, et c'est précisément ce qui les rend consultables — une
+    /// timeline dont chaque entrée renvoie vers un enregistrement de plusieurs
+    /// heures n'aiderait personne.
+    #[serde(default = "default_true")]
+    pub clips_enabled: bool,
+
+    /// Durée conservée AVANT la détection, en secondes.
+    ///
+    /// C'est l'intérêt principal du dispositif : l'événement n'est publié
+    /// qu'une fois la personne reconnue (ou constatée inconnue), soit déjà
+    /// une seconde ou deux après son arrivée dans le champ. Sans ce
+    /// pré-enregistrement, le clip commencerait au milieu de l'action et ne
+    /// montrerait jamais par où la personne est entrée.
+    #[serde(default = "default_clip_pre_secs")]
+    pub clip_pre_secs: u64,
+
+    /// Durée enregistrée APRÈS la détection, en secondes.
+    #[serde(default = "default_clip_post_secs")]
+    pub clip_post_secs: u64,
 }
 
 fn default_recordings_dir() -> String {
@@ -69,8 +297,19 @@ impl Default for RecordingConfig {
             dir: default_recordings_dir(),
             retention_days: default_retention_days(),
             cleanup_interval_secs: default_cleanup_interval_secs(),
+            clips_enabled: true,
+            clip_pre_secs: default_clip_pre_secs(),
+            clip_post_secs: default_clip_post_secs(),
         }
     }
+}
+
+fn default_clip_pre_secs() -> u64 {
+    4
+}
+
+fn default_clip_post_secs() -> u64 {
+    8
 }
 
 fn default_known_faces_dir() -> String {
@@ -96,6 +335,21 @@ pub struct ServerConfig {
     pub port: u16,
     // Jeton exigé en paramètre `?token=` pour se connecter au WebSocket
     pub api_token: String,
+
+    /// URL de base par laquelle cette caméra est joignable depuis un
+    /// navigateur, ex. `http://192.168.1.42:8080`.
+    ///
+    /// Publiée dans les événements MQTT pour que la timeline de l'interface
+    /// du manager puisse offrir un lien direct vers le clip d'une détection
+    /// (voir `foxguard_protocol::ClipRef`).
+    ///
+    /// La caméra NE PEUT PAS la deviner : elle écoute en général sur
+    /// `0.0.0.0`, et son adresse vue du navigateur dépend du réseau et d'un
+    /// éventuel proxy. Laissée vide (le défaut), les événements ne portent
+    /// pas de lien de lecture — la vignette, elle, voyage dans l'événement
+    /// et reste visible dans tous les cas.
+    #[serde(default)]
+    pub public_url: String,
 }
 
 /// Paramètres de la caméra V4L2.
@@ -469,6 +723,164 @@ mod tests {
         assert_eq!(config.mqtt.username, "foxguard");
         assert_eq!(config.mqtt.password, "hunter2");
         assert_eq!(config.mqtt.topic, "maison/foxguard/detections");
+    }
+
+    // --- `[motion]` : pré-filtre de mouvement ---
+
+    #[test]
+    fn the_motion_section_is_optional_and_active_by_default() {
+        // Un `camera-config.toml` antérieur à l'ajout du pré-filtre doit
+        // continuer de charger, et BÉNÉFICIER de l'économie : c'est un gain
+        // sans contrepartie fonctionnelle (voir `MotionConfig`).
+        let file = write_temp_toml(VALID_TOML);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert!(config.motion.enabled);
+        assert_eq!(config.motion.pixel_threshold, 20);
+        assert_eq!(config.motion.hold_secs, 3);
+        assert_eq!(config.motion.max_idle_secs, 20);
+    }
+
+    #[test]
+    fn the_motion_prefilter_can_be_turned_off() {
+        // Rétablit le comportement antérieur : YOLO à intervalle fixe.
+        let toml = format!("{VALID_TOML}\n[motion]\nenabled = false\n");
+        let file = write_temp_toml(&toml);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert!(!config.motion.enabled);
+        // Les autres réglages gardent leur défaut.
+        assert_eq!(config.motion.pixel_threshold, 20);
+    }
+
+    #[test]
+    fn the_motion_thresholds_can_be_tuned() {
+        let toml = format!(
+            "{VALID_TOML}\n[motion]\npixel_threshold = 35\nmin_changed_ratio = 0.02\nhold_secs = 10\n"
+        );
+        let file = write_temp_toml(&toml);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert_eq!(config.motion.pixel_threshold, 35);
+        assert!((config.motion.min_changed_ratio - 0.02).abs() < f32::EPSILON);
+        assert_eq!(config.motion.hold_secs, 10);
+    }
+
+    #[test]
+    fn a_max_idle_of_zero_is_accepted_and_means_never() {
+        // Comme `retention_days = 0`, c'est une valeur SIGNIFICATIVE et non
+        // une erreur : elle supprime le passage périodique de sécurité.
+        let toml = format!("{VALID_TOML}\n[motion]\nmax_idle_secs = 0\n");
+        let file = write_temp_toml(&toml);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert_eq!(config.motion.max_idle_secs, 0);
+    }
+
+    // --- `[rtsp]` : encodage H.264 et flux RTSP ---
+
+    #[test]
+    fn the_rtsp_section_is_optional_and_disabled_by_default() {
+        // L'encodage H.264 est logiciel : on ne l'impose pas à une
+        // installation qui ne l'a pas demandé.
+        let file = write_temp_toml(VALID_TOML);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert!(!config.rtsp.enabled);
+        assert_eq!(config.rtsp.port, 8554);
+        assert_eq!(config.rtsp.path, "stream");
+        assert_eq!(config.rtsp.fps, 12);
+    }
+
+    #[test]
+    fn the_rtsp_stream_requires_a_token_by_default() {
+        // Le flux RTSP montre la même image que le WebSocket, qui est
+        // authentifié : l'ouvrir sans contrôle serait une régression.
+        let file = write_temp_toml(VALID_TOML);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert!(config.rtsp.require_token);
+    }
+
+    #[test]
+    fn the_rtsp_section_parses_explicit_values() {
+        let toml = format!(
+            r#"
+                {VALID_TOML}
+
+                [rtsp]
+                enabled = true
+                host = "127.0.0.1"
+                port = 554
+                path = "/salon/live/"
+                require_token = false
+                fps = 25
+                bitrate_kbps = 3000
+                keyframe_interval_secs = 1
+            "#
+        );
+        let file = write_temp_toml(&toml);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert!(config.rtsp.enabled);
+        assert_eq!(config.rtsp.host, "127.0.0.1");
+        assert_eq!(config.rtsp.port, 554);
+        assert_eq!(config.rtsp.path, "/salon/live/");
+        assert!(!config.rtsp.require_token);
+        assert_eq!(config.rtsp.fps, 25);
+        assert_eq!(config.rtsp.bitrate_kbps, 3000);
+        assert_eq!(config.rtsp.keyframe_interval_secs, 1);
+    }
+
+    // --- Clips d'événement et URL publique ---
+
+    #[test]
+    fn event_clips_are_enabled_by_default_with_a_pre_roll() {
+        let file = write_temp_toml(VALID_TOML);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert!(config.recording.clips_enabled);
+        // Le pré-enregistrement est la raison d'être du dispositif : un clip
+        // qui commence à l'instant de la détection a déjà raté l'arrivée.
+        assert!(config.recording.clip_pre_secs > 0);
+        assert_eq!(config.recording.clip_post_secs, 8);
+    }
+
+    #[test]
+    fn event_clips_can_be_turned_off_and_their_durations_tuned() {
+        let toml = format!(
+            "{VALID_TOML}\n[recording]\nclips_enabled = false\nclip_pre_secs = 2\nclip_post_secs = 15\n"
+        );
+        let file = write_temp_toml(&toml);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert!(!config.recording.clips_enabled);
+        assert_eq!(config.recording.clip_pre_secs, 2);
+        assert_eq!(config.recording.clip_post_secs, 15);
+        // La rétention, dans la même section, garde son défaut.
+        assert_eq!(config.recording.retention_days, 7);
+    }
+
+    #[test]
+    fn the_public_url_is_empty_unless_configured() {
+        // La caméra ne peut pas la deviner : mieux vaut aucun lien qu'un lien
+        // mort dans la timeline.
+        let file = write_temp_toml(VALID_TOML);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert!(config.server.public_url.is_empty());
+    }
+
+    #[test]
+    fn the_public_url_can_be_declared() {
+        let toml = VALID_TOML.replace(
+            "api_token = \"secret\"",
+            "api_token = \"secret\"\n        public_url = \"http://192.168.1.42:8080\"",
+        );
+        let file = write_temp_toml(&toml);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert_eq!(config.server.public_url, "http://192.168.1.42:8080");
     }
 
     #[test]

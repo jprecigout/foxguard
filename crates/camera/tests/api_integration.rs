@@ -68,6 +68,50 @@ fn delete(uri: &str) -> Request<Body> {
 }
 
 #[tokio::test]
+async fn the_player_route_serves_a_standalone_page_for_a_clip() {
+    // Cette page est le point d'accès de la timeline du manager aux clips
+    // (voir `clip_player_handler`) : elle doit être servie par la caméra, et
+    // savoir lire le format d'enregistrement maison.
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
+
+    let response = app
+        .oneshot(get("/play/evt_20260918_154207123.mjpeg"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("corps de réponse")
+        .to_bytes();
+    let html = String::from_utf8(body.to_vec()).expect("HTML en UTF-8");
+
+    assert!(html.contains("<html"), "la page servie doit être du HTML");
+    // La page lit elle-même les données par la route des enregistrements.
+    assert!(html.contains("/recordings/"), "{html}");
+}
+
+#[tokio::test]
+async fn the_player_page_is_served_without_a_token() {
+    // Comme les autres routes de LECTURE (voir la note du README) : c'est la
+    // page, pas les données, et l'interface du manager l'affiche dans un
+    // cadre sans avoir le jeton de la caméra.
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
+
+    let response = app
+        .oneshot(get("/play/evt.mjpeg"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn index_route_serves_the_control_html_page() {
     let (state, _dir) = test_state("secret");
     let app = create_router(state);

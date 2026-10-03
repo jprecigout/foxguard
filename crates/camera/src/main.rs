@@ -1,6 +1,8 @@
 //! Point d'entrée de FoxGuard : charge la configuration, démarre la boucle
-//! de capture caméra (thread bloquant) et le serveur HTTP / WebSocket (Axum)
-//! qui sert l'interface de contrôle et le flux vidéo.
+//! de capture caméra (thread bloquant), le serveur HTTP / WebSocket (Axum)
+//! qui sert l'interface de contrôle et le flux vidéo, et — si
+//! `[rtsp] enabled = true` — le serveur RTSP qui met le même flux à
+//! disposition des lecteurs vidéo du réseau.
 //!
 //! Toute la logique applicative vit dans la bibliothèque (`src/lib.rs` et
 //! ses modules) : ce fichier ne fait qu'orchestrer le démarrage. Ce
@@ -17,9 +19,10 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use foxguard_camera::api;
-use foxguard_camera::capture::{self, SharedState};
+use foxguard_camera::capture::{self, ClipRecorder, SharedState};
 use foxguard_camera::config::Config;
 use foxguard_camera::retention;
+use foxguard_camera::rtsp::{self, RtspStream};
 
 /// Fichier de configuration de la caméra, relatif au répertoire de travail.
 ///
@@ -57,12 +60,34 @@ async fn main() -> anyhow::Result<()> {
         recordings_dir: config.recording.dir.clone(),
     });
 
+    // Enregistreur de clips d'événement, partagé entre la boucle de capture
+    // (qui l'alimente en frames) et le thread de reconnaissance (qui
+    // déclenche les clips). Voir `capture::clips`.
+    let clips = Arc::new(Mutex::new(ClipRecorder::new(&config.recording)));
+
+    // Flux H.264 partagé avec le serveur RTSP, créé seulement si le flux a
+    // été demandé : sans lui, la boucle de capture n'encode rien du tout.
+    let rtsp_stream = config.rtsp.enabled.then(|| Arc::new(RtspStream::new()));
+
+    if let Some(stream) = &rtsp_stream {
+        rtsp::spawn(
+            config.rtsp.clone(),
+            config.server.api_token.clone(),
+            config.camera.name.clone(),
+            Arc::clone(stream),
+        );
+    }
+
     // Lancement de la boucle de capture caméra dans une tâche blocking
     let camera_config = config.clone();
     let camera_state = Arc::clone(&state);
+    let camera_clips = Arc::clone(&clips);
+    let camera_rtsp = rtsp_stream.clone();
 
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = capture::start_camera_loop(camera_config, camera_state) {
+        if let Err(e) =
+            capture::start_camera_loop(camera_config, camera_state, camera_clips, camera_rtsp)
+        {
             error!("❌ Erreur critique dans la caméra : {}", e);
         }
     });

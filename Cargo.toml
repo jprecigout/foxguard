@@ -32,6 +32,11 @@ foxguard-protocol = { path = "crates/protocol" }
 
 anyhow = "1.0"
 axum = "0.8.9"
+# Transport des vignettes de détection dans la charge utile JSON des
+# événements (voir `foxguard-protocol`). Pure Rust, sans assembleur par
+# architecture : compilable en croisé pour ARM64 sous QEMU sans histoire
+# (voir la note en tête de fichier).
+base64 = "0.22"
 tower-http = { version = "0.7.0", features = ["fs"] }
 chrono = "0.4"
 serde = { version = "1.0", features = ["derive"] }

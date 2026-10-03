@@ -98,17 +98,152 @@ pub struct DetectionEvent {
     /// cas échéant, `name` sont des champs de premier niveau).
     #[serde(flatten)]
     pub status: PersonStatus,
+
+    /// Vignette JPEG de la détection, encodée en base64 (voir
+    /// [`encode_thumbnail`]).
+    ///
+    /// Transportée DANS l'événement plutôt que référencée par une URL sur la
+    /// caméra : la timeline de l'interface doit rester consultable depuis
+    /// n'importe où (et des mois plus tard), alors que la caméra n'est
+    /// joignable que depuis son réseau local et purge ses fichiers au bout de
+    /// quelques jours. Les événements ne sont publiés qu'aux CHANGEMENTS
+    /// d'état, pas à chaque frame : le surcoût sur le fil reste de l'ordre de
+    /// quelques kilo-octets par détection.
+    ///
+    /// `None` quand la caméra n'en produit pas (fonctionnalité désactivée, ou
+    /// caméra antérieure à son introduction).
+    // `#[serde(default)]` : c'est lui qui fait qu'une charge utile écrite par
+    // une caméra ANTÉRIEURE à ce champ reste comprise (voir la règle de
+    // compatibilité en tête de module).
+    //
+    // `#[ts(optional)]` : et c'est ce qui le dit aussi à l'interface. Sans
+    // lui, ts-rs annoncerait un champ obligatoire côté TypeScript, alors
+    // qu'il peut parfaitement être absent.
+    //
+    // Pas de `skip_serializing_if` ici, malgré la tentation : ts-rs ne sait
+    // pas l'analyser et avertit à chaque compilation. Il ne ferait
+    // qu'économiser `"thumbnail":null` — une trentaine d'octets sur un
+    // message publié à chaque CHANGEMENT d'état, pas à chaque frame. Deux
+    // avertissements permanents à chaque build coûtent plus cher que ça.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub thumbnail: Option<String>,
+
+    /// Enregistrement vidéo couvrant la détection, s'il y en a un.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub clip: Option<ClipRef>,
+}
+
+/// Référence vers le clip vidéo d'un événement, tel que servi par la caméra
+/// qui l'a écrit.
+///
+/// Le clip, contrairement à la vignette, n'est PAS transporté dans
+/// l'événement : quelques secondes de vidéo pèsent des mégaoctets, qui
+/// n'auraient aucune raison de traverser le broker pour un clip que personne
+/// n'ouvrira peut-être jamais. L'événement ne porte donc que de quoi aller le
+/// chercher.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "ts",
+    derive(TS),
+    ts(export, export_to = "../../../ui/src/generated/")
+)]
+pub struct ClipRef {
+    /// Nom du fichier d'enregistrement, tel qu'attendu par les routes
+    /// `GET /recordings/{file}` (les données) et `GET /play/{file}` (la page
+    /// de lecture) de la caméra.
+    pub file: String,
+
+    /// URL de base HTTP de la caméra (ex. `http://192.168.1.42:8080`),
+    /// telle que la caméra elle-même la déclare (`[server] public_url`).
+    ///
+    /// VIDE quand elle n'est pas configurée : la caméra ne peut pas la
+    /// deviner (elle écoute en général sur `0.0.0.0`, et son adresse vue du
+    /// navigateur dépend du réseau et d'un éventuel proxy). Le manager
+    /// n'expose alors pas de lien de lecture plutôt que d'en fabriquer un qui
+    /// ne mènerait nulle part.
+    #[serde(default)]
+    pub base_url: String,
+}
+
+impl ClipRef {
+    /// URL de la page de LECTURE du clip sur la caméra, ou `None` si celle-ci
+    /// n'a pas déclaré son URL publique.
+    ///
+    /// Elle pointe vers `/play/<fichier>` et non vers le fichier lui-même :
+    /// les enregistrements FoxGuard sont dans un format maison (une suite de
+    /// JPEG horodatés, voir `capture::recording` côté caméra) qu'aucun
+    /// navigateur ne sait jouer tel quel. C'est la caméra qui sert la page
+    /// capable de le lire — elle est le seul composant à connaître ce format,
+    /// et la seule origine autorisée à en lire les fichiers.
+    pub fn url(&self) -> Option<String> {
+        if self.base_url.is_empty() {
+            return None;
+        }
+
+        Some(format!(
+            "{}/play/{}",
+            self.base_url.trim_end_matches('/'),
+            self.file
+        ))
+    }
 }
 
 impl DetectionEvent {
-    /// Construit un événement horodaté à l'instant présent.
+    /// Construit un événement horodaté à l'instant présent, sans média
+    /// associé (voir [`Self::with_thumbnail`] et [`Self::with_clip`]).
     pub fn now(camera: impl Into<String>, status: PersonStatus) -> Self {
         Self {
             camera: camera.into(),
             timestamp: Local::now(),
             status,
+            thumbnail: None,
+            clip: None,
         }
     }
+
+    /// Attache une vignette JPEG (encodée en base64 au passage).
+    #[must_use]
+    pub fn with_thumbnail(mut self, jpeg: &[u8]) -> Self {
+        self.thumbnail = Some(encode_thumbnail(jpeg));
+        self
+    }
+
+    /// Attache la référence du clip vidéo couvrant la détection.
+    #[must_use]
+    pub fn with_clip(mut self, clip: ClipRef) -> Self {
+        self.clip = Some(clip);
+        self
+    }
+
+    /// Décode la vignette attachée, ou `None` s'il n'y en a pas (ou si elle
+    /// est illisible).
+    pub fn decoded_thumbnail(&self) -> Option<Vec<u8>> {
+        decode_thumbnail(self.thumbnail.as_deref()?)
+    }
+}
+
+/// Encode une vignette JPEG pour le transport dans un événement.
+///
+/// Base64 et non des octets bruts : la charge utile est du JSON, où un
+/// `Vec<u8>` se sérialiserait en tableau de nombres décimaux — environ
+/// quatre octets de fil par octet d'image, contre un tiers de surcoût ici.
+pub fn encode_thumbnail(jpeg: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(jpeg)
+}
+
+/// Décode une vignette reçue, ou `None` si ce n'est pas du base64 valide.
+///
+/// Tolérante par principe, comme le reste du décodage du protocole : une
+/// vignette illisible ne doit pas faire perdre l'événement lui-même (voir
+/// la règle de compatibilité en tête de module).
+pub fn decode_thumbnail(encoded: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()
 }
 
 #[cfg(test)]
@@ -122,6 +257,8 @@ mod tests {
                 .unwrap()
                 .into(),
             status,
+            thumbnail: None,
+            clip: None,
         }
     }
 
@@ -207,5 +344,132 @@ mod tests {
         let parsed: DetectionEvent = serde_json::from_str(raw).expect("champ inconnu ignoré");
 
         assert_eq!(parsed.camera, "entree");
+    }
+
+    // --- Média attaché (vignette, clip) ---
+
+    #[test]
+    fn an_event_without_media_carries_no_media_content() {
+        // Les champs apparaissent, à `null` (voir la note sur
+        // `skip_serializing_if` près de leur déclaration), mais ne
+        // transportent rien.
+        let json = serde_json::to_string(&event(PersonStatus::Unknown)).expect("sérialisation");
+
+        assert!(json.contains("\"thumbnail\":null"), "{json}");
+        assert!(json.contains("\"clip\":null"), "{json}");
+
+        let parsed: DetectionEvent = serde_json::from_str(&json).expect("relecture");
+        assert_eq!(parsed.decoded_thumbnail(), None);
+        assert_eq!(parsed.clip, None);
+    }
+
+    #[test]
+    fn an_event_without_media_stays_small_on_the_wire() {
+        // Garde-fou de volume : un message sans média doit rester de l'ordre
+        // de la centaine d'octets, pas du kilo-octet.
+        let json = serde_json::to_string(&event(PersonStatus::Unknown)).expect("sérialisation");
+
+        assert!(json.len() < 160, "{} octets : {json}", json.len());
+    }
+
+    #[test]
+    fn a_payload_from_an_older_camera_still_parses() {
+        // C'EST LE TEST DE COMPATIBILITÉ : le format exact qu'écrivent les
+        // caméras déjà déployées, sans aucun des champs de média.
+        let raw =
+            r#"{"camera":"entree","timestamp":"2026-09-18T15:42:07+02:00","status":"unknown"}"#;
+
+        let parsed: DetectionEvent = serde_json::from_str(raw).expect("format historique accepté");
+
+        assert_eq!(parsed.thumbnail, None);
+        assert_eq!(parsed.clip, None);
+    }
+
+    #[test]
+    fn a_thumbnail_survives_a_round_trip_through_the_wire() {
+        // Des octets JPEG plausibles, dont un hors ASCII : c'est précisément
+        // ce que du base64 doit savoir faire traverser du JSON.
+        let jpeg = [0xFFu8, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0xFF, 0xD9];
+
+        let original = event(PersonStatus::Unknown).with_thumbnail(&jpeg);
+        let json = serde_json::to_string(&original).expect("sérialisation");
+        let parsed: DetectionEvent = serde_json::from_str(&json).expect("désérialisation");
+
+        assert_eq!(parsed.decoded_thumbnail().as_deref(), Some(&jpeg[..]));
+    }
+
+    #[test]
+    fn an_unreadable_thumbnail_does_not_cost_the_whole_event() {
+        // Tolérance par principe : la vignette est un agrément, l'événement
+        // est l'information.
+        let raw = r#"{"camera":"entree","timestamp":"2026-09-18T15:42:07+02:00","status":"unknown","thumbnail":"pas du base64 !!"}"#;
+
+        let parsed: DetectionEvent = serde_json::from_str(raw).expect("événement lisible");
+
+        assert_eq!(parsed.camera, "entree");
+        assert_eq!(parsed.decoded_thumbnail(), None);
+    }
+
+    #[test]
+    fn a_clip_reference_survives_a_round_trip() {
+        let clip = ClipRef {
+            file: "evt_20260918_154207_inconnu.mjpeg".to_string(),
+            base_url: "http://192.168.1.42:8080".to_string(),
+        };
+
+        let original = event(PersonStatus::Unknown).with_clip(clip.clone());
+        let json = serde_json::to_string(&original).expect("sérialisation");
+        let parsed: DetectionEvent = serde_json::from_str(&json).expect("désérialisation");
+
+        assert_eq!(parsed.clip, Some(clip));
+    }
+
+    #[test]
+    fn a_clip_url_points_at_the_cameras_player_page() {
+        let clip = ClipRef {
+            file: "evt.mjpeg".to_string(),
+            base_url: "http://192.168.1.42:8080".to_string(),
+        };
+
+        assert_eq!(
+            clip.url().as_deref(),
+            Some("http://192.168.1.42:8080/play/evt.mjpeg")
+        );
+    }
+
+    #[test]
+    fn a_trailing_slash_in_the_public_url_does_not_double_up() {
+        let clip = ClipRef {
+            file: "evt.mjpeg".to_string(),
+            base_url: "http://cam.local/".to_string(),
+        };
+
+        assert_eq!(
+            clip.url().as_deref(),
+            Some("http://cam.local/play/evt.mjpeg")
+        );
+    }
+
+    #[test]
+    fn a_clip_without_a_public_url_yields_no_link() {
+        // La caméra ne peut pas deviner son URL vue du navigateur : mieux
+        // vaut pas de lien qu'un lien mort.
+        let clip = ClipRef {
+            file: "evt.mjpeg".to_string(),
+            base_url: String::new(),
+        };
+
+        assert_eq!(clip.url(), None);
+    }
+
+    #[test]
+    fn a_clip_reference_without_a_base_url_field_still_parses() {
+        // Compatibilité : `base_url` est `#[serde(default)]`, une caméra qui
+        // ne le renseigne pas reste comprise.
+        let raw = r#"{"camera":"e","timestamp":"2026-09-18T15:42:07+02:00","status":"unknown","clip":{"file":"evt.mjpeg"}}"#;
+
+        let parsed: DetectionEvent = serde_json::from_str(raw).expect("clip sans base_url");
+
+        assert_eq!(parsed.clip.and_then(|c| c.url()), None);
     }
 }

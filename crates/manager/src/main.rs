@@ -2,13 +2,15 @@
 //!
 //! Le manager tourne sur un SERVEUR ANNEXE (pas sur le Raspberry Pi). Il
 //! s'abonne au broker MQTT sur lequel les caméras publient leurs événements
-//! de détection, conserve un historique en mémoire, et l'expose par une API
-//! HTTP destinée à l'interface React (voir `ui/`).
+//! de détection, les conserve dans PostgreSQL (voir [`EventRepository`]) et
+//! les expose par une API HTTP, qui sert aussi l'interface React (voir
+//! `ui/`).
 //!
-//! ÉTAT : squelette fonctionnel. La chaîne complète caméra → MQTT → manager →
-//! HTTP marche de bout en bout, mais l'historique est volatile (voir
-//! `store`) et l'API se limite à la consultation. C'est la base sur laquelle
-//! greffer la persistance, les notifications et l'interface.
+//! ÉTAT : la chaîne caméra → MQTT → manager → PostgreSQL → HTTP → interface
+//! marche de bout en bout, vignettes et clips des détections compris. L'API
+//! reste en LECTURE SEULE — le pilotage d'une caméra passe par son interface
+//! embarquée, qui doit rester le secours disponible quand ce serveur est en
+//! panne. Restent à construire : les notifications.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

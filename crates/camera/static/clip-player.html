@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="fr">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FoxGuard — Lecture d'un clip</title>
+
+    <!--
+      LECTEUR AUTONOME d'un enregistrement FoxGuard.
+
+      Pourquoi cette page existe, alors que l'interface de contrôle
+      (controller.html) sait déjà lire les enregistrements :
+
+      La timeline du manager (voir `ui/`) donne accès direct au clip de chaque
+      détection. Or ces clips vivent sur la CAMÉRA — ils pèsent plusieurs
+      mégaoctets et n'ont aucune raison de traverser le réseau pour finir dans
+      une base de données. L'interface du manager, servie par une autre
+      origine, ne peut donc pas les lire elle-même : le navigateur le lui
+      interdirait (CORS), et ouvrir les enregistrements à toutes les origines
+      serait une bien mauvaise façon de contourner ça.
+
+      Elle y donne donc accès en affichant CETTE page, servie par la caméra
+      elle-même. La politique de même origine est respectée sans rien
+      assouplir, et le format d'enregistrement reste connu du seul composant
+      qui l'écrit.
+
+      Le format justement : `[u32 timestamp_ms][u32 frame_len][frame JPEG]`
+      par frame (voir `capture::recording` côté Rust). L'horodatage par frame
+      permet de restituer la vitesse RÉELLE de capture, qui n'est pas
+      forcément celle qu'on croit — une webcam UVC réduit son FPS en basse
+      luminosité.
+    -->
+    <style>
+        :root {
+            /* Palette de l'interface embarquée (controller.html) : c'est la
+               même caméra, elle n'a pas deux identités visuelles. */
+            --bg: #121212;
+            --card: #1e1e1e;
+            --border: #333;
+            --text: #e0e0e0;
+            --muted: #8a8a8a;
+            --accent: #1e88e5;
+            --accent-red: #e53935;
+            color-scheme: dark;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg);
+            color: var(--text);
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            background: var(--card);
+        }
+
+        h1 {
+            font-size: 1rem;
+            margin: 0;
+            flex: 1;
+            min-width: 180px;
+        }
+
+        h1 .fox {
+            color: var(--accent-red);
+        }
+
+        .filename {
+            color: var(--muted);
+            font-size: 0.8rem;
+            font-variant-numeric: tabular-nums;
+            word-break: break-all;
+        }
+
+        button {
+            background: #2a2a2a;
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+        }
+
+        button:hover:not(:disabled) {
+            background: #3a3a3a;
+        }
+
+        button:disabled {
+            opacity: 0.45;
+            cursor: default;
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+        }
+
+        canvas {
+            max-width: 100%;
+            max-height: 100%;
+            background: #000;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+        }
+
+        .status {
+            color: var(--muted);
+            font-size: 0.9rem;
+            text-align: center;
+            padding: 0 16px;
+        }
+
+        .status.error {
+            color: var(--accent-red);
+        }
+
+        footer {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 16px;
+            border-top: 1px solid var(--border);
+            background: var(--card);
+            font-size: 0.85rem;
+        }
+
+        input[type="range"] {
+            flex: 1;
+            accent-color: var(--accent);
+        }
+
+        .position {
+            color: var(--muted);
+            font-variant-numeric: tabular-nums;
+            min-width: 5.5em;
+            text-align: right;
+        }
+
+        [hidden] {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1>Fox<span class="fox">Guard</span> — clip</h1>
+        <span class="filename" id="filename"></span>
+    </header>
+
+    <main>
+        <p class="status" id="status">Chargement du clip…</p>
+        <canvas id="canvas" hidden></canvas>
+    </main>
+
+    <footer hidden id="controls">
+        <button id="toggle" type="button">Pause</button>
+        <input type="range" id="seek" min="0" value="0" step="1" aria-label="Position dans le clip" />
+        <span class="position" id="position">0,0 s</span>
+    </footer>
+
+    <script>
+        const statusEl = document.getElementById('status');
+        const canvas = document.getElementById('canvas');
+        const context = canvas.getContext('2d');
+        const controls = document.getElementById('controls');
+        const toggle = document.getElementById('toggle');
+        const seek = document.getElementById('seek');
+        const positionEl = document.getElementById('position');
+        const filenameEl = document.getElementById('filename');
+
+        /**
+         * Nom du fichier à lire, pris dans le CHEMIN de cette page
+         * (`/play/<fichier>`) et non dans un paramètre de requête : c'est la
+         * forme que produit la caméra dans ses événements, et elle reste
+         * lisible dans la barre d'adresse.
+         */
+        function clipFilename() {
+            const last = window.location.pathname.split('/').filter(Boolean).pop();
+            return last ? decodeURIComponent(last) : '';
+        }
+
+        /**
+         * Extrait les frames horodatées d'un enregistrement au format
+         * « framed » : `[u32 timestamp_ms][u32 frame_len][frame JPEG]`.
+         *
+         * Retourne `null` si le fichier ne correspond pas à ce format, pour
+         * que l'appelant retombe sur le balayage des marqueurs JPEG (ancien
+         * format, antérieur à l'horodatage par frame).
+         */
+        function extractFramedRecording(buffer) {
+            const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+            const frames = [];
+            let offset = 0;
+
+            while (offset + 8 <= buffer.length) {
+                const timestampMs = view.getUint32(offset, true);
+                const frameLen = view.getUint32(offset + 4, true);
+                const dataStart = offset + 8;
+                const dataEnd = dataStart + frameLen;
+
+                if (frameLen === 0 || dataEnd > buffer.length) return null;
+                if (buffer[dataStart] !== 0xFF || buffer[dataStart + 1] !== 0xD8) return null;
+
+                frames.push({ timestampMs, bytes: buffer.subarray(dataStart, dataEnd) });
+                offset = dataEnd;
+            }
+
+            return frames.length > 0 ? frames : null;
+        }
+
+        /**
+         * Ancien format : simple concaténation de JPEG, sans horodatage. On
+         * retombe sur un cadencement fixe à 30 im/s, faute de mieux.
+         */
+        function extractLegacyRecording(buffer) {
+            const frames = [];
+            let start = -1;
+            let index = 0;
+
+            for (let i = 0; i < buffer.length - 1; i++) {
+                if (buffer[i] === 0xFF && buffer[i + 1] === 0xD8) {
+                    start = i;
+                } else if (buffer[i] === 0xFF && buffer[i + 1] === 0xD9 && start !== -1) {
+                    frames.push({ timestampMs: index * 33, bytes: buffer.subarray(start, i + 2) });
+                    start = -1;
+                    index++;
+                }
+            }
+
+            return frames;
+        }
+
+        /** Décode toutes les frames en images, une fois pour toutes. */
+        async function decodeFrames(frames) {
+            // `createImageBitmap` décode hors du fil principal et rend une
+            // image directement dessinable. Tout décoder d'avance plutôt
+            // qu'au fil de la lecture : un clip fait quelques centaines de
+            // frames, et on veut pouvoir se déplacer dedans instantanément.
+            return Promise.all(
+                frames.map(async (frame) => ({
+                    timestampMs: frame.timestampMs,
+                    image: await createImageBitmap(
+                        new Blob([frame.bytes], { type: 'image/jpeg' })
+                    ),
+                }))
+            );
+        }
+
+        function formatSeconds(milliseconds) {
+            return `${(milliseconds / 1000).toFixed(1).replace('.', ',')} s`;
+        }
+
+        async function main() {
+            const filename = clipFilename();
+            filenameEl.textContent = filename;
+            document.title = `FoxGuard — ${filename}`;
+
+            if (!filename) {
+                statusEl.textContent = 'Aucun clip demandé.';
+                statusEl.classList.add('error');
+                return;
+            }
+
+            let decoded;
+
+            try {
+                const response = await fetch(`/recordings/${encodeURIComponent(filename)}`);
+
+                if (!response.ok) {
+                    // 404 : le clip a été purgé par la rétention
+                    // (`[recording] retention_days`), ou n'a jamais existé.
+                    statusEl.textContent = response.status === 404
+                        ? 'Ce clip n’existe plus sur la caméra (purgé par la rétention automatique).'
+                        : `La caméra a répondu ${response.status}.`;
+                    statusEl.classList.add('error');
+                    return;
+                }
+
+                const buffer = new Uint8Array(await response.arrayBuffer());
+                const frames = extractFramedRecording(buffer) || extractLegacyRecording(buffer);
+
+                if (frames.length === 0) {
+                    statusEl.textContent = 'Clip illisible : aucune image trouvée.';
+                    statusEl.classList.add('error');
+                    return;
+                }
+
+                decoded = await decodeFrames(frames);
+            } catch (error) {
+                console.error(error);
+                statusEl.textContent = 'Clip injoignable depuis ce navigateur.';
+                statusEl.classList.add('error');
+                return;
+            }
+
+            statusEl.hidden = true;
+            canvas.hidden = false;
+            controls.hidden = false;
+
+            canvas.width = decoded[0].image.width;
+            canvas.height = decoded[0].image.height;
+            seek.max = String(decoded.length - 1);
+
+            let current = 0;
+            let playing = true;
+            let timer = null;
+
+            /** Écart jusqu'à la frame suivante, d'après les horodatages réels. */
+            function delayAfter(index) {
+                if (index + 1 < decoded.length) {
+                    return Math.max(0, decoded[index + 1].timestampMs - decoded[index].timestampMs);
+                }
+
+                // Après la dernière frame, aucun écart n'est connu : on
+                // reprend celui du début du clip pour le rebouclage.
+                return decoded.length > 1
+                    ? Math.max(0, decoded[1].timestampMs - decoded[0].timestampMs)
+                    : 33;
+            }
+
+            function show(index) {
+                current = index;
+                context.drawImage(decoded[index].image, 0, 0);
+                seek.value = String(index);
+                positionEl.textContent = formatSeconds(decoded[index].timestampMs);
+            }
+
+            function schedule() {
+                clearTimeout(timer);
+
+                if (!playing) return;
+
+                timer = setTimeout(() => {
+                    show((current + 1) % decoded.length);
+                    schedule();
+                }, delayAfter(current));
+            }
+
+            toggle.addEventListener('click', () => {
+                playing = !playing;
+                toggle.textContent = playing ? 'Pause' : 'Lecture';
+                schedule();
+            });
+
+            seek.addEventListener('input', () => {
+                // Se déplacer met la lecture en pause : on regarde une image
+                // précise, on ne veut pas qu'elle fuie sous le curseur.
+                playing = false;
+                toggle.textContent = 'Lecture';
+                clearTimeout(timer);
+                show(Number(seek.value));
+            });
+
+            show(0);
+            schedule();
+        }
+
+        main();
+    </script>
+</body>
+
+</html>

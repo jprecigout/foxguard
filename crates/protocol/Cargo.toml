@@ -15,6 +15,11 @@ description = "Contrat de messages entre foxguard-camera et foxguard-manager"
 serde = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 ts-rs = { workspace = true, optional = true }
+# Encodage des vignettes de détection, qui voyagent DANS l'événement JSON
+# (voir `DetectionEvent::thumbnail`). Admis ici malgré le minimalisme
+# revendiqué ci-dessus : c'est de la sérialisation, exactement le périmètre
+# de ce crate, et base64 est du Rust pur sans assembleur par architecture.
+base64 = { workspace = true }
 
 [features]
 # Génère les définitions TypeScript de ces types (voir `ui/src/generated/`).

@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use chrono::{Duration, Local, NaiveDate};
 use foxguard_manager::db::EventRepository;
-use foxguard_protocol::{DetectionEvent, PersonStatus};
+use foxguard_protocol::{ClipRef, DetectionEvent, PersonStatus};
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -79,6 +79,8 @@ fn event(camera: &str, name: Option<&str>, minutes_ago: i64) -> DetectionEvent {
         camera: camera.to_string(),
         timestamp: Local::now() - Duration::minutes(minutes_ago),
         status,
+        thumbnail: None,
+        clip: None,
     }
 }
 
@@ -117,8 +119,8 @@ async fn an_event_survives_a_write_and_a_read() {
     let events = repo.recent(10).await.expect("lecture");
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].camera, "salon");
-    assert_eq!(events[0].status.name(), Some("jerome"));
+    assert_eq!(events[0].event.camera, "salon");
+    assert_eq!(events[0].event.status.name(), Some("jerome"));
 }
 
 #[tokio::test]
@@ -131,8 +133,8 @@ async fn an_unknown_person_round_trips_without_a_name() {
 
     let events = repo.recent(10).await.expect("lecture");
 
-    assert!(events[0].status.is_unknown());
-    assert_eq!(events[0].status.name(), None);
+    assert!(events[0].event.status.is_unknown());
+    assert_eq!(events[0].event.status.name(), None);
 }
 
 #[tokio::test]
@@ -146,7 +148,7 @@ async fn the_timestamp_survives_the_round_trip() {
     repo.record(&original).await.expect("écriture");
 
     let events = repo.recent(1).await.expect("lecture");
-    let ecart = (events[0].timestamp - original.timestamp)
+    let ecart = (events[0].event.timestamp - original.timestamp)
         .num_milliseconds()
         .abs();
 
@@ -164,7 +166,7 @@ async fn events_are_returned_most_recent_first() {
         .unwrap();
 
     let events = repo.recent(10).await.expect("lecture");
-    let ordre: Vec<&str> = events.iter().map(|e| e.camera.as_str()).collect();
+    let ordre: Vec<&str> = events.iter().map(|e| e.event.camera.as_str()).collect();
 
     assert_eq!(ordre, vec!["recente", "intermediaire", "ancienne"]);
 }
@@ -212,7 +214,7 @@ async fn a_day_query_returns_only_that_day() {
     let events = repo.events_for_day(today, 100).await.expect("journée");
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].camera, "aujourdhui");
+    assert_eq!(events[0].event.camera, "aujourdhui");
 }
 
 #[tokio::test]
@@ -225,7 +227,7 @@ async fn a_day_query_returns_events_most_recent_first() {
     repo.record(&event("apres_midi", None, 60)).await.unwrap();
 
     let events = repo.events_for_day(today, 100).await.expect("journée");
-    let ordre: Vec<&str> = events.iter().map(|e| e.camera.as_str()).collect();
+    let ordre: Vec<&str> = events.iter().map(|e| e.event.camera.as_str()).collect();
 
     assert_eq!(ordre, vec!["apres_midi", "midi", "matin"]);
 }
@@ -277,7 +279,7 @@ async fn retention_deletes_only_what_is_older_than_the_limit() {
     assert_eq!(deleted, 1);
     let restants = repo.recent(10).await.expect("lecture");
     assert_eq!(restants.len(), 1);
-    assert_eq!(restants[0].camera, "recent");
+    assert_eq!(restants[0].event.camera, "recent");
 }
 
 #[tokio::test]
@@ -291,6 +293,177 @@ async fn a_retention_of_zero_deletes_nothing() {
 
     assert_eq!(repo.delete_older_than_days(0).await.expect("purge"), 0);
     assert_eq!(repo.count().await.expect("comptage"), 1);
+}
+
+// --- Média des événements (vignette et clip) ---
+
+/// Quelques octets qui ressemblent à du JPEG, dont un hors ASCII : c'est ce
+/// qu'un `BYTEA` doit rendre à l'identique.
+const FAKE_JPEG: [u8; 9] = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0xFF, 0xD9];
+
+#[tokio::test]
+async fn a_thumbnail_survives_the_round_trip_through_the_database() {
+    let repo = repo_or_skip!();
+
+    repo.record(&event("salon", None, 0).with_thumbnail(&FAKE_JPEG))
+        .await
+        .expect("écriture");
+
+    let events = repo.recent(1).await.expect("lecture");
+    assert!(events[0].has_thumbnail);
+
+    let thumbnail = repo
+        .thumbnail(events[0].id)
+        .await
+        .expect("lecture de la vignette")
+        .expect("vignette présente");
+
+    assert_eq!(thumbnail, FAKE_JPEG);
+}
+
+#[tokio::test]
+async fn listing_events_does_not_carry_the_thumbnails() {
+    // L'économie qui justifie tout le dispositif : une journée chargée ne
+    // doit pas rapatrier des mégaoctets d'images pour afficher une liste.
+    let repo = repo_or_skip!();
+
+    repo.record(&event("salon", None, 0).with_thumbnail(&FAKE_JPEG))
+        .await
+        .expect("écriture");
+
+    let events = repo.recent(1).await.expect("lecture");
+
+    assert!(events[0].has_thumbnail, "la présence doit être signalée");
+    assert_eq!(
+        events[0].event.thumbnail, None,
+        "le contenu ne doit PAS être rapatrié"
+    );
+}
+
+#[tokio::test]
+async fn an_event_without_a_thumbnail_says_so() {
+    let repo = repo_or_skip!();
+
+    repo.record(&event("salon", None, 0))
+        .await
+        .expect("écriture");
+
+    let events = repo.recent(1).await.expect("lecture");
+
+    assert!(!events[0].has_thumbnail);
+    assert_eq!(repo.thumbnail(events[0].id).await.expect("lecture"), None);
+}
+
+#[tokio::test]
+async fn an_unreadable_thumbnail_does_not_cost_the_event() {
+    // Tolérance par principe : la vignette est un agrément, l'événement est
+    // l'information.
+    let repo = repo_or_skip!();
+
+    let mut corrupted = event("salon", None, 0);
+    corrupted.thumbnail = Some("ceci n'est pas du base64 !!".to_string());
+
+    repo.record(&corrupted).await.expect("écriture");
+
+    let events = repo.recent(1).await.expect("lecture");
+    assert_eq!(events.len(), 1, "l'événement doit être enregistré");
+    assert!(!events[0].has_thumbnail);
+}
+
+#[tokio::test]
+async fn an_unknown_identifier_has_no_thumbnail_rather_than_an_error() {
+    let repo = repo_or_skip!();
+
+    assert_eq!(repo.thumbnail(999_999).await.expect("lecture"), None);
+}
+
+#[tokio::test]
+async fn a_clip_reference_survives_the_round_trip() {
+    let repo = repo_or_skip!();
+
+    let clip = ClipRef {
+        file: "evt_20260918_154207123.mjpeg".to_string(),
+        base_url: "http://192.168.1.42:8080".to_string(),
+    };
+
+    repo.record(&event("salon", None, 0).with_clip(clip.clone()))
+        .await
+        .expect("écriture");
+
+    let events = repo.recent(1).await.expect("lecture");
+
+    assert_eq!(events[0].event.clip.as_ref(), Some(&clip));
+    assert_eq!(
+        events[0]
+            .event
+            .clip
+            .as_ref()
+            .and_then(|c| c.url())
+            .as_deref(),
+        Some("http://192.168.1.42:8080/play/evt_20260918_154207123.mjpeg")
+    );
+}
+
+#[tokio::test]
+async fn a_clip_from_a_camera_without_a_public_url_yields_no_link() {
+    // La caméra ne peut pas deviner son adresse vue du navigateur : mieux
+    // vaut aucun lien qu'un lien mort.
+    let repo = repo_or_skip!();
+
+    repo.record(&event("salon", None, 0).with_clip(ClipRef {
+        file: "evt.mjpeg".to_string(),
+        base_url: String::new(),
+    }))
+    .await
+    .expect("écriture");
+
+    let events = repo.recent(1).await.expect("lecture");
+    let clip = events[0].event.clip.as_ref().expect("clip conservé");
+
+    assert_eq!(clip.file, "evt.mjpeg");
+    assert_eq!(clip.url(), None);
+}
+
+#[tokio::test]
+async fn purging_an_event_takes_its_thumbnail_with_it() {
+    // C'est ce qui borne le volume occupé par les vignettes : la rétention
+    // des événements suffit, il n'y a pas de second ménage à faire.
+    let repo = repo_or_skip!();
+
+    let jour = 24 * 60;
+    repo.record(&event("vieux", None, 40 * jour).with_thumbnail(&FAKE_JPEG))
+        .await
+        .expect("écriture");
+
+    let id = repo.recent(1).await.expect("lecture")[0].id;
+    assert!(repo.thumbnail(id).await.expect("lecture").is_some());
+
+    assert_eq!(repo.delete_older_than_days(30).await.expect("purge"), 1);
+    assert_eq!(repo.thumbnail(id).await.expect("lecture"), None);
+}
+
+#[tokio::test]
+async fn identifiers_are_distinct_and_stable() {
+    // Ils servent d'URL de vignette et de clé d'affichage : deux événements
+    // ne peuvent pas les partager.
+    let repo = repo_or_skip!();
+
+    for i in 0..3 {
+        repo.record(&event("salon", None, i)).await.unwrap();
+    }
+
+    let first_read = repo.recent(10).await.expect("lecture");
+    let ids: Vec<i64> = first_read.iter().map(|e| e.id).collect();
+
+    assert_eq!(ids.len(), 3);
+    assert_eq!(
+        ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        3
+    );
+
+    // Et ils ne bougent pas d'une lecture à l'autre.
+    let second_read = repo.recent(10).await.expect("lecture");
+    assert_eq!(ids, second_read.iter().map(|e| e.id).collect::<Vec<i64>>());
 }
 
 #[tokio::test]

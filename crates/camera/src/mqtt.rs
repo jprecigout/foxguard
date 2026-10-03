@@ -23,7 +23,7 @@ use crate::config::MqttConfig;
 //
 // `PersonStatus` est ré-exporté pour que le reste de la caméra (notamment
 // `crate::capture::tracking`) continue de l'importer depuis ce module.
-pub use foxguard_protocol::{DetectionEvent, PersonStatus};
+pub use foxguard_protocol::{ClipRef, DetectionEvent, PersonStatus};
 
 /// Client MQTT connecté en tâche de fond, utilisé pour publier les
 /// événements de détection. Construit une seule fois au démarrage par
@@ -87,13 +87,17 @@ impl MqttPublisher {
         }
     }
 
-    /// Publie un événement de détection pour la caméra `camera_name`, en
-    /// tâche de fond (`tokio::spawn`) : ne bloque jamais l'appelant, même si
-    /// le broker est temporairement injoignable (même principe que
+    /// Publie un événement de détection en tâche de fond
+    /// (`tokio::spawn`) : ne bloque jamais l'appelant, même si le broker est
+    /// temporairement injoignable (même principe que
     /// `crate::mail::Mailer::send_alert` pour les e-mails d'alerte).
-    pub fn publish_status(&self, camera_name: &str, status: &PersonStatus) {
-        let event = DetectionEvent::now(camera_name, status.clone());
-
+    ///
+    /// L'événement est CONSTITUÉ par l'appelant (voir
+    /// `crate::capture::worker`) et non ici : c'est lui qui a la frame sous
+    /// les yeux, donc de quoi en extraire une vignette, et qui sait quel clip
+    /// vidéo couvre la détection. Ce module ne fait que la connexion au
+    /// broker et la publication.
+    pub fn publish_event(&self, event: DetectionEvent) {
         let payload = match serde_json::to_vec(&event) {
             Ok(payload) => payload,
             Err(e) => {

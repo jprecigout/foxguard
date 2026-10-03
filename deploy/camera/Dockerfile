@@ -10,13 +10,21 @@
 FROM rust:1-slim AS builder 
 
 # Dépendances nécessaires à la compilation (V4L2, C toolchain, TLS pour
-# l'envoi d'e-mail via lettre : libssl-dev pour openssl-sys/native-tls)
+# l'envoi d'e-mail via lettre : libssl-dev pour openssl-sys/native-tls).
+#
+# `nasm` sert à l'encodeur H.264 (openh264, voir crates/camera/src/h264/) :
+# il assemble ses routines x86. Il est INUTILE pour la cible qui nous occupe —
+# sur ARM64, le script de compilation d'openh264-sys2 ne cherche aucun
+# assembleur et construit du C++ portable — mais il évite de perdre
+# l'accélération quand cette même image est construite sur un PC. Son absence
+# n'est jamais bloquante : le script retombe alors sur du C++ portable.
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libv4l-dev \
     libclang-dev \
     libssl-dev \
     build-essential \
+    nasm \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -106,6 +114,10 @@ USER foxguard
 
 # Exposition du port Web / WebSocket
 EXPOSE 8080
+# Port du flux RTSP (voir `[rtsp]` dans camera-config.toml). Déclaré ici pour
+# documenter l'interface du conteneur ; le flux reste désactivé par défaut, et
+# il faudra de toute façon publier le port au lancement (`-p 8554:8554`).
+EXPOSE 8554
 
 # Niveau de journalisation (tracing / EnvFilter, voir `init_tracing` dans
 # crates/camera/src/main.rs). `foxguard_camera=debug` ajoute les diagnostics

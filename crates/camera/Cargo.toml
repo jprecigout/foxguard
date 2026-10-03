@@ -29,6 +29,20 @@ font8x8 = "0.3"
 tract-onnx = "0.23.4"
 ndarray = "0.17.2"
 
+# Encodage H.264 du flux caméra (voir src/h264/ et src/rtsp/).
+#
+# `default-features = false` + `source` : on construit l'implémentation Cisco
+# depuis ses sources vendues avec le crate, plutôt que de charger une
+# bibliothèque partagée à l'exécution (`libloading`) qui n'existe pas dans
+# l'image Debian slim du Raspberry Pi.
+#
+# Contrairement à `ring` et `native-tls` (voir les notes ci-dessous), ce crate
+# ne pose PAS de problème en compilation croisée ARM64 : son script de
+# compilation ne cherche d'assembleur que pour x86/x86_64, et construit du C++
+# portable pour tout le reste. `OPENH264_NO_ASM=1` le désactive même sur x86,
+# si besoin.
+openh264 = { version = "0.9", default-features = false, features = ["source"] }
+
 # Utilitaire & Alertes
 lettre = { version = "0.11", default-features = false, features = [
     "builder",
@@ -37,6 +51,9 @@ lettre = { version = "0.11", default-features = false, features = [
 ] }
 chrono = { workspace = true }
 anyhow = { workspace = true }
+# Encodage des jeux de paramètres H.264 dans le SDP (voir src/rtsp/sdp.rs) et
+# des vignettes de détection (via foxguard-protocol).
+base64 = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio-util = { version = "0.7.19", features = ["io"] }

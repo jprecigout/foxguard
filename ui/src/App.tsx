@@ -2,90 +2,16 @@ import { useCallback, useEffect, useState } from "react";
 
 import { ApiError, fetchCameras, fetchEventsForDay } from "./api";
 import type { EventsResponse } from "./api";
-import { formatDayLabel, formatTime, shiftDay, today } from "./dates";
+import { CameraTimeline } from "./components/CameraTimeline";
+import { ClipDialog } from "./components/ClipDialog";
+import { DayBar } from "./components/DayBar";
+import { today } from "./dates";
 import { groupByCamera } from "./grouping";
-import type { CameraDay } from "./grouping";
 
-/** Barre de navigation entre les journées. */
-function DayBar({
-  day,
-  onChange,
-  busy,
-}: {
-  day: string;
-  onChange: (day: string) => void;
-  busy: boolean;
-}) {
-  const isToday = day === today();
-
-  return (
-    <div className="daybar">
-      <button onClick={() => onChange(shiftDay(day, -1))} aria-label="Jour précédent">
-        ← Veille
-      </button>
-
-      <span className="label">{formatDayLabel(day)}</span>
-
-      <input
-        type="date"
-        value={day}
-        max={today()}
-        onChange={(e) => e.target.value && onChange(e.target.value)}
-      />
-
-      {/* Désactivé sur aujourd'hui : il n'y a rien à afficher dans le futur. */}
-      <button onClick={() => onChange(shiftDay(day, 1))} disabled={isToday}>
-        Lendemain →
-      </button>
-      <button onClick={() => onChange(today())} disabled={isToday}>
-        Aujourd'hui
-      </button>
-
-      <span className="count">{busy ? "chargement…" : ""}</span>
-    </div>
-  );
-}
-
-/** Détections d'une caméra pour la journée affichée. */
-function CameraCard({ day }: { day: CameraDay }) {
-  return (
-    <section className="camera">
-      <header>
-        <h2>{day.camera}</h2>
-        <span className="count">
-          {day.events.length} détection{day.events.length > 1 ? "s" : ""}
-        </span>
-        <div className="chips">
-          {day.people.map((person) => (
-            <span key={person} className="chip known">
-              {person}
-            </span>
-          ))}
-          {day.unknownCount > 0 && (
-            <span className="chip unknown">{day.unknownCount} inconnu(s)</span>
-          )}
-        </div>
-      </header>
-
-      {day.events.length === 0 ? (
-        <p className="empty">Aucune détection ce jour-là.</p>
-      ) : (
-        <ul className="events">
-          {day.events.map((event, index) => (
-            // L'horodatage seul ne suffit pas comme clé : deux caméras
-            // peuvent détecter à la même seconde, et une même caméra peut
-            // émettre deux états dans la même seconde.
-            <li key={`${event.timestamp}-${index}`}>
-              <span className="time">{formatTime(event.timestamp)}</span>
-              <span className={`who ${event.status}`}>
-                {event.status === "known" ? event.name : "Personne inconnue"}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
+/** Le clip actuellement ouvert dans le lecteur. */
+interface OpenClip {
+  url: string;
+  title: string;
 }
 
 export default function App() {
@@ -94,6 +20,12 @@ export default function App() {
   const [response, setResponse] = useState<EventsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // L'événement mis en évidence, partagé entre la bande de 24 h et la
+  // pellicule de vignettes : cliquer une marque désigne une vignette, et
+  // réciproquement.
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [openClip, setOpenClip] = useState<OpenClip | null>(null);
 
   const load = useCallback(
     async (signal: AbortSignal) => {
@@ -139,6 +71,14 @@ export default function App() {
     };
   }, [load, day]);
 
+  // Changer de journée invalide la sélection : l'événement désigné n'est plus
+  // affiché, et un identifiant résiduel mettrait en évidence une marque au
+  // hasard dès qu'un autre événement réutiliserait ce numéro.
+  const changeDay = useCallback((next: string) => {
+    setSelectedId(null);
+    setDay(next);
+  }, []);
+
   const grouped = response ? groupByCamera(response.events, cameras) : [];
 
   return (
@@ -152,10 +92,10 @@ export default function App() {
             Fox<span className="fox">Guard</span>
           </h1>
         </div>
-        <p className="subtitle">Détections du jour, par caméra</p>
+        <p className="subtitle">Timeline des détections, par caméra</p>
       </header>
 
-      <DayBar day={day} onChange={setDay} busy={busy} />
+      <DayBar day={day} onChange={changeDay} busy={busy} />
 
       {error && (
         <div className="banner error">
@@ -166,7 +106,7 @@ export default function App() {
       {response?.truncated && (
         <div className="banner warn">
           Cette journée comporte plus de détections que le serveur n'en renvoie :
-          la liste ci-dessous est incomplète.
+          la timeline ci-dessous est incomplète.
         </div>
       )}
 
@@ -181,9 +121,24 @@ export default function App() {
 
       <div className="cameras">
         {grouped.map((cameraDay) => (
-          <CameraCard key={cameraDay.camera} day={cameraDay} />
+          <CameraTimeline
+            key={cameraDay.camera}
+            day={day}
+            cameraDay={cameraDay}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            onPlay={(url, title) => setOpenClip({ url, title })}
+          />
         ))}
       </div>
+
+      {openClip && (
+        <ClipDialog
+          url={openClip.url}
+          title={openClip.title}
+          onClose={() => setOpenClip(null)}
+        />
+      )}
     </div>
   );
 }

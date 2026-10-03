@@ -7,8 +7,10 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    body::Body,
+    extract::{Path, Query, State},
     http::StatusCode,
+    http::header,
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -16,10 +18,10 @@ use serde::{Deserialize, Serialize};
 use tower_http::services::ServeDir;
 use ts_rs::TS;
 
-use chrono::NaiveDate;
-use foxguard_protocol::DetectionEvent;
+use chrono::{DateTime, Local, NaiveDate};
+use foxguard_protocol::PersonStatus;
 
-use crate::db::EventRepository;
+use crate::db::{EventRepository, StoredEvent};
 
 /// Nombre d'événements retournés par défaut par `GET /api/events`.
 const DEFAULT_LIMIT: usize = 100;
@@ -64,6 +66,67 @@ pub struct EventsQuery {
     limit: Option<usize>,
 }
 
+/// Un événement tel que l'interface le reçoit.
+///
+/// Distinct de `foxguard_protocol::DetectionEvent`, qui est le format du FIL
+/// MQTT : celui-ci est le format de l'API HTTP, et les deux n'ont pas les
+/// mêmes besoins. L'interface a besoin d'un identifiant (pour demander la
+/// vignette) et d'URL prêtes à l'emploi ; elle n'a aucun usage de la vignette
+/// encodée en base64 dans la charge utile, qui alourdirait la réponse d'une
+/// journée de plusieurs mégaoctets.
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct EventRecord {
+    /// Identifiant en base, stable : il sert de clé d'affichage et d'URL de
+    /// vignette.
+    #[ts(type = "number")]
+    pub id: i64,
+
+    /// Caméra émettrice.
+    pub camera: String,
+
+    /// Horodatage de la détection, au format RFC 3339.
+    #[ts(type = "string")]
+    pub timestamp: DateTime<Local>,
+
+    /// Statut de reconnaissance, aplati comme sur le fil MQTT (`status` et,
+    /// le cas échéant, `name`), pour que l'interface le traite de la même
+    /// façon dans les deux cas.
+    #[serde(flatten)]
+    pub status: PersonStatus,
+
+    /// URL de la vignette de la détection, ou `null` s'il n'en existe pas
+    /// (caméra qui n'en produit pas, ou événement antérieur à la
+    /// fonctionnalité).
+    pub thumbnail_url: Option<String>,
+
+    /// URL du clip vidéo sur la caméra, ou `null` si la caméra n'a pas
+    /// déclaré son URL publique (voir `[server] public_url` de sa
+    /// configuration) ou n'a pas écrit de clip.
+    ///
+    /// Elle pointe vers la CAMÉRA et non vers le manager : le clip pèse
+    /// plusieurs mégaoctets et reste là où il a été écrit. Un lien mort est
+    /// donc possible — la caméra peut être hors ligne, ou le clip purgé — ce
+    /// que l'interface signale plutôt que de le masquer.
+    pub clip_url: Option<String>,
+}
+
+impl EventRecord {
+    /// Construit la vue d'API d'un événement conservé.
+    fn from_stored(stored: StoredEvent) -> Self {
+        Self {
+            thumbnail_url: stored
+                .has_thumbnail
+                .then(|| format!("/api/events/{}/thumbnail", stored.id)),
+            clip_url: stored.event.clip.as_ref().and_then(|clip| clip.url()),
+            id: stored.id,
+            camera: stored.event.camera,
+            timestamp: stored.event.timestamp,
+            status: stored.event.status,
+        }
+    }
+}
+
 /// Réponse de `GET /api/events`.
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "../../../ui/src/generated/")]
@@ -80,7 +143,7 @@ pub struct EventsResponse {
     #[ts(type = "number")]
     pub total: i64,
     /// Du plus récent au plus ancien.
-    pub events: Vec<DetectionEvent>,
+    pub events: Vec<EventRecord>,
     /// Vrai si le plafond a été atteint et que la journée comporte donc
     /// d'autres événements non renvoyés. L'interface peut ainsi le signaler
     /// plutôt que d'afficher une vue tronquée en silence.
@@ -132,9 +195,36 @@ async fn events_handler(
         count: events.len(),
         total,
         truncated: events.len() >= cap,
-        events,
+        events: events.into_iter().map(EventRecord::from_stored).collect(),
     })
     .into_response()
+}
+
+/// Vignette d'un événement (`GET /api/events/{id}/thumbnail`).
+///
+/// Servie par le manager et non par la caméra : la vignette voyage dans
+/// l'événement MQTT et vit en base (voir
+/// `foxguard_protocol::DetectionEvent::thumbnail`). La timeline reste donc
+/// lisible des mois plus tard, et depuis un réseau qui n'atteint pas les
+/// caméras.
+async fn thumbnail_handler(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
+    let thumbnail = match state.repository.thumbnail(id).await {
+        Ok(Some(thumbnail)) => thumbnail,
+        Ok(None) => return (StatusCode::NOT_FOUND, "Vignette introuvable").into_response(),
+        Err(e) => return internal_error("Lecture de la vignette", e),
+    };
+
+    (
+        [
+            (header::CONTENT_TYPE, "image/jpeg"),
+            // `immutable` : la vignette d'un événement passé ne changera
+            // jamais. Sans cela, le navigateur redemanderait les mêmes
+            // images à chaque défilement de la timeline.
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        Body::from(thumbnail),
+    )
+        .into_response()
 }
 
 /// Caméras ayant émis au moins un événement encore présent dans
@@ -161,6 +251,7 @@ pub fn create_router(state: Arc<AppState>, ui_dir: &str) -> Router {
     Router::new()
         .route("/api/health", get(health_handler))
         .route("/api/events", get(events_handler))
+        .route("/api/events/{id}/thumbnail", get(thumbnail_handler))
         .route("/api/cameras", get(cameras_handler))
         .with_state(state)
         .fallback_service(ServeDir::new(ui_dir))

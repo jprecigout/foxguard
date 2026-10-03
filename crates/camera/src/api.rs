@@ -189,6 +189,35 @@ async fn index_handler() -> Html<&'static str> {
     Html(include_str!("../static/controller.html"))
 }
 
+/// Page de lecture autonome d'un clip (`GET /play/{filename}`).
+///
+/// # Pourquoi la caméra sert une page de lecture
+///
+/// La timeline de l'interface du manager donne un accès direct au clip de
+/// chaque détection. Or les clips restent SUR LA CAMÉRA : ils pèsent
+/// plusieurs mégaoctets et n'ont aucune raison de traverser le réseau pour
+/// finir dans une base de données (seule la vignette, elle, voyage dans
+/// l'événement — voir `foxguard_protocol::DetectionEvent`).
+///
+/// L'interface du manager, servie par une autre origine, ne peut donc pas
+/// lire ces fichiers elle-même : le navigateur le lui interdit, et ouvrir les
+/// enregistrements à toutes les origines (`Access-Control-Allow-Origin: *`)
+/// serait une bien mauvaise façon de contourner cette protection — ces routes
+/// ne sont déjà pas authentifiées. Elle affiche donc cette page, servie par
+/// la caméra, dans un cadre : la politique de même origine est respectée sans
+/// rien assouplir.
+///
+/// Et le format d'enregistrement reste connu du seul composant qui l'écrit.
+///
+/// Le nom du fichier n'est PAS vérifié ici : la page est statique, elle lit
+/// elle-même son nom dans l'URL et le redemande à
+/// `GET /recordings/{filename}`, qui valide (voir [`is_safe_recording_name`]).
+/// Servir la page pour un nom invalide ne donne donc accès à rien — la
+/// requête de données qui suivra sera, elle, rejetée.
+async fn clip_player_handler(Path(_filename): Path<String>) -> Html<&'static str> {
+    Html(include_str!("../static/clip-player.html"))
+}
+
 /// Handler de mise à niveau vers WebSocket avec authentification par token
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -317,6 +346,7 @@ pub fn create_router(state: Arc<SharedState>) -> Router {
 
     Router::new()
         .route("/", get(index_handler)) // Servir l'interface web sur la racine
+        .route("/play/{filename}", get(clip_player_handler))
         .route("/ws", get(ws_handler))
         .route("/api/recordings", get(list_recordings_handler)) // API Liste des vidéos
         .route("/recordings/{filename}", get(stream_mjpeg_handler))

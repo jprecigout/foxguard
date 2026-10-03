@@ -29,6 +29,34 @@ fn load_reads_config_sample_toml_shipped_with_the_repo() {
     assert!(!config.detection.model_path.is_empty());
     assert!(!config.detection.model_detect_face_path.is_empty());
     assert!(!config.detection.model_face_path.is_empty());
+
+    // Le modèle documente aussi les sections optionnelles : les valeurs qu'il
+    // montre doivent être celles qui s'appliquent réellement, sinon il
+    // enseigne des réglages faux.
+    assert!(
+        config.motion.enabled,
+        "le pré-filtre de mouvement est actif par défaut"
+    );
+    assert!(
+        config.motion.hold_secs > 0 && config.motion.max_idle_secs > 0,
+        "les deux garde-fous du pré-filtre doivent être armés dans le modèle"
+    );
+
+    assert!(
+        !config.rtsp.enabled,
+        "le flux RTSP est désactivé par défaut (encodage logiciel)"
+    );
+    assert!(
+        config.rtsp.require_token,
+        "le flux RTSP montre la même image que le WebSocket, qui est authentifié"
+    );
+    assert!(config.rtsp.port > 1024, "port non privilégié");
+
+    assert!(config.recording.clips_enabled);
+    assert!(
+        config.recording.clip_pre_secs > 0,
+        "sans pré-enregistrement, un clip rate l'arrivée de la personne"
+    );
 }
 
 #[test]

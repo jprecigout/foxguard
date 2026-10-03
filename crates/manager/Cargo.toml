@@ -27,3 +27,8 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 tempfile = "3.14"
 sqlx = { workspace = true }
+# Utilisés uniquement par `tests/api_postgres.rs` : appel du routeur Axum sans
+# ouvrir de socket réseau (tower::ServiceExt::oneshot) et lecture des corps de
+# réponse HTTP. Mêmes outils que côté caméra, pour la même raison.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

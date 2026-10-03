@@ -2,6 +2,16 @@
 host = "0.0.0.0"
 port = 8080
 api_token = "secret123"
+# URL de base par laquelle CETTE caméra est joignable depuis un navigateur,
+# ex. "http://192.168.1.42:8080". Publiée dans les événements MQTT pour que la
+# timeline de l'interface du manager offre un lien direct vers le clip de
+# chaque détection.
+#
+# La caméra ne peut pas la deviner : elle écoute sur 0.0.0.0, et son adresse
+# vue du navigateur dépend du réseau et d'un éventuel proxy. Laissée VIDE (le
+# défaut), les événements ne portent pas de lien de lecture — la vignette,
+# elle, voyage dans l'événement et reste visible dans tous les cas.
+public_url = ""
 
 [camera]
 device_index = 0
@@ -67,3 +77,92 @@ retention_days = 7
 # Intervalle entre deux passages de nettoyage, en secondes. Un passage a aussi
 # lieu au démarrage de l'application.
 cleanup_interval_secs = 3600
+
+# Clips d'événement : quelques secondes de vidéo autour de chaque détection,
+# écrites dans le même dossier et soumises à la même rétention que les
+# enregistrements ci-dessus. C'est ce qui donne à la timeline de l'interface
+# du manager un accès direct à ce qui s'est passé.
+#
+# Indépendants de l'enregistrement continu, qui lui est piloté à la main
+# depuis l'interface de la caméra — et écrits même SANS broker MQTT : ce sont
+# des enregistrements comme les autres, listés et relus par l'interface
+# embarquée de la caméra.
+#
+# Ils ne sont écrits que lorsque la SURVEILLANCE est active : sans détection,
+# pas d'événement, donc pas de clip.
+clips_enabled = true
+# Durée conservée AVANT la détection, en secondes. C'est l'essentiel du
+# dispositif : un événement n'est publié qu'une fois la personne reconnue (ou
+# constatée inconnue), soit déjà une à deux secondes après son entrée dans le
+# champ. Sans ce pré-enregistrement, le clip ne montrerait jamais par où elle
+# est arrivée.
+clip_pre_secs = 4
+# Durée enregistrée APRÈS la détection, en secondes.
+clip_post_secs = 8
+
+# Section entièrement optionnelle : pré-filtre de mouvement placé DEVANT
+# l'inférence YOLO. ACTIF par défaut — c'est une économie de CPU sans
+# contrepartie fonctionnelle.
+#
+# Une caméra de surveillance regarde une scène immobile l'essentiel du temps.
+# Comparer deux miniatures de l'image coûte quelques microsecondes, là où YOLO
+# est de loin le poste de dépense dominant sur un Raspberry Pi : on ne lance
+# donc l'inférence que si l'image a bougé.
+[motion]
+# false rétablit le comportement antérieur : YOLO à intervalle fixe, que
+# l'image bouge ou non.
+enabled = true
+# Écart de luminance (0-255) à partir duquel un pixel est considéré comme
+# ayant changé. Trop bas, le bruit du capteur en basse lumière suffit à
+# déclencher ; trop haut, une personne habillée dans les tons du décor passe
+# inaperçue.
+pixel_threshold = 20
+# Proportion de l'image (0 à 1) qui doit avoir changé pour qu'on parle de
+# mouvement. Volontairement basse : une silhouette au fond du champ n'occupe
+# que quelques pixels de la miniature d'analyse.
+min_changed_ratio = 0.006
+# GARDE-FOU 1 : durée, en secondes, pendant laquelle YOLO continue de tourner
+# après le dernier mouvement. Quelqu'un qui s'arrête devant la caméra ne
+# produit plus de mouvement, mais est toujours là.
+hold_secs = 3
+# GARDE-FOU 2 : délai maximal, en secondes, entre deux passages de YOLO même
+# sans aucun mouvement. La détection de mouvement compare deux images
+# successives : elle est aveugle à une présence déjà immobile.
+#
+# 0 DÉSACTIVE ce passage périodique.
+max_idle_secs = 20
+
+# Section entièrement optionnelle : encodage H.264 du flux et mise à
+# disposition en RTSP, pour les lecteurs vidéo et enregistreurs du réseau
+# (VLC, ffmpeg, Home Assistant, Frigate, un NVR...).
+#
+#   vlc "rtsp://192.168.1.42:8554/stream?token=secret123"
+#   ffplay -rtsp_transport tcp "rtsp://192.168.1.42:8554/stream?token=secret123"
+#
+# DÉSACTIVÉE par défaut : l'encodage est logiciel, donc coûteux en CPU. Rien
+# n'est encodé tant qu'aucun lecteur n'est connecté, mais le réglage reste
+# explicite.
+[rtsp]
+enabled = false
+host = "0.0.0.0"
+# 554 est le port officiel de RTSP, mais il est privilégié (< 1024) : la
+# caméra tournant sous un utilisateur sans privilèges, le défaut est 8554.
+port = 8554
+# Chemin du flux dans l'URL : rtsp://hôte:8554/<path>
+path = "stream"
+# Exiger le jeton de [server] api_token dans la chaîne de requête de l'URL.
+#
+# ACTIF par défaut : ce flux montre exactement la même image que le WebSocket,
+# qui est lui authentifié. L'ouvrir sans contrôle serait une régression de
+# confidentialité, pas une simplification.
+require_token = true
+# Cadence cible du flux encodé. Volontairement inférieure à la cadence de
+# capture : c'est le réglage qui pèse le plus sur le coût de l'encodage, et
+# 12 im/s suffisent largement à une scène de surveillance.
+fps = 12
+# Débit cible, en kilobits par seconde.
+bitrate_kbps = 1500
+# Intervalle entre deux images clés, en secondes. Borne le temps qu'un lecteur
+# qui vient de se connecter passe devant un écran noir. Une image clé est de
+# toute façon produite à la demande dès qu'une lecture démarre.
+keyframe_interval_secs = 2

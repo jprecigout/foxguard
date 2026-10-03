@@ -3,12 +3,12 @@
 // Volontairement séparé des composants : c'est la seule logique métier de
 // l'interface, et la seule chose qui mérite d'être relue attentivement.
 
-import type { DetectionEvent } from "./api";
+import type { EventRecord } from "./api";
 
 export interface CameraDay {
   camera: string;
   /** Du plus récent au plus ancien. */
-  events: DetectionEvent[];
+  events: EventRecord[];
   /** Détections dont le visage n'a PAS été reconnu. */
   unknownCount: number;
   /** Personnes distinctes identifiées ce jour-là, triées. */
@@ -27,8 +27,8 @@ export interface CameraDay {
  * sont ajoutées malgré tout — une caméra branchée aujourd'hui ne doit pas
  * être invisible en attendant le rafraîchissement de la liste.
  */
-export function groupByCamera(events: DetectionEvent[], knownCameras: string[]): CameraDay[] {
-  const byCamera = new Map<string, DetectionEvent[]>();
+export function groupByCamera(events: EventRecord[], knownCameras: string[]): CameraDay[] {
+  const byCamera = new Map<string, EventRecord[]>();
 
   for (const camera of knownCameras) {
     byCamera.set(camera, []);
