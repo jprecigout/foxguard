@@ -36,18 +36,6 @@ pub struct Config {
     pub rtsp: RtspConfig,
 }
 
-impl Config {
-    /// Vrai si le flux doit être encodé en H.264.
-    ///
-    /// `[rtsp] enabled` l'implique : un serveur RTSP sans flux à servir n'a
-    /// aucun sens. C'est aussi ce qui garde valide un `camera-config.toml`
-    /// antérieur à l'apparition de la section `[h264]`, où le flux RTSP
-    /// s'activait à lui seul.
-    pub fn h264_enabled(&self) -> bool {
-        self.h264.enabled || self.rtsp.enabled
-    }
-}
-
 /// Pré-filtre de mouvement placé DEVANT l'inférence YOLO (voir
 /// [`crate::capture::motion`]).
 ///
@@ -148,26 +136,22 @@ fn default_motion_max_idle_secs() -> u64 {
 /// Encodage H.264 du flux caméra (voir `crate::h264`).
 ///
 /// Ces réglages ne sont PAS dans `[rtsp]`, bien qu'ils y aient commencé : le
-/// flux encodé sert aujourd'hui trois consommateurs — les lecteurs RTSP du
-/// réseau, le direct des interfaces web (décodé par le navigateur), et les
+/// flux encodé sert trois consommateurs — les lecteurs RTSP du réseau, le
+/// direct des interfaces web (décodé par le navigateur), et les
 /// enregistrements. Les laisser sous `[rtsp]` laisserait croire qu'ils ne
 /// concernent que le premier.
 ///
-/// Section entièrement optionnelle et DÉSACTIVÉE par défaut : l'encodage est
-/// logiciel, donc coûteux en CPU, et une installation qui se contente du flux
-/// MJPEG historique n'a aucune raison de le payer. Rien n'est encodé tant
-/// qu'aucun consommateur n'est effectivement abonné, mais le réglage reste
-/// explicite.
+/// Il n'y a PAS d'interrupteur ici, et c'est le changement de fond : le
+/// H.264 est le seul chemin vidéo de la caméra. Le désactiver ne laisserait
+/// aucun flux à diffuser ni aucun format à enregistrer — ce ne serait pas une
+/// économie, ce serait une caméra aveugle. La dépense reste contenue par ce
+/// qui l'a toujours contenue : rien n'est encodé tant qu'aucun consommateur
+/// n'est abonné, et la cadence de `fps` écarte les frames en trop.
+///
+/// Section entièrement optionnelle : absente, ses valeurs par défaut
+/// s'appliquent.
 #[derive(Debug, Clone, Deserialize)]
 pub struct H264Config {
-    /// Encodage disponible ou non.
-    ///
-    /// `[rtsp] enabled = true` l'implique (voir [`Config::h264_enabled`]) :
-    /// il n'est donc à activer explicitement que pour servir les interfaces
-    /// web sans ouvrir de port RTSP sur le réseau.
-    #[serde(default)]
-    pub enabled: bool,
-
     /// Cadence cible du flux encodé, en images par seconde.
     ///
     /// Volontairement INFÉRIEURE à la cadence de capture par défaut : c'est
@@ -195,7 +179,6 @@ pub struct H264Config {
 impl Default for H264Config {
     fn default() -> Self {
         Self {
-            enabled: false,
             fps: default_h264_fps(),
             bitrate_kbps: default_h264_bitrate_kbps(),
             keyframe_interval_secs: default_h264_keyframe_interval_secs(),
@@ -218,9 +201,11 @@ fn default_h264_keyframe_interval_secs() -> u32 {
 /// Mise à disposition du flux encodé en RTSP (voir `crate::rtsp`), pour les
 /// lecteurs vidéo et enregistreurs du réseau.
 ///
-/// Section entièrement optionnelle et désactivée par défaut. L'activer active
-/// aussi l'encodage (voir [`Config::h264_enabled`]) : les réglages de
-/// l'encodeur, eux, sont dans `[h264]`.
+/// Section entièrement optionnelle et désactivée par défaut. Elle ne règle
+/// que le SERVEUR : le flux qu'il distribue est encodé de toute façon, pour
+/// les interfaces web et les enregistrements, et ses réglages sont dans
+/// `[h264]`. Désactiver le RTSP ne fait donc qu'économiser un port ouvert sur
+/// le réseau, pas le coût de l'encodage.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RtspConfig {
     #[serde(default)]
@@ -824,51 +809,43 @@ mod tests {
         assert_eq!(config.motion.max_idle_secs, 0);
     }
 
-    // --- `[rtsp]` : encodage H.264 et flux RTSP ---
+    // --- `[h264]` et `[rtsp]` ---
 
     #[test]
     fn the_rtsp_section_is_optional_and_disabled_by_default() {
-        // L'encodage H.264 est logiciel : on ne l'impose pas à une
-        // installation qui ne l'a pas demandé.
+        // Le SERVEUR RTSP est optionnel : il ouvre un port sur le réseau, ce
+        // qu'on n'impose pas à une installation qui ne l'a pas demandé.
+        // L'encodage, lui, n'est plus optionnel.
         let file = write_temp_toml(VALID_TOML);
         let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
 
         assert!(!config.rtsp.enabled);
-        assert!(!config.h264.enabled);
         assert_eq!(config.rtsp.port, 8554);
         assert_eq!(config.rtsp.path, "stream");
         assert_eq!(config.h264.fps, 12);
     }
 
     #[test]
-    fn enabling_rtsp_implies_enabling_the_encoder() {
-        // Un serveur RTSP sans flux à servir n'a aucun sens — et c'est ce qui
-        // garde valide un `camera-config.toml` antérieur à la section
-        // `[h264]`, où le flux RTSP s'activait à lui seul.
+    fn an_rtsp_section_only_configures_the_server() {
+        // Le serveur RTSP est optionnel ; l'encodage, lui, ne l'est plus. Une
+        // configuration qui n'ouvre pas de port RTSP encode quand même, pour
+        // ses interfaces web et ses enregistrements.
         let toml = format!("{VALID_TOML}\n[rtsp]\nenabled = true\n");
         let file = write_temp_toml(&toml);
         let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
 
-        assert!(!config.h264.enabled, "la section [h264] reste à son défaut");
-        assert!(config.h264_enabled(), "mais l'encodage doit être actif");
-    }
-
-    #[test]
-    fn the_encoder_can_be_enabled_without_opening_an_rtsp_port() {
-        // Le cas d'une installation qui veut le H.264 dans ses interfaces web
-        // sans exposer de flux sur le réseau.
-        let toml = format!("{VALID_TOML}\n[h264]\nenabled = true\n");
-        let file = write_temp_toml(&toml);
-        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
-
-        assert!(config.h264_enabled());
-        assert!(!config.rtsp.enabled);
+        assert!(config.rtsp.enabled);
+        assert_eq!(
+            config.h264.fps,
+            default_h264_fps(),
+            "les réglages d'encodage restent à leurs défauts"
+        );
     }
 
     #[test]
     fn the_encoder_settings_can_be_tuned() {
         let toml = format!(
-            "{VALID_TOML}\n[h264]\nenabled = true\nfps = 25\nbitrate_kbps = 3000\nkeyframe_interval_secs = 1\n"
+            "{VALID_TOML}\n[h264]\nfps = 25\nbitrate_kbps = 3000\nkeyframe_interval_secs = 1\n"
         );
         let file = write_temp_toml(&toml);
         let config = Config::load(file.path().to_str().unwrap()).expect("config valide");

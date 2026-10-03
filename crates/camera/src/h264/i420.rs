@@ -16,7 +16,8 @@
 //!   sous-échantillonnage vertical de la chrominance, sans une seule
 //!   multiplication. C'est le chemin de loin le moins coûteux, et celui qui
 //!   évite un aller-retour YUV → RGB → YUV ;
-//! - sur un PC (webcam MJPEG) ou quand l'incrustation des boîtes a réécrit
+//! - quand la SOURCE est déjà compressée — la plupart des webcams de PC
+//!   fournissent du JPEG — ou quand l'incrustation des boîtes a réécrit
 //!   l'image, on part d'une **RgbImage**, et il faut alors la vraie
 //!   conversion colorimétrique.
 //!
@@ -146,7 +147,7 @@ impl I420Buffer {
         true
     }
 
-    /// Remplit le tampon depuis une image RGB — le flux d'une webcam MJPEG
+    /// Remplit le tampon depuis une image RGB — le flux d'une webcam JPEG
     /// décodée, ou la frame sur laquelle les boîtes de détection ont déjà été
     /// incrustées (c'est ce qui fait que le flux RTSP montre les mêmes boîtes
     /// que le flux WebSocket).

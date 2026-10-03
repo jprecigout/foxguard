@@ -4,7 +4,6 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
-use tokio::sync::broadcast;
 
 use crate::h264::H264Stream;
 
@@ -16,17 +15,17 @@ pub struct SharedState {
     pub recording_enabled: AtomicBool,
     // Jeton attendu en paramètre ?token= pour se connecter au WebSocket
     pub api_token: String,
-    // Canal de diffusion des frames JPEG encodées vers tous les clients WS
-    pub tx: broadcast::Sender<Vec<u8>>,
 
-    /// Flux H.264 encodé, si l'encodage est activé (voir
-    /// `Config::h264_enabled`).
+    /// Flux H.264 encodé — le SEUL flux vidéo de la caméra.
     ///
-    /// Porté par l'état parce que le serveur HTTP en est, lui aussi, un
-    /// consommateur : `GET /ws/h264` y abonne les navigateurs, qui décodent
-    /// le flux eux-mêmes (voir `crate::api`). S'y abonner suffit à déclencher
-    /// l'encodage, et s'en désabonner à l'arrêter.
-    pub h264: Option<Arc<H264Stream>>,
+    /// Porté par l'état parce que le serveur HTTP en est un consommateur :
+    /// `GET /ws` y abonne les navigateurs, qui décodent le flux eux-mêmes
+    /// (voir `crate::api`). S'y abonner suffit à déclencher l'encodage, et
+    /// s'en désabonner à l'arrêter.
+    ///
+    /// Il n'y a plus de canal de diffusion JPEG à côté : le flux MJPEG
+    /// historique a été retiré, et avec lui la double diffusion.
+    pub h264: Arc<H264Stream>,
 
     // Nom en attente de capture pour une nouvelle photo de référence
     // (voir ClientCommand::CaptureReference dans api.rs). La boucle caméra

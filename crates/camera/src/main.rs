@@ -1,6 +1,6 @@
 //! Point d'entrée de FoxGuard : charge la configuration, démarre la boucle
 //! de capture caméra (thread bloquant), le serveur HTTP / WebSocket (Axum)
-//! qui sert l'interface de contrôle et le flux vidéo, et — si
+//! qui sert l'interface de contrôle et le flux vidéo H.264, et — si
 //! `[rtsp] enabled = true` — le serveur RTSP qui met le même flux à
 //! disposition des lecteurs vidéo du réseau.
 //!
@@ -14,7 +14,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
-use tokio::sync::broadcast;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -48,20 +47,17 @@ async fn main() -> anyhow::Result<()> {
     // Chargement de la configuration
     let config = Config::load(CAMERA_CONFIG_PATH)?;
 
-    // Création du canal Broadcast pour le flux vidéo WebSocket (capacité de 16 frames)
-    let (tx, _) = broadcast::channel(16);
-
     // Flux H.264 partagé par tous ses consommateurs : serveur RTSP, WebSocket
-    // des interfaces web, et à terme les enregistrements. Créé seulement si
-    // l'encodage est demandé — sans lui, la boucle de capture n'encode rien.
-    let h264 = config.h264_enabled().then(|| Arc::new(H264Stream::new()));
+    // des interfaces web, enregistrements. Toujours créé — c'est le seul
+    // chemin vidéo de la caméra — mais rien n'y est encodé tant que personne
+    // n'est abonné.
+    let h264 = Arc::new(H264Stream::new());
 
     // Initialisation de l'état partagé
     let state = Arc::new(SharedState {
         detection_enabled: AtomicBool::new(config.detection.enabled),
         recording_enabled: AtomicBool::new(false),
-        tx,
-        h264: h264.clone(),
+        h264: Arc::clone(&h264),
         api_token: config.server.api_token.clone(),
         pending_enrollment: Mutex::new(None),
         recordings_dir: config.recording.dir.clone(),
@@ -70,23 +66,17 @@ async fn main() -> anyhow::Result<()> {
     // Enregistreur de clips d'événement, partagé entre la boucle de capture
     // (qui l'alimente en frames) et le thread de reconnaissance (qui
     // déclenche les clips). Voir `capture::clips`.
-    // Le format des clips suit celui de l'encodage : MP4 fragmenté quand le
-    // H.264 est disponible, format historique sinon (voir
-    // `capture::recording`).
-    let clips = Arc::new(Mutex::new(ClipRecorder::new(
-        &config.recording,
-        config.h264_enabled(),
-    )));
+    let clips = Arc::new(Mutex::new(ClipRecorder::new(&config.recording)));
 
     // Serveur RTSP : un abonné du flux parmi d'autres (voir `crate::rtsp`).
-    if let Some(stream) = &h264
-        && config.rtsp.enabled
-    {
+    // Optionnel, contrairement à l'encodage : ne pas l'activer n'économise
+    // qu'un port ouvert sur le réseau.
+    if config.rtsp.enabled {
         rtsp::spawn(
             config.rtsp.clone(),
             config.server.api_token.clone(),
             config.camera.name.clone(),
-            Arc::clone(stream),
+            Arc::clone(&h264),
         );
     }
 
@@ -94,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
     let camera_config = config.clone();
     let camera_state = Arc::clone(&state);
     let camera_clips = Arc::clone(&clips);
-    let camera_h264 = h264.clone();
+    let camera_h264 = Arc::clone(&h264);
 
     tokio::task::spawn_blocking(move || {
         if let Err(e) =

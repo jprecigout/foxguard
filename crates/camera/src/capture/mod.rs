@@ -1,7 +1,7 @@
 //! Capture caméra (V4L2) et boucle de traitement principale : décodage des
 //! frames, pipeline de détection/reconnaissance (YOLO -> tracking ->
-//! YuNet -> ArcFace), incrustation des boîtes, enregistrement et diffusion
-//! du flux vidéo aux clients WebSocket. Voir [`start_camera_loop`].
+//! YuNet -> ArcFace), incrustation des boîtes, encodage H.264, enregistrement
+//! et diffusion du flux aux clients WebSocket. Voir [`start_camera_loop`].
 //!
 //! Le module est découpé par responsabilité :
 //! - [`state`] : état partagé exposé au serveur HTTP/WebSocket.
@@ -34,11 +34,11 @@ pub use clips::ClipRecorder;
 pub use recording::RecordingFormat;
 pub use state::SharedState;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use image::RgbImage;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 use v4l::buffer::Type;
 use v4l::prelude::*;
 use v4l::video::Capture;
@@ -63,7 +63,7 @@ pub fn start_camera_loop(
     config: Config,
     state: Arc<SharedState>,
     clips: Arc<Mutex<ClipRecorder>>,
-    rtsp: Option<Arc<H264Stream>>,
+    h264_stream: Arc<H264Stream>,
 ) -> Result<()> {
     // Initialisation dynamique du périphérique V4L2
     //
@@ -107,16 +107,15 @@ pub fn start_camera_loop(
         },
     );
 
-    // Encodage H.264, seulement si un flux RTSP a été demandé. L'échec
-    // d'initialisation de l'encodeur ne fait PAS tomber la caméra : elle doit
-    // continuer à surveiller, enregistrer et diffuser son flux WebSocket même
-    // privée de RTSP.
-    let h264 = rtsp.and_then(|stream| {
-        build_h264_output(&config, fmt.width, fmt.height, stream).or_else(|| {
-            warn!("⚠️ Flux RTSP indisponible : l'encodeur H.264 n'a pas pu démarrer.");
-            None
-        })
-    });
+    // Encodage H.264. Son échec est FATAL, et c'est délibéré : le H.264 est
+    // le seul chemin vidéo de la caméra, donc un encodeur absent signifie
+    // aucun direct et aucun enregistrement. Une caméra qui démarre
+    // normalement mais n'enregistre rien est le pire mode de panne d'un
+    // système de surveillance — on ne s'en aperçoit qu'en cherchant
+    // l'enregistrement qui aurait servi. Mieux vaut refuser de démarrer, ce
+    // qui se voit tout de suite (même raisonnement que la connexion à la base
+    // du manager, voir `foxguard-manager/src/main.rs`).
+    let h264 = build_h264_output(&config, fmt.width, fmt.height, h264_stream)?;
 
     capture_loop::run(
         state,
@@ -138,14 +137,16 @@ pub fn start_camera_loop(
     )
 }
 
-/// Construit l'encodeur H.264 du flux RTSP, ou `None` s'il n'a pas pu être
-/// initialisé.
+/// Construit l'encodeur H.264 du flux de la caméra.
+///
+/// Échoue si l'encodeur ne peut pas être initialisé — voir l'appelant pour
+/// pourquoi cet échec est fatal.
 fn build_h264_output(
     config: &Config,
     width: u32,
     height: u32,
     stream: Arc<H264Stream>,
-) -> Option<H264Output> {
+) -> Result<H264Output> {
     let fps = config.h264.fps.clamp(1, 120);
 
     let encoder = H264Encoder::new(
@@ -155,8 +156,7 @@ fn build_h264_output(
         config.h264.bitrate_kbps,
         config.h264.keyframe_interval_secs,
     )
-    .inspect_err(|e| warn!("⚠️ Encodeur H.264 non initialisé : {e:#}"))
-    .ok()?;
+    .context("l'encodeur H.264 n'a pas pu démarrer, la caméra n'aurait aucun flux à produire")?;
 
     let (encoded_width, encoded_height) = encoder.dimensions();
 
@@ -165,7 +165,7 @@ fn build_h264_output(
         encoded_width, encoded_height, fps, config.h264.bitrate_kbps
     );
 
-    Some(H264Output {
+    Ok(H264Output {
         encoder,
         stream,
         // `1 / fps` : les frames capturées au-delà de la cadence configurée

@@ -25,22 +25,15 @@
       assouplir, et le format d'enregistrement reste connu du seul composant
       qui l'écrit.
 
-      Deux formats cohabitent, et la page choisit d'après l'extension :
+      Les enregistrements sont des MP4 fragmentés contenant du H.264 (voir
+      `capture::recording` côté Rust), donc un `<video>` natif suffit : il
+      apporte gratuitement le plein écran, le déplacement image par image, le
+      réglage de la vitesse et le décodage matériel.
 
-      - `.mp4` : un MP4 fragmenté contenant du H.264 (le format des
-        installations où l'encodage est actif). Un `<video>` natif suffit, et
-        apporte gratuitement le plein écran, le déplacement et le décodage
-        matériel ;
-
-      - `.mjpeg` : le format historique, `[u32 timestamp_ms][u32 frame_len]
-        [frame JPEG]` par frame (voir `capture::recording` côté Rust). Aucun
-        navigateur ne sait le lire : c'est ce script qui le décode et le
-        dessine. L'horodatage par frame permet d'en restituer la vitesse
-        RÉELLE de capture, qui n'est pas forcément celle qu'on croit — une
-        webcam UVC réduit son FPS en basse luminosité.
-
-      Les deux restent nécessaires : une caméra mise à jour continue de
-      servir les enregistrements qu'elle a écrits avant.
+      Cette page ne décode donc plus rien elle-même. Elle l'a fait, du temps
+      où les enregistrements étaient dans un format maison — des JPEG
+      concaténés qu'aucun navigateur ne savait lire — et c'est l'une des
+      raisons d'être passé au MP4.
     -->
     <style>
         :root {
@@ -98,25 +91,6 @@
             word-break: break-all;
         }
 
-        button {
-            background: #2a2a2a;
-            border: 1px solid var(--border);
-            color: var(--text);
-            padding: 6px 14px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 0.85rem;
-        }
-
-        button:hover:not(:disabled) {
-            background: #3a3a3a;
-        }
-
-        button:disabled {
-            opacity: 0.45;
-            cursor: default;
-        }
-
         main {
             flex: 1;
             display: flex;
@@ -125,7 +99,6 @@
             padding: 16px;
         }
 
-        canvas,
         video {
             max-width: 100%;
             max-height: 100%;
@@ -145,28 +118,6 @@
             color: var(--accent-red);
         }
 
-        footer {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 10px 16px;
-            border-top: 1px solid var(--border);
-            background: var(--card);
-            font-size: 0.85rem;
-        }
-
-        input[type="range"] {
-            flex: 1;
-            accent-color: var(--accent);
-        }
-
-        .position {
-            color: var(--muted);
-            font-variant-numeric: tabular-nums;
-            min-width: 5.5em;
-            text-align: right;
-        }
-
         [hidden] {
             display: none !important;
         }
@@ -181,27 +132,12 @@
 
     <main>
         <p class="status" id="status">Chargement du clip…</p>
-        <!-- Un MP4 se lit nativement ; le format historique est décodé par le
-             script et dessiné dans le canvas. Un seul des deux est utilisé. -->
         <video id="video" hidden controls autoplay playsinline></video>
-        <canvas id="canvas" hidden></canvas>
     </main>
-
-    <footer hidden id="controls">
-        <button id="toggle" type="button">Pause</button>
-        <input type="range" id="seek" min="0" value="0" step="1" aria-label="Position dans le clip" />
-        <span class="position" id="position">0,0 s</span>
-    </footer>
 
     <script>
         const statusEl = document.getElementById('status');
         const video = document.getElementById('video');
-        const canvas = document.getElementById('canvas');
-        const context = canvas.getContext('2d');
-        const controls = document.getElementById('controls');
-        const toggle = document.getElementById('toggle');
-        const seek = document.getElementById('seek');
-        const positionEl = document.getElementById('position');
         const filenameEl = document.getElementById('filename');
 
         /**
@@ -215,94 +151,38 @@
             return last ? decodeURIComponent(last) : '';
         }
 
-        /**
-         * Extrait les frames horodatées d'un enregistrement au format
-         * « framed » : `[u32 timestamp_ms][u32 frame_len][frame JPEG]`.
-         *
-         * Retourne `null` si le fichier ne correspond pas à ce format, pour
-         * que l'appelant retombe sur le balayage des marqueurs JPEG (ancien
-         * format, antérieur à l'horodatage par frame).
-         */
-        function extractFramedRecording(buffer) {
-            const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-            const frames = [];
-            let offset = 0;
-
-            while (offset + 8 <= buffer.length) {
-                const timestampMs = view.getUint32(offset, true);
-                const frameLen = view.getUint32(offset + 4, true);
-                const dataStart = offset + 8;
-                const dataEnd = dataStart + frameLen;
-
-                if (frameLen === 0 || dataEnd > buffer.length) return null;
-                if (buffer[dataStart] !== 0xFF || buffer[dataStart + 1] !== 0xD8) return null;
-
-                frames.push({ timestampMs, bytes: buffer.subarray(dataStart, dataEnd) });
-                offset = dataEnd;
-            }
-
-            return frames.length > 0 ? frames : null;
-        }
-
-        /**
-         * Ancien format : simple concaténation de JPEG, sans horodatage. On
-         * retombe sur un cadencement fixe à 30 im/s, faute de mieux.
-         */
-        function extractLegacyRecording(buffer) {
-            const frames = [];
-            let start = -1;
-            let index = 0;
-
-            for (let i = 0; i < buffer.length - 1; i++) {
-                if (buffer[i] === 0xFF && buffer[i + 1] === 0xD8) {
-                    start = i;
-                } else if (buffer[i] === 0xFF && buffer[i + 1] === 0xD9 && start !== -1) {
-                    frames.push({ timestampMs: index * 33, bytes: buffer.subarray(start, i + 2) });
-                    start = -1;
-                    index++;
-                }
-            }
-
-            return frames;
-        }
-
-        /** Décode toutes les frames en images, une fois pour toutes. */
-        async function decodeFrames(frames) {
-            // `createImageBitmap` décode hors du fil principal et rend une
-            // image directement dessinable. Tout décoder d'avance plutôt
-            // qu'au fil de la lecture : un clip fait quelques centaines de
-            // frames, et on veut pouvoir se déplacer dedans instantanément.
-            return Promise.all(
-                frames.map(async (frame) => ({
-                    timestampMs: frame.timestampMs,
-                    image: await createImageBitmap(
-                        new Blob([frame.bytes], { type: 'image/jpeg' })
-                    ),
-                }))
-            );
-        }
-
-        function formatSeconds(milliseconds) {
-            return `${(milliseconds / 1000).toFixed(1).replace('.', ',')} s`;
-        }
-
         /** Affiche un message d'erreur à la place du lecteur. */
         function fail(message) {
             statusEl.textContent = message;
             statusEl.classList.add('error');
             statusEl.hidden = false;
             video.hidden = true;
-            canvas.hidden = true;
-            controls.hidden = true;
         }
 
-        /**
-         * Lecture d'un MP4 : le navigateur sait tout faire.
-         *
-         * Les contrôles natifs du `<video>` remplacent ceux de la page, d'où
-         * leur masquage — en réimplémenter de moins bons n'aurait aucun sens.
-         */
-        function playMp4(filename) {
+        function main() {
+            const filename = clipFilename();
+            filenameEl.textContent = filename;
+            document.title = `FoxGuard — ${filename}`;
+
+            if (!filename) {
+                fail('Aucun clip demandé.');
+                return;
+            }
+
+            // Un clip de l'ancien format maison, d'avant le passage au MP4 :
+            // plus personne ne sait le décoder. Autant le dire que laisser le
+            // <video> échouer sur un message générique.
+            if (!filename.toLowerCase().endsWith('.mp4')) {
+                fail(
+                    'Ce clip est dans l’ancien format d’enregistrement, '
+                    + 'qu’aucun lecteur ne sait plus ouvrir.'
+                );
+                return;
+            }
+
+            // La route sert le fichier par PLAGES D'OCTETS (`ServeFile` côté
+            // Rust) : c'est ce qui permet au `<video>` de se déplacer dans le
+            // clip sans le télécharger en entier.
             video.src = `/recordings/${encodeURIComponent(filename)}`;
 
             video.addEventListener('loadeddata', () => {
@@ -319,112 +199,6 @@
                         : 'Ce clip n’est plus lisible (purgé, ou interrompu avant d’être écrit).'
                 );
             });
-        }
-
-        async function main() {
-            const filename = clipFilename();
-            filenameEl.textContent = filename;
-            document.title = `FoxGuard — ${filename}`;
-
-            if (!filename) {
-                fail('Aucun clip demandé.');
-                return;
-            }
-
-            if (filename.toLowerCase().endsWith('.mp4')) {
-                playMp4(filename);
-                return;
-            }
-
-            let decoded;
-
-            try {
-                const response = await fetch(`/recordings/${encodeURIComponent(filename)}`);
-
-                if (!response.ok) {
-                    // 404 : le clip a été purgé par la rétention
-                    // (`[recording] retention_days`), ou n'a jamais existé.
-                    fail(response.status === 404
-                        ? 'Ce clip n’existe plus sur la caméra (purgé par la rétention automatique).'
-                        : `La caméra a répondu ${response.status}.`);
-                    return;
-                }
-
-                const buffer = new Uint8Array(await response.arrayBuffer());
-                const frames = extractFramedRecording(buffer) || extractLegacyRecording(buffer);
-
-                if (frames.length === 0) {
-                    fail('Clip illisible : aucune image trouvée.');
-                    return;
-                }
-
-                decoded = await decodeFrames(frames);
-            } catch (error) {
-                console.error(error);
-                fail('Clip injoignable depuis ce navigateur.');
-                return;
-            }
-
-            statusEl.hidden = true;
-            canvas.hidden = false;
-            controls.hidden = false;
-
-            canvas.width = decoded[0].image.width;
-            canvas.height = decoded[0].image.height;
-            seek.max = String(decoded.length - 1);
-
-            let current = 0;
-            let playing = true;
-            let timer = null;
-
-            /** Écart jusqu'à la frame suivante, d'après les horodatages réels. */
-            function delayAfter(index) {
-                if (index + 1 < decoded.length) {
-                    return Math.max(0, decoded[index + 1].timestampMs - decoded[index].timestampMs);
-                }
-
-                // Après la dernière frame, aucun écart n'est connu : on
-                // reprend celui du début du clip pour le rebouclage.
-                return decoded.length > 1
-                    ? Math.max(0, decoded[1].timestampMs - decoded[0].timestampMs)
-                    : 33;
-            }
-
-            function show(index) {
-                current = index;
-                context.drawImage(decoded[index].image, 0, 0);
-                seek.value = String(index);
-                positionEl.textContent = formatSeconds(decoded[index].timestampMs);
-            }
-
-            function schedule() {
-                clearTimeout(timer);
-
-                if (!playing) return;
-
-                timer = setTimeout(() => {
-                    show((current + 1) % decoded.length);
-                    schedule();
-                }, delayAfter(current));
-            }
-
-            toggle.addEventListener('click', () => {
-                playing = !playing;
-                toggle.textContent = playing ? 'Pause' : 'Lecture';
-                schedule();
-            });
-
-            seek.addEventListener('input', () => {
-                // Se déplacer met la lecture en pause : on regarde une image
-                // précise, on ne veut pas qu'elle fuie sous le curseur.
-                playing = false;
-                toggle.textContent = 'Lecture';
-                clearTimeout(timer);
-                show(Number(seek.value));
-            });
-
-            show(0);
-            schedule();
         }
 
         main();

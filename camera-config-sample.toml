@@ -68,10 +68,10 @@ topic = "foxguard/detections"
 
 # Section entièrement optionnelle : un camera-config.toml sans [recording] du tout
 # continue de fonctionner, avec 7 jours de conservation.
-# Le FORMAT des enregistrements suit [h264] : MP4 fragmenté quand l'encodage
-# est actif, format d'images JPEG horodatées (.mjpeg) sinon. Les deux
-# cohabitent dans le dossier — une caméra mise à jour continue de servir et de
-# purger ce qu'elle a écrit avant.
+# Les enregistrements sont des MP4 fragmentés contenant le flux H.264 (voir
+# [h264] plus bas). Des fichiers .mjpeg d'une version antérieure peuvent
+# encore traîner dans le dossier : ils restent listés, téléchargeables,
+# supprimables et purgés, mais plus aucun lecteur ne sait les ouvrir.
 [recording]
 # Dossier où sont écrits, listés et purgés les enregistrements. Relatif au
 # répertoire de travail par défaut. Le renseigner en ABSOLU est recommandé
@@ -142,27 +142,28 @@ hold_secs = 3
 # 0 DÉSACTIVE ce passage périodique.
 max_idle_secs = 20
 
-# Section entièrement optionnelle : encodage H.264 du flux caméra.
+# Section entièrement optionnelle : réglages de l'encodage H.264.
 #
-# C'est LE réglage qui décide de presque tout, parce que le flux encodé sert
-# trois consommateurs :
+# Il n'y a PAS d'interrupteur ici, et c'est voulu : le H.264 est le seul
+# chemin vidéo de la caméra. Le flux encodé sert trois consommateurs, et n'est
+# encodé qu'une fois pour les trois :
 #
 #   - le DIRECT des interfaces web, décodé par le navigateur lui-même
 #     (WebCodecs). Aucun navigateur n'implémente RTSP : c'est par là que les
 #     interfaces reçoivent du H.264 ;
-#   - les ENREGISTREMENTS et les clips, qui deviennent des MP4 — une vingtaine
-#     de fois plus légers que le format d'images JPEG historique, et lisibles
-#     par n'importe quel lecteur ;
+#   - les ENREGISTREMENTS et les clips, qui sont des MP4 fragmentés — une
+#     vingtaine de fois plus légers que le format d'images JPEG qui a précédé,
+#     et lisibles par n'importe quel lecteur ;
 #   - le flux RTSP, s'il est activé ci-dessous.
 #
-# DÉSACTIVÉ par défaut : l'encodage est logiciel, donc coûteux en CPU. Rien
-# n'est encodé tant que personne ne regarde ET qu'aucun enregistrement n'est
-# en cours, mais le réglage reste explicite.
+# L'encodage est LOGICIEL, donc coûteux en CPU, mais rien n'est encodé tant
+# que personne ne regarde, qu'aucun enregistrement n'est en cours et que la
+# surveillance est éteinte. Les réglages ci-dessous sont ce qui borne le reste.
 #
-# Laissé à false, tout continue comme avant : direct en MJPEG, enregistrements
-# au format .mjpeg horodaté.
+# PRÉREQUIS côté navigateur : l'affichage du direct demande WebCodecs
+# (Chrome/Edge 94+, Safari 16.4+, Firefox 130+). Un navigateur plus ancien le
+# dit, et les enregistrements restent lisibles — ce sont des MP4 ordinaires.
 [h264]
-enabled = false
 # Cadence cible du flux encodé. Volontairement inférieure à la cadence de
 # capture : c'est le réglage qui pèse le plus sur le coût de l'encodage, et
 # 12 im/s suffisent largement à une scène de surveillance. Elle s'applique
@@ -182,8 +183,9 @@ keyframe_interval_secs = 2
 #   vlc "rtsp://192.168.1.42:8554/stream?token=secret123"
 #   ffplay -rtsp_transport tcp "rtsp://192.168.1.42:8554/stream?token=secret123"
 #
-# L'activer active aussi l'encodage [h264] ci-dessus : un serveur RTSP sans
-# flux à servir n'aurait aucun sens.
+# Seul le SERVEUR est optionnel, pas l'encodage : laisser enabled = false
+# n'économise qu'un port ouvert sur le réseau, pas le coût de l'encodeur, qui
+# travaille de toute façon pour les interfaces web et les enregistrements.
 [rtsp]
 enabled = false
 host = "0.0.0.0"

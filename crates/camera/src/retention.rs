@@ -9,7 +9,7 @@
 //! [`crate::config::RecordingConfig`]).
 //!
 //! L'âge d'un fichier est déterminé par sa **date de dernière modification**,
-//! et non par l'horodatage contenu dans son nom (`rec_20260918_120854.mjpeg`).
+//! et non par l'horodatage contenu dans son nom (`rec_20260918_120854.mp4`).
 //! C'est un choix de sûreté : un enregistrement en cours d'écriture voit sa
 //! date de modification rafraîchie en permanence, il ne peut donc jamais être
 //! sélectionné pour suppression. Se fier au nom de fichier reviendrait à
@@ -27,6 +27,13 @@ use tracing::{error, info, warn};
 /// Extensions considérées comme des enregistrements. Tout autre fichier
 /// présent dans le dossier est ignoré : la purge ne doit jamais toucher à
 /// quelque chose qu'elle n'a pas écrit elle-même.
+///
+/// `mjpeg` n'est PLUS produit (voir [`crate::capture::RecordingFormat`]) mais
+/// reste reconnu, et il doit le rester : une caméra mise à jour a des
+/// fichiers de l'ancien format sur son disque. Les retirer de cette liste ne
+/// les rendrait pas lisibles pour autant — ça les rendrait ÉTERNELS, et un
+/// disque qui se remplit sans jamais se vider est précisément ce que ce
+/// module existe pour éviter.
 const RECORDING_EXTENSIONS: [&str; 2] = ["mjpeg", "mp4"];
 
 /// Bilan d'un passage de nettoyage.
@@ -235,7 +242,7 @@ mod tests {
     // --- is_recording_file ---
 
     #[test]
-    fn mjpeg_and_mp4_are_recognized_as_recordings() {
+    fn both_the_current_and_the_former_extension_are_recognized() {
         assert!(is_recording_file(Path::new("rec_20260918_120854.mjpeg")));
         assert!(is_recording_file(Path::new("clip.mp4")));
     }

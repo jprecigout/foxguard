@@ -1,16 +1,17 @@
 //! Encodage H.264 des frames de la caméra, via `openh264` (implémentation
 //! Cisco, BSD-2).
 //!
-//! # Pourquoi `openh264` et pas autre chose
+//! # Pourquoi encoder, et pourquoi `openh264`
 //!
-//! Le flux WebSocket existant est du **MJPEG** : une image JPEG complète par
-//! frame, sans aucune compression inter-frame. C'est simple et sans latence,
-//! mais ça coûte cher en débit — une scène immobile est retransmise
-//! intégralement 25 fois par seconde. H.264 ne transmet que ce qui change :
-//! sur une scène de vidéosurveillance, immobile l'essentiel du temps, le
-//! débit s'effondre d'un ordre de grandeur. Et c'est le format qu'attendent
-//! les lecteurs vidéo et les enregistreurs (VLC, ffmpeg, Home Assistant,
-//! Frigate), ce que le MJPEG maison n'est pas.
+//! Ce module produit le SEUL flux vidéo de la caméra. Il a remplacé un flux
+//! MJPEG — une image JPEG complète par frame, sans aucune compression
+//! inter-frame : simple et sans latence, mais une scène immobile y était
+//! retransmise intégralement vingt-cinq fois par seconde. H.264 ne transmet
+//! que ce qui change, et sur une scène de vidéosurveillance — immobile
+//! l'essentiel du temps — le débit s'effondre d'un ordre de grandeur : 76
+//! kb/s mesurés contre 1651. C'est par ailleurs le format qu'attendent les
+//! lecteurs vidéo et les enregistreurs (VLC, ffmpeg, Home Assistant,
+//! Frigate), ce qu'un flux maison n'était pas.
 //!
 //! Le choix de `openh264` parmi les options possibles tient à la contrainte
 //! qui structure tout ce dépôt : **la compilation croisée ARM64 sous QEMU**
@@ -193,7 +194,7 @@ impl H264Encoder {
         self.encoder.force_intra_frame();
     }
 
-    /// Encode une frame fournie en RGB (webcam MJPEG décodée, ou frame avec
+    /// Encode une frame fournie en RGB (frame d'une webcam JPEG décodée, ou avec
     /// les boîtes de détection déjà incrustées).
     pub fn encode_rgb(&mut self, image: &image::RgbImage) -> Result<Option<AccessUnit>> {
         if !self.buffer.fill_from_rgb(image) {
@@ -500,7 +501,7 @@ mod tests {
     #[test]
     fn subsequent_frames_are_much_smaller_than_the_keyframe() {
         // La raison d'être du H.264 ici : ne pas retransmettre toute l'image
-        // à chaque frame, contrairement au MJPEG.
+        // à chaque frame, comme le faisait le flux MJPEG qu'il a remplacé.
         let mut encoder = H264Encoder::new(128, 128, 25, 512, 10).expect("encodeur");
 
         let keyframe = encoder

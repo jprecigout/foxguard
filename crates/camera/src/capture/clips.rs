@@ -24,15 +24,13 @@
 //! horodatage d'origine, faute de quoi la relecture avalerait tout le
 //! pré-enregistrement d'un coup.
 //!
-//! # Le tampon suit le format
+//! # Le tampon se coupe par groupes d'images
 //!
-//! En **MP4** (H.264), le tampon ne peut pas être coupé n'importe où : une
-//! image intermédiaire n'a aucun sens sans l'image clé dont elle décrit les
+//! Le tampon ne peut pas être coupé n'importe où : en H.264, une image
+//! intermédiaire n'a aucun sens sans l'image clé dont elle décrit les
 //! différences. Il est donc tronqué par GROUPES D'IMAGES, à la dernière image
 //! clé antérieure à la fenêtre — ce qui donne un pré-enregistrement un peu
 //! plus long que demandé, jamais plus court, et toujours décodable.
-//!
-//! En **MJPEG**, chaque image est autonome : la troncature est exacte.
 //!
 //! # Format et rétention : ceux des enregistrements existants
 //!
@@ -61,44 +59,25 @@ use super::recording::{Frame, RecordingFormat, RecordingWriter};
 /// qui est très préférable à un plantage.
 const MAX_PREROLL_BYTES: usize = 48 * 1024 * 1024;
 
-/// Le contenu d'une frame en attente, selon le format de l'enregistrement.
-enum BufferedPayload {
-    Jpeg(Vec<u8>),
-    H264 { nals: Vec<Vec<u8>>, keyframe: bool },
-}
-
-impl BufferedPayload {
-    fn len(&self) -> usize {
-        match self {
-            Self::Jpeg(jpeg) => jpeg.len(),
-            Self::H264 { nals, .. } => nals.iter().map(Vec::len).sum(),
-        }
-    }
-
-    fn is_keyframe(&self) -> bool {
-        match self {
-            // Une image JPEG est toujours autonome : le tampon peut être
-            // coupé devant n'importe laquelle.
-            Self::Jpeg(_) => true,
-            Self::H264 { keyframe, .. } => *keyframe,
-        }
-    }
-
-    fn as_frame(&self) -> Frame<'_> {
-        match self {
-            Self::Jpeg(jpeg) => Frame::Jpeg(jpeg),
-            Self::H264 { nals, keyframe } => Frame::H264 {
-                nals,
-                keyframe: *keyframe,
-            },
-        }
-    }
-}
-
 /// Une frame en attente dans le tampon de pré-enregistrement.
 struct BufferedFrame {
     captured_at: Instant,
-    payload: BufferedPayload,
+    /// Les NAL de l'unité d'accès, copiées du flux encodé.
+    nals: Vec<Vec<u8>>,
+    keyframe: bool,
+}
+
+impl BufferedFrame {
+    fn len(&self) -> usize {
+        self.nals.iter().map(Vec::len).sum()
+    }
+
+    fn as_frame(&self) -> Frame<'_> {
+        Frame {
+            nals: &self.nals,
+            keyframe: self.keyframe,
+        }
+    }
 }
 
 /// Le clip en cours d'écriture.
@@ -125,15 +104,16 @@ pub struct ClipRecorder {
     buffered_bytes: usize,
     active: Option<ActiveClip>,
     /// Format des clips à écrire, connu dès que l'encodeur a produit une
-    /// image clé (voir [`Self::set_format`]). `None` avant cela en mode
-    /// H.264 : on ne peut pas ouvrir de MP4 sans ses jeux de paramètres.
+    /// image clé (voir [`Self::set_format`]). `None` avant cela : on ne peut
+    /// pas ouvrir de MP4 sans ses jeux de paramètres.
     format: Option<RecordingFormat>,
 }
 
 impl ClipRecorder {
-    /// Construit l'enregistreur. Le format reste à préciser en H.264 (voir
-    /// [`Self::set_format`]) ; sans encodage, il est connu d'emblée.
-    pub fn new(config: &RecordingConfig, h264: bool) -> Self {
+    /// Construit l'enregistreur. Le format reste à préciser (voir
+    /// [`Self::set_format`]) : il dépend de la première image clé produite
+    /// par l'encodeur.
+    pub fn new(config: &RecordingConfig) -> Self {
         Self {
             enabled: config.clips_enabled,
             dir: config.dir.clone(),
@@ -142,7 +122,7 @@ impl ClipRecorder {
             buffer: VecDeque::new(),
             buffered_bytes: 0,
             active: None,
-            format: (!h264).then_some(RecordingFormat::Mjpeg),
+            format: None,
         }
     }
 
@@ -176,28 +156,22 @@ impl ClipRecorder {
     /// désarmement : couper sa vidéo en plein milieu parce que quelqu'un a
     /// éteint la surveillance laisserait un fichier tronqué sans que rien ne
     /// le dise.
-    pub fn push_jpeg(&mut self, jpeg: &[u8], armed: bool) {
-        self.push_payload(BufferedPayload::Jpeg(jpeg.to_vec()), armed, Instant::now());
-    }
-
-    /// Comme [`Self::push_jpeg`], pour une frame encodée en H.264.
     pub fn push_h264(&mut self, unit: &AccessUnit, armed: bool) {
-        self.push_payload(
-            BufferedPayload::H264 {
-                nals: unit.nals.clone(),
-                keyframe: unit.keyframe,
-            },
-            armed,
-            Instant::now(),
-        );
+        self.push_at(unit.nals.clone(), unit.keyframe, armed, Instant::now());
     }
 
-    /// Cœur commun aux deux, à un instant fourni : c'est ce qui rend les
-    /// fenêtres temporelles testables sans faire dormir le test.
-    fn push_payload(&mut self, payload: BufferedPayload, armed: bool, now: Instant) {
+    /// Le même, à un instant fourni : c'est ce qui rend les fenêtres
+    /// temporelles testables sans faire dormir le test.
+    fn push_at(&mut self, nals: Vec<Vec<u8>>, keyframe: bool, armed: bool, now: Instant) {
         if !self.enabled {
             return;
         }
+
+        let payload = BufferedFrame {
+            captured_at: now,
+            nals,
+            keyframe,
+        };
 
         if let Some(clip) = &mut self.active {
             if now >= clip.until {
@@ -232,10 +206,7 @@ impl ClipRecorder {
         }
 
         self.buffered_bytes += payload.len();
-        self.buffer.push_back(BufferedFrame {
-            captured_at: now,
-            payload,
-        });
+        self.buffer.push_back(payload);
 
         self.trim_buffer(now);
     }
@@ -243,9 +214,9 @@ impl ClipRecorder {
     /// Écarte du tampon les frames trop anciennes, et celles qui dépassent le
     /// plafond mémoire.
     ///
-    /// La troncature s'arrête à une IMAGE CLÉ : en H.264, une image
-    /// intermédiaire n'a aucun sens sans celle dont elle décrit les
-    /// différences, et commencer un clip par l'une d'elles donnerait des
+    /// La troncature s'arrête à une IMAGE CLÉ : une image intermédiaire n'a
+    /// aucun sens sans celle dont elle décrit les différences, et commencer un
+    /// clip par l'une d'elles donnerait des
     /// premières secondes en bouillie. Le pré-enregistrement est donc parfois
     /// un peu plus long que demandé — jamais plus court, et toujours
     /// décodable.
@@ -262,7 +233,7 @@ impl ClipRecorder {
 
             // On ne peut retirer la frame de tête que si celle qui la suit
             // peut à son tour ouvrir le tampon.
-            if !self.buffer[1].payload.is_keyframe() {
+            if !self.buffer[1].keyframe {
                 // Sauf si le plafond mémoire est dépassé : là, il faut
                 // vraiment faire de la place, quitte à perdre le groupe
                 // d'images en cours.
@@ -281,7 +252,7 @@ impl ClipRecorder {
     /// Retire la frame la plus ancienne du tampon.
     fn drop_front(&mut self) {
         if let Some(frame) = self.buffer.pop_front() {
-            self.buffered_bytes -= frame.payload.len();
+            self.buffered_bytes -= frame.len();
         }
     }
 
@@ -335,7 +306,7 @@ impl ClipRecorder {
             let offset = u32::try_from(frame.captured_at.duration_since(origin).as_millis())
                 .unwrap_or(u32::MAX);
 
-            if let Err(e) = writer.write_frame_at(offset, frame.payload.as_frame()) {
+            if let Err(e) = writer.write_frame_at(offset, frame.as_frame()) {
                 warn!("⚠️ Pré-enregistrement du clip incomplet : {e}");
                 break;
             }
@@ -371,23 +342,23 @@ impl ClipRecorder {
 mod tests {
     use super::*;
 
+    use crate::mp4::TIMESCALE;
+
     impl ClipRecorder {
-        /// Raccourci des tests : soumettre une frame JPEG avec la
-        /// surveillance active, le cas de loin le plus courant.
-        fn push_at(&mut self, jpeg: &[u8], now: Instant) {
-            self.push_payload(BufferedPayload::Jpeg(jpeg.to_vec()), true, now);
+        /// Raccourci des tests : soumettre une frame avec la surveillance
+        /// active, le cas de loin le plus courant.
+        fn push_h264_at(&mut self, keyframe: bool, size: usize, now: Instant) {
+            self.push_frame_at(keyframe, size, true, now);
         }
 
-        /// Soumettre une frame H.264.
-        fn push_h264_at(&mut self, keyframe: bool, size: usize, now: Instant) {
-            self.push_payload(
-                BufferedPayload::H264 {
-                    nals: vec![vec![if keyframe { 0x65 } else { 0x41 }; size.max(1)]],
-                    keyframe,
-                },
-                true,
-                now,
-            );
+        /// Le même, surveillance ÉTEINTE.
+        fn push_disarmed_at(&mut self, keyframe: bool, size: usize, now: Instant) {
+            self.push_frame_at(keyframe, size, false, now);
+        }
+
+        fn push_frame_at(&mut self, keyframe: bool, size: usize, armed: bool, now: Instant) {
+            let nal = vec![if keyframe { 0x65 } else { 0x41 }; size.max(1)];
+            self.push_at(vec![nal], keyframe, armed, now);
         }
     }
 
@@ -401,15 +372,11 @@ mod tests {
         }
     }
 
-    /// Enregistreur au format historique : chaque frame est autonome.
-    fn mjpeg_recorder(dir: &std::path::Path) -> ClipRecorder {
-        ClipRecorder::new(&config(dir), false)
-    }
-
-    /// Enregistreur en MP4, dont le format est déjà connu.
-    fn mp4_recorder(dir: &std::path::Path) -> ClipRecorder {
-        let mut recorder = ClipRecorder::new(&config(dir), true);
-        recorder.set_format(RecordingFormat::Mp4 {
+    /// Enregistreur dont le format est déjà connu, comme après la première
+    /// image clé de l'encodeur.
+    fn recorder(dir: &std::path::Path) -> ClipRecorder {
+        let mut recorder = ClipRecorder::new(&config(dir));
+        recorder.set_format(RecordingFormat {
             width: 64,
             height: 48,
             fps: 12,
@@ -419,20 +386,43 @@ mod tests {
         recorder
     }
 
-    /// Lit les horodatages des frames d'un enregistrement au format
-    /// historique.
+    /// Horodatages des images d'un clip, en millisecondes, reconstitués depuis
+    /// les durées que déclarent ses `trun`.
+    ///
+    /// C'est la seule façon de vérifier le CADENCEMENT d'un clip : le MP4 ne
+    /// stocke pas un horodatage par image mais une durée, et c'est leur somme
+    /// qui situe chaque image. L'écart entre deux durées successives étant
+    /// mesuré, un pré-enregistrement écrit d'un bloc doit malgré tout
+    /// ressortir ici étalé sur ses vraies secondes.
+    ///
+    /// La dernière image de chaque fragment porte la durée NOMINALE (1/fps) :
+    /// sa propre durée n'est pas connue, faute d'image suivante. Les
+    /// horodatages qui précèdent n'en dépendent pas.
     fn frame_timestamps(path: &std::path::Path) -> Vec<u32> {
-        let raw = std::fs::read(path).expect("lecture du clip");
+        let data = std::fs::read(path).expect("lecture du clip");
+        let per_ms = u64::from(TIMESCALE / 1_000);
+
         let mut timestamps = Vec::new();
-        let mut offset = 0;
+        let mut elapsed = 0u64;
 
-        while offset + 8 <= raw.len() {
-            let timestamp = u32::from_le_bytes(raw[offset..offset + 4].try_into().unwrap());
-            let length =
-                u32::from_le_bytes(raw[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        // Les charges utiles des tests sont des octets constants (0x65/0x41) :
+        // la séquence « trun » ne peut pas y apparaître par accident.
+        let positions =
+            (0..data.len().saturating_sub(4)).filter(|&at| &data[at..at + 4] == b"trun");
 
-            timestamps.push(timestamp);
-            offset += 8 + length;
+        for at in positions {
+            // Après le type : version et drapeaux (4), nombre d'images (4),
+            // décalage des données (4), puis 12 octets par image.
+            let count = u32::from_be_bytes(data[at + 8..at + 12].try_into().unwrap()) as usize;
+            let mut entry = at + 16;
+
+            for _ in 0..count {
+                timestamps.push(u32::try_from(elapsed / per_ms).unwrap_or(u32::MAX));
+
+                let duration = u32::from_be_bytes(data[entry..entry + 4].try_into().unwrap());
+                elapsed += u64::from(duration);
+                entry += 12;
+            }
         }
 
         timestamps
@@ -456,11 +446,12 @@ mod tests {
         // Le tampon de pré-enregistrement vit en mémoire : au repos, la
         // fonctionnalité ne touche pas au disque.
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = mjpeg_recorder(dir.path());
+        let mut recorder = recorder(dir.path());
         let start = Instant::now();
 
-        for index in 0..50 {
-            recorder.push_at(&[index], start + Duration::from_millis(index as u64 * 40));
+        recorder.push_h264_at(true, 64, start);
+        for index in 1..50u64 {
+            recorder.push_h264_at(false, 64, start + Duration::from_millis(index * 40));
         }
 
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
@@ -471,11 +462,12 @@ mod tests {
         // C'EST LA RAISON D'ÊTRE DU MODULE : le clip doit montrer ce qui a
         // précédé la détection.
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = mjpeg_recorder(dir.path());
+        let mut recorder = recorder(dir.path());
         let start = Instant::now();
 
-        for index in 0..50u32 {
-            recorder.push_at(&[1, 2, 3], start + Duration::from_millis(index as u64 * 40));
+        recorder.push_h264_at(true, 64, start);
+        for index in 1..50u64 {
+            recorder.push_h264_at(false, 64, start + Duration::from_millis(index * 40));
         }
 
         let name = recorder
@@ -484,7 +476,7 @@ mod tests {
         recorder.finish();
 
         assert!(name.starts_with("evt_"));
-        assert!(name.ends_with(".mjpeg"));
+        assert!(name.ends_with(".mp4"));
         assert_eq!(frame_timestamps(&only_file(dir.path())).len(), 50);
     }
 
@@ -495,11 +487,12 @@ mod tests {
         // porteraient toutes un horodatage proche de zéro et la relecture
         // avalerait tout le pré-enregistrement d'un coup.
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = mjpeg_recorder(dir.path());
+        let mut recorder = recorder(dir.path());
         let start = Instant::now();
 
-        for index in 0..50u32 {
-            recorder.push_at(&[7], start + Duration::from_millis(index as u64 * 40));
+        recorder.push_h264_at(true, 64, start);
+        for index in 1..50u64 {
+            recorder.push_h264_at(false, 64, start + Duration::from_millis(index * 40));
         }
 
         recorder.start_or_extend_at(start + Duration::from_millis(2_000));
@@ -515,15 +508,15 @@ mod tests {
     #[test]
     fn frames_after_the_event_continue_the_same_timeline() {
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = mjpeg_recorder(dir.path());
+        let mut recorder = recorder(dir.path());
         let start = Instant::now();
 
-        recorder.push_at(&[1], start);
-        recorder.push_at(&[2], start + Duration::from_millis(500));
+        recorder.push_h264_at(true, 64, start);
+        recorder.push_h264_at(false, 64, start + Duration::from_millis(500));
 
         recorder.start_or_extend_at(start + Duration::from_millis(1_000));
 
-        recorder.push_at(&[3], start + Duration::from_millis(1_500));
+        recorder.push_h264_at(false, 64, start + Duration::from_millis(1_500));
         recorder.finish();
 
         assert_eq!(
@@ -536,13 +529,14 @@ mod tests {
     fn the_pre_roll_buffer_forgets_frames_older_than_configured() {
         // Sans cet oubli, le tampon grossirait indéfiniment.
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = mjpeg_recorder(dir.path());
+        let mut recorder = recorder(dir.path());
         let start = Instant::now();
 
-        recorder.push_at(&[1], start);
-        recorder.push_at(&[2], start + Duration::from_secs(1));
+        // Des images clés : le tampon peut être coupé devant chacune d'elles.
+        recorder.push_h264_at(true, 64, start);
+        recorder.push_h264_at(true, 64, start + Duration::from_secs(1));
         // Dix secondes plus tard : les deux premières sortent de la fenêtre.
-        recorder.push_at(&[3], start + Duration::from_secs(10));
+        recorder.push_h264_at(true, 64, start + Duration::from_secs(10));
 
         recorder.start_or_extend_at(start + Duration::from_secs(10));
         recorder.finish();
@@ -550,15 +544,15 @@ mod tests {
         assert_eq!(frame_timestamps(&only_file(dir.path())).len(), 1);
     }
 
-    // --- Troncature par groupe d'images (H.264) ---
+    // --- Troncature par groupe d'images ---
 
     #[test]
-    fn an_h264_buffer_is_only_cut_at_a_keyframe() {
+    fn the_buffer_is_only_cut_at_a_keyframe() {
         // Une image intermédiaire n'a aucun sens sans l'image clé dont elle
         // décrit les différences : couper devant elle donnerait un clip dont
         // les premières secondes sont en bouillie.
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = mp4_recorder(dir.path());
+        let mut recorder = recorder(dir.path());
         let start = Instant::now();
 
         // Une image clé, puis des intermédiaires, largement au-delà de la
@@ -569,18 +563,15 @@ mod tests {
         }
 
         assert!(
-            recorder
-                .buffer
-                .front()
-                .is_some_and(|f| f.payload.is_keyframe()),
+            recorder.buffer.front().is_some_and(|f| f.keyframe),
             "le tampon doit toujours commencer par une image clé"
         );
     }
 
     #[test]
-    fn an_h264_buffer_drops_whole_groups_of_pictures() {
+    fn the_buffer_drops_whole_groups_of_pictures() {
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = mp4_recorder(dir.path());
+        let mut recorder = recorder(dir.path());
         let start = Instant::now();
 
         // Trois groupes d'images d'une seconde chacun, espacés de 5 secondes
@@ -596,7 +587,7 @@ mod tests {
             }
         }
 
-        assert!(recorder.buffer.front().unwrap().payload.is_keyframe());
+        assert!(recorder.buffer.front().unwrap().keyframe);
         // Le pré-enregistrement reste au moins aussi long que demandé.
         let span = recorder.buffer.back().unwrap().captured_at
             - recorder.buffer.front().unwrap().captured_at;
@@ -607,9 +598,9 @@ mod tests {
     }
 
     #[test]
-    fn an_h264_clip_is_a_playable_mp4() {
+    fn a_clip_is_a_playable_mp4() {
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = mp4_recorder(dir.path());
+        let mut recorder = recorder(dir.path());
         let start = Instant::now();
 
         recorder.push_h264_at(true, 200, start);
@@ -637,7 +628,7 @@ mod tests {
         // Sans jeux de paramètres, un MP4 ne peut pas s'ouvrir : l'événement
         // part sans clip plutôt qu'avec un fichier illisible.
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = ClipRecorder::new(&config(dir.path()), true);
+        let mut recorder = ClipRecorder::new(&config(dir.path()));
 
         recorder.push_h264_at(true, 100, Instant::now());
 
@@ -653,10 +644,10 @@ mod tests {
         // identifié, ou deux personnes) : leur ouvrir un fichier chacun
         // donnerait une poignée de clips qui se chevauchent.
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = mjpeg_recorder(dir.path());
+        let mut recorder = recorder(dir.path());
         let start = Instant::now();
 
-        recorder.push_at(&[1], start);
+        recorder.push_h264_at(true, 64, start);
 
         let first = recorder.start_or_extend_at(start).expect("clip");
         let second = recorder
@@ -671,10 +662,10 @@ mod tests {
     #[test]
     fn an_event_after_a_clip_has_ended_opens_a_new_one() {
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = mjpeg_recorder(dir.path());
+        let mut recorder = recorder(dir.path());
         let start = Instant::now();
 
-        recorder.push_at(&[1], start);
+        recorder.push_h264_at(true, 64, start);
         let first = recorder.start_or_extend_at(start).expect("clip");
 
         // `clip_post_secs = 8` : à +20 s, le premier clip est refermé.
@@ -690,17 +681,17 @@ mod tests {
     #[test]
     fn a_clip_stops_being_written_after_its_post_roll() {
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = mjpeg_recorder(dir.path());
+        let mut recorder = recorder(dir.path());
         let start = Instant::now();
 
-        recorder.push_at(&[1], start);
+        recorder.push_h264_at(true, 64, start);
         recorder.start_or_extend_at(start);
 
         // Dans la fenêtre : écrite.
-        recorder.push_at(&[2], start + Duration::from_secs(4));
+        recorder.push_h264_at(false, 64, start + Duration::from_secs(4));
         // Au-delà des 8 secondes de post-enregistrement : plus écrite.
-        recorder.push_at(&[3], start + Duration::from_secs(30));
-        recorder.push_at(&[4], start + Duration::from_secs(31));
+        recorder.push_h264_at(false, 64, start + Duration::from_secs(30));
+        recorder.push_h264_at(false, 64, start + Duration::from_secs(31));
         recorder.finish();
 
         assert_eq!(frame_timestamps(&only_file(dir.path())), vec![0, 4_000]);
@@ -709,15 +700,12 @@ mod tests {
     #[test]
     fn disabled_clips_write_nothing_and_reference_nothing() {
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = ClipRecorder::new(
-            &RecordingConfig {
-                clips_enabled: false,
-                ..config(dir.path())
-            },
-            false,
-        );
+        let mut recorder = ClipRecorder::new(&RecordingConfig {
+            clips_enabled: false,
+            ..config(dir.path())
+        });
 
-        recorder.push_jpeg(&[1, 2, 3], true);
+        recorder.push_h264_at(true, 64, Instant::now());
 
         assert_eq!(recorder.start_or_extend(), None);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
@@ -729,7 +717,7 @@ mod tests {
         // passée (démarrage) : le clip doit exister, simplement sans
         // pré-enregistrement.
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = mjpeg_recorder(dir.path());
+        let mut recorder = recorder(dir.path());
 
         let name = recorder.start_or_extend().expect("clip créé");
         recorder.finish();
@@ -742,16 +730,20 @@ mod tests {
     fn an_unwritable_directory_does_not_bring_down_the_detection() {
         // Un disque plein ou un dossier en lecture seule doit coûter le clip,
         // pas l'événement.
-        let mut recorder = ClipRecorder::new(
-            &RecordingConfig {
-                dir: "/proc/foxguard-ne-peut-pas-ecrire-ici".to_string(),
-                clips_enabled: true,
-                ..RecordingConfig::default()
-            },
-            false,
-        );
+        let mut recorder = ClipRecorder::new(&RecordingConfig {
+            dir: "/proc/foxguard-ne-peut-pas-ecrire-ici".to_string(),
+            clips_enabled: true,
+            ..RecordingConfig::default()
+        });
+        recorder.set_format(RecordingFormat {
+            width: 64,
+            height: 48,
+            fps: 12,
+            sps: vec![0x67, 0x42, 0xC0, 0x1E],
+            pps: vec![0x68, 0xCE],
+        });
 
-        recorder.push_jpeg(&[1, 2, 3], true);
+        recorder.push_h264_at(true, 64, Instant::now());
 
         assert_eq!(recorder.start_or_extend(), None);
     }
@@ -764,19 +756,16 @@ mod tests {
         // clip. Garder des secondes de vidéo en mémoire pour une
         // fonctionnalité en sommeil serait du gaspillage pur.
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = mjpeg_recorder(dir.path());
+        let mut recorder = recorder(dir.path());
         let start = Instant::now();
 
-        for index in 0..20u64 {
-            recorder.push_at(&[1, 2, 3], start + Duration::from_millis(index * 40));
+        recorder.push_h264_at(true, 64, start);
+        for index in 1..20u64 {
+            recorder.push_h264_at(false, 64, start + Duration::from_millis(index * 40));
         }
         assert!(!recorder.buffer.is_empty());
 
-        recorder.push_payload(
-            BufferedPayload::Jpeg(vec![1, 2, 3]),
-            false,
-            start + Duration::from_millis(900),
-        );
+        recorder.push_disarmed_at(false, 64, start + Duration::from_millis(900));
 
         assert!(recorder.buffer.is_empty());
         assert_eq!(recorder.buffered_bytes, 0);
@@ -787,22 +776,14 @@ mod tests {
         // Couper la vidéo en plein milieu parce que quelqu'un a éteint la
         // surveillance laisserait un fichier tronqué sans que rien ne le dise.
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = mjpeg_recorder(dir.path());
+        let mut recorder = recorder(dir.path());
         let start = Instant::now();
 
-        recorder.push_at(&[1], start);
+        recorder.push_h264_at(true, 64, start);
         recorder.start_or_extend_at(start);
 
-        recorder.push_payload(
-            BufferedPayload::Jpeg(vec![2]),
-            false,
-            start + Duration::from_secs(2),
-        );
-        recorder.push_payload(
-            BufferedPayload::Jpeg(vec![3]),
-            false,
-            start + Duration::from_secs(4),
-        );
+        recorder.push_disarmed_at(false, 64, start + Duration::from_secs(2));
+        recorder.push_disarmed_at(false, 64, start + Duration::from_secs(4));
         recorder.finish();
 
         assert_eq!(
@@ -817,20 +798,20 @@ mod tests {
         // une scène agitée ne doit pas pouvoir épuiser la mémoire du
         // Raspberry Pi.
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = ClipRecorder::new(
-            &RecordingConfig {
-                // Une heure de pré-enregistrement : seule la borne mémoire
-                // peut arrêter le tampon.
-                clip_pre_secs: 3_600,
-                ..config(dir.path())
-            },
-            false,
-        );
+        let mut recorder = ClipRecorder::new(&RecordingConfig {
+            // Une heure de pré-enregistrement : seule la borne mémoire
+            // peut arrêter le tampon.
+            clip_pre_secs: 3_600,
+            ..config(dir.path())
+        });
         let start = Instant::now();
 
-        let frame = vec![0u8; 4 * 1024 * 1024];
         for index in 0..20u64 {
-            recorder.push_at(&frame, start + Duration::from_millis(index * 40));
+            recorder.push_h264_at(
+                true,
+                4 * 1024 * 1024,
+                start + Duration::from_millis(index * 40),
+            );
         }
 
         assert!(
@@ -851,13 +832,10 @@ mod tests {
         // sauter le plafond mémoire : mieux vaut un pré-enregistrement
         // amputé qu'un Raspberry Pi à court de mémoire.
         let dir = tempfile::tempdir().expect("dossier temporaire");
-        let mut recorder = ClipRecorder::new(
-            &RecordingConfig {
-                clip_pre_secs: 3_600,
-                ..config(dir.path())
-            },
-            true,
-        );
+        let mut recorder = ClipRecorder::new(&RecordingConfig {
+            clip_pre_secs: 3_600,
+            ..config(dir.path())
+        });
         let start = Instant::now();
 
         recorder.push_h264_at(true, 4 * 1024 * 1024, start);

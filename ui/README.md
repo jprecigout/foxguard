@@ -84,9 +84,11 @@ sinon). La vignette, elle, vient de la base du manager et reste visible dans
 tous les cas.
 
 C'est volontairement la caméra qui décide **comment** afficher son direct :
-elle sert le H.264 décodé par WebCodecs quand son encodeur est actif, et se
-replie sur le MJPEG historique sinon. Cette interface n'a pas à connaître les
-formats vidéo de la caméra, ni à suivre leurs évolutions.
+elle sert aujourd'hui du H.264 décodé par WebCodecs, et elle a servi du MJPEG
+avant. Cette interface n'a jamais eu à le savoir, et c'est tout l'intérêt du
+découpage : la caméra peut changer de format vidéo sans qu'une ligne d'ici
+bouge. Le seul effet visible de ce changement est un prérequis de navigateur
+(WebCodecs), que la page de la caméra annonce elle-même quand il manque.
 
 ## Toolchain
 

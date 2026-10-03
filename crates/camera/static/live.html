@@ -116,7 +116,6 @@
     <main>
         <p class="status" id="status">Connexion au flux vidéo…</p>
         <canvas id="canvas" hidden></canvas>
-        <img id="image" alt="Flux vidéo en direct" hidden>
         <span class="badge" id="badge" hidden><span class="dot" id="dot"></span><span id="codec"></span></span>
     </main>
 
@@ -128,7 +127,6 @@
 
         const statusEl = document.getElementById('status');
         const canvas = document.getElementById('canvas');
-        const image = document.getElementById('image');
         const badge = document.getElementById('badge');
         const dot = document.getElementById('dot');
         const codecEl = document.getElementById('codec');
@@ -142,14 +140,11 @@
                 && typeof window.EncodedVideoChunk === 'function';
         }
 
-        function show(kind) {
-            const h264 = kind === 'h264';
-
-            canvas.hidden = !h264;
-            image.hidden = h264;
+        function show() {
+            canvas.hidden = false;
             statusEl.hidden = true;
 
-            codecEl.textContent = h264 ? 'H.264' : 'MJPEG';
+            codecEl.textContent = 'H.264';
             dot.className = 'dot connected';
             badge.hidden = false;
         }
@@ -158,58 +153,63 @@
             statusEl.textContent = 'Reconnexion au flux…';
             statusEl.hidden = false;
             canvas.hidden = true;
-            image.hidden = true;
             dot.className = 'dot';
         }
 
         /**
-         * Démarre le direct : H.264 si la caméra l'encode ET si le navigateur
-         * sait le décoder, MJPEG sinon.
+         * Panne définitive : on le DIT.
          *
-         * Même logique que l'interface complète (`controller.html`), et pour
-         * la même raison : le MJPEG reste le repli qui marche partout.
+         * Il n'y a plus de second format sur lequel se rabattre. Un canevas
+         * resté vide sans un mot laisserait croire à une caméra en panne
+         * alors que c'est le navigateur qui ne sait pas décoder.
          */
-        async function start() {
-            if (supportsWebCodecs()) {
-                try {
-                    const response = await fetch('/api/capabilities');
+        function unavailable(message) {
+            statusEl.textContent = message;
+            statusEl.hidden = false;
+            canvas.hidden = true;
+            badge.hidden = true;
+        }
 
-                    if (response.ok && (await response.json()).h264) {
-                        connectH264();
-                        return;
-                    }
-                } catch (err) {
-                    console.warn('Capacités de la caméra indisponibles :', err);
-                }
+        /**
+         * Démarre le direct.
+         *
+         * Le H.264 est le SEUL format que la caméra diffuse : il n'y a plus
+         * de capacités à interroger ni de repli à préparer, seulement un
+         * prérequis à vérifier.
+         */
+        function start() {
+            if (!supportsWebCodecs()) {
+                unavailable(
+                    'Ce navigateur ne sait pas décoder le H.264 (WebCodecs indisponible).'
+                );
+                return;
             }
 
-            connectMjpeg();
+            connect();
         }
 
         /** Direct en H.264, décodé par le navigateur (voir `crate::api`). */
-        function connectH264() {
+        function connect() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             socket = new WebSocket(
-                `${protocol}//${window.location.host}/ws/h264?token=${API_TOKEN}`
+                `${protocol}//${window.location.host}/ws?token=${API_TOKEN}`
             );
             socket.binaryType = 'arraybuffer';
 
             const context = canvas.getContext('2d');
-            let fallenBack = false;
 
-            const fallBack = (reason) => {
-                if (fallenBack) return;
-                fallenBack = true;
-
-                console.warn('Flux H.264 abandonné, repli sur MJPEG :', reason);
+            const failed = (reason) => {
+                console.error('Flux H.264 interrompu :', reason);
 
                 if (decoder) {
                     try { decoder.close(); } catch (_) { /* déjà fermé */ }
                     decoder = null;
                 }
 
+                // La fermeture déclenche `onclose`, donc la reconnexion : un
+                // décodeur peut échouer sur un flux momentanément abîmé et
+                // repartir sur l'image clé suivante.
                 try { socket.close(); } catch (_) { /* déjà fermée */ }
-                connectMjpeg();
             };
 
             socket.onmessage = (event) => {
@@ -219,7 +219,7 @@
                     try {
                         announcement = JSON.parse(event.data);
                     } catch (err) {
-                        fallBack(err);
+                        failed(err);
                         return;
                     }
 
@@ -238,9 +238,9 @@
                             // libère pas.
                             frame.close();
 
-                            show('h264');
+                            show();
                         },
-                        error: fallBack,
+                        error: failed,
                     });
 
                     decoder.configure({
@@ -262,13 +262,11 @@
                         data: new Uint8Array(event.data, 9),
                     }));
                 } catch (err) {
-                    fallBack(err);
+                    failed(err);
                 }
             };
 
             socket.onclose = () => {
-                if (fallenBack) return;
-
                 disconnected();
 
                 if (decoder) {
@@ -276,43 +274,7 @@
                     decoder = null;
                 }
 
-                setTimeout(connectH264, 2000);
-            };
-
-            socket.onerror = () => socket.close();
-        }
-
-        /** Direct en MJPEG : une image JPEG complète par frame. */
-        function connectMjpeg() {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            socket = new WebSocket(
-                `${protocol}//${window.location.host}/ws?token=${API_TOKEN}`
-            );
-            socket.binaryType = 'arraybuffer';
-
-            socket.onopen = () => show('mjpeg');
-
-            socket.onmessage = (event) => {
-                if (!(event.data instanceof ArrayBuffer)) return;
-
-                // Blob plutôt qu'une data URL en base64 : cette dernière
-                // encode chaque frame caractère par caractère en JavaScript,
-                // et ajoute un tiers au poids déjà conséquent du MJPEG.
-                const url = URL.createObjectURL(
-                    new Blob([event.data], { type: 'image/jpeg' })
-                );
-                const previous = image.src;
-
-                image.src = url;
-
-                if (previous.startsWith('blob:')) {
-                    URL.revokeObjectURL(previous);
-                }
-            };
-
-            socket.onclose = () => {
-                disconnected();
-                setTimeout(connectMjpeg, 2000);
+                setTimeout(connect, 2000);
             };
 
             socket.onerror = () => socket.close();

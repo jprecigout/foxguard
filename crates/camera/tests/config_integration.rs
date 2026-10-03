@@ -42,9 +42,9 @@ fn load_reads_config_sample_toml_shipped_with_the_repo() {
         "les deux garde-fous du pré-filtre doivent être armés dans le modèle"
     );
 
-    assert!(
-        !config.h264_enabled(),
-        "l'encodage H.264 est désactivé par défaut (il est logiciel)"
+    assert_eq!(
+        config.h264.fps, 12,
+        "la cadence d'encodage du modèle doit être celle qui s'applique"
     );
     assert!(!config.rtsp.enabled);
     assert!(

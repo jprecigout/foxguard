@@ -22,7 +22,6 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use tokio::sync::broadcast;
-use tokio::sync::broadcast::error::RecvError;
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{debug, error, info, warn};
@@ -41,7 +40,7 @@ use crate::retention::is_recording_file;
 /// gain ici.
 const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
 
-/// En-tête binaire précédant chaque unité d'accès sur `GET /ws/h264`.
+/// En-tête binaire précédant chaque unité d'accès sur `GET /ws`.
 ///
 /// `[u8 image clé][u64 horodatage en microsecondes]`, en ordre réseau. Le
 /// navigateur en a besoin pour construire un `EncodedVideoChunk` : le type
@@ -207,30 +206,7 @@ async fn delete_recording_handler(
 }
 
 /// Ce que la caméra sait faire, pour que l'interface choisisse son flux
-/// (`GET /api/capabilities`).
-///
-/// Sans cette réponse, la page devrait tenter une connexion H.264 puis se
-/// rabattre sur son échec — un aller-retour perdu à chaque chargement, et des
-/// erreurs dans la console à chaque fois que l'encodage est simplement
-/// désactivé.
-#[derive(Serialize)]
-pub struct Capabilities {
-    /// Flux H.264 disponible sur `GET /ws/h264` (voir `[h264] enabled`).
-    pub h264: bool,
-    /// Flux MJPEG disponible sur `GET /ws`. Toujours vrai : c'est le flux
-    /// historique, et le repli de l'interface quand le navigateur ne sait pas
-    /// décoder le H.264.
-    pub mjpeg: bool,
-}
-
-async fn capabilities_handler(State(state): State<Arc<SharedState>>) -> Json<Capabilities> {
-    Json(Capabilities {
-        h264: state.h264.is_some(),
-        mjpeg: true,
-    })
-}
-
-/// Upgrade WebSocket du flux H.264 (`GET /ws/h264?token=...`).
+/// Upgrade WebSocket du flux vidéo (`GET /ws?token=...`).
 ///
 /// # Pourquoi un WebSocket et pas le flux RTSP
 ///
@@ -244,35 +220,26 @@ async fn capabilities_handler(State(state): State<Arc<SharedState>>) -> Json<Cap
 /// écrire (contrairement au MP4 fragmenté qu'exigerait un `<video>`), et pas
 /// de pile WebRTC — dont les dépendances cryptographiques sont précisément ce
 /// que la compilation croisée ARM64 de ce dépôt s'applique à éviter.
-async fn h264_ws_handler(
+pub async fn ws_handler(
     ws: WebSocketUpgrade,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Query(auth): Query<AuthQuery>,
     State(state): State<Arc<SharedState>>,
 ) -> Response {
     if auth.token.as_deref() != Some(state.api_token.as_str()) {
-        warn!("⚠️ Tentative de connexion WebSocket H.264 rejetée (Token invalide).");
+        warn!("⚠️ Tentative de connexion WebSocket rejetée (Token invalide).");
         return (StatusCode::UNAUTHORIZED, "Accès refusé").into_response();
     }
 
-    let Some(stream) = state.h264.clone() else {
-        // 503 et non 404 : la route existe, c'est l'encodage qui est éteint
-        // (`[h264] enabled = false`). L'interface sait ainsi qu'elle doit se
-        // rabattre sur le MJPEG, et non qu'elle s'est trompée d'adresse.
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Encodage H.264 désactivé sur cette caméra",
-        )
-            .into_response();
-    };
+    let stream = Arc::clone(&state.h264);
 
     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     info!(
-        "✅ [WS H.264] Nouveau client connecté #{} (IP: {})",
+        "✅ [WS] Nouveau client connecté #{} (IP: {})",
         client_id, addr
     );
 
-    ws.on_upgrade(move |socket| handle_h264_socket(socket, state, stream, client_id, addr))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, stream, client_id, addr))
         .into_response()
 }
 
@@ -283,7 +250,7 @@ async fn h264_ws_handler(
 /// lire le client laisserait les interrupteurs de l'interface sans effet —
 /// en silence, puisque rien côté page ne distingue un message ignoré d'un
 /// message traité.
-pub async fn handle_h264_socket(
+pub async fn handle_socket(
     socket: WebSocket,
     state: Arc<SharedState>,
     stream: Arc<H264Stream>,
@@ -292,9 +259,6 @@ pub async fn handle_h264_socket(
 ) {
     let (sender, receiver) = socket.split();
 
-    // Même boucle de commandes que le flux MJPEG : c'est la même interface,
-    // les mêmes interrupteurs, et il n'y a aucune raison qu'ils se comportent
-    // différemment selon le codec affiché.
     let commands = spawn_command_task(receiver, state, client_id);
 
     tokio::select! {
@@ -302,10 +266,7 @@ pub async fn handle_h264_socket(
         _ = push_h264_frames(sender, stream, addr) => {},
     }
 
-    info!(
-        "❌ [WS H.264] Client déconnecté #{} (IP: {})",
-        client_id, addr
-    );
+    info!("❌ [WS] Client déconnecté #{} (IP: {})", client_id, addr);
 }
 
 /// Boucle d'émission du flux H.264.
@@ -497,84 +458,12 @@ async fn live_handler(State(state): State<Arc<SharedState>>) -> Html<String> {
     Html(include_str!("../static/live.html").replace(API_TOKEN_PLACEHOLDER, &state.api_token))
 }
 
-/// Handler de mise à niveau vers WebSocket avec authentification par token
-pub async fn ws_handler(
-    ws: WebSocketUpgrade,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    Query(auth): Query<AuthQuery>,
-    State(state): State<Arc<SharedState>>,
-) -> impl IntoResponse {
-    let is_authorized = match auth.token {
-        Some(token) => token == state.api_token,
-        None => false,
-    };
-
-    if !is_authorized {
-        warn!("⚠️ Tentative de connexion WebSocket rejetée (Token invalide).");
-        return (StatusCode::UNAUTHORIZED, "Accès refusé").into_response();
-    }
-
-    // Génération d'un ID unique pour identifier ce client
-    let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
-
-    info!(
-        "✅ [WS] Nouveau client connecté #{} (IP: {})",
-        client_id, addr
-    );
-    ws.on_upgrade(move |socket| handle_socket(socket, state, client_id, addr))
-        .into_response()
-}
-
-/// Gère une connexion WebSocket déjà établie : diffuse le flux vidéo au
-/// client et traite les commandes JSON qu'il envoie (voir [`ClientCommand`]).
-pub async fn handle_socket(
-    socket: WebSocket,
-    state: Arc<SharedState>,
-    client_id: u64,
-    addr: SocketAddr,
-) {
-    let (mut sender, receiver) = socket.split();
-    let mut rx = state.tx.subscribe();
-
-    // Tâche 1: Stream Vidéo (Envoi de données binaires JPEG)
-    let send_task = tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(frame) => {
-                    // Si l'envoi vers le navigateur échoue (client déconnecté), on stoppe
-                    if sender.send(Message::Binary(frame.into())).await.is_err() {
-                        break;
-                    }
-                }
-                Err(RecvError::Lagged(_skipped)) => {
-                    continue;
-                }
-                Err(RecvError::Closed) => {
-                    break;
-                }
-            }
-        }
-    });
-
-    // Tâche 2: Commandes entrantes par texte/JSON
-    let recv_task = spawn_command_task(receiver, Arc::clone(&state), client_id);
-
-    // Terminer si l'une des tâches s'arrête
-    tokio::select! {
-        _ = send_task => {},
-        _ = recv_task => {},
-    }
-
-    // 🔴 Lors de la déconnexion
-    info!("❌ [WS] Client déconnecté #{} (IP: {})", client_id, addr);
-}
-
 /// Démarre la tâche qui traite les commandes JSON d'un client.
 ///
-/// PARTAGÉE par les deux flux (MJPEG et H.264) : l'interface n'ouvre qu'une
-/// connexion, qui porte la vidéo dans un sens et le pilotage dans l'autre.
-/// Dupliquer cette boucle laisserait les deux copies diverger, et un
-/// interrupteur finirait par n'agir que sur l'un des deux flux.
+/// Séparée de l'émission vidéo parce que les deux sens de la connexion n'ont
+/// rien à voir : la vidéo descend en continu, les commandes montent par
+/// à-coups. Les traiter dans la même boucle ferait attendre un interrupteur
+/// derrière la frame en cours d'envoi.
 fn spawn_command_task(
     mut receiver: SplitStream<WebSocket>,
     state_cmd: Arc<SharedState>,
@@ -641,8 +530,6 @@ pub fn create_router(state: Arc<SharedState>) -> Router {
         .route("/play/{filename}", get(clip_player_handler))
         .route("/live", get(live_handler))
         .route("/ws", get(ws_handler))
-        .route("/ws/h264", get(h264_ws_handler))
-        .route("/api/capabilities", get(capabilities_handler))
         .route("/api/recordings", get(list_recordings_handler)) // API Liste des vidéos
         .route("/recordings/{filename}", get(recording_handler))
         .route(

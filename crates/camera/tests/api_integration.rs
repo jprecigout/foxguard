@@ -33,24 +33,11 @@ use foxguard_camera::h264::H264Stream;
 /// son `Drop` : l'appelant doit le garder vivant tant qu'il utilise le
 /// routeur.
 fn test_state_in(token: &str, dir: &std::path::Path) -> Arc<SharedState> {
-    state_with_h264(token, dir, None)
-}
-
-/// Comme [`test_state_in`], en choisissant si l'encodage H.264 est
-/// disponible : c'est lui qui décide du sort de `GET /ws/h264` et de ce
-/// qu'annonce `GET /api/capabilities`.
-fn state_with_h264(
-    token: &str,
-    dir: &std::path::Path,
-    h264: Option<Arc<H264Stream>>,
-) -> Arc<SharedState> {
-    let (tx, _rx) = tokio::sync::broadcast::channel(16);
     Arc::new(SharedState {
         detection_enabled: AtomicBool::new(false),
         recording_enabled: AtomicBool::new(false),
         api_token: token.to_string(),
-        tx,
-        h264,
+        h264: Arc::new(H264Stream::new()),
         pending_enrollment: Mutex::new(None),
         recordings_dir: dir.to_string_lossy().to_string(),
     })
@@ -158,99 +145,57 @@ async fn a_legacy_recording_is_still_served() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
-// --- Flux H.264 des interfaces web ---
+// --- Le flux vidéo ---
+
+// Il n'y a plus qu'UNE route de flux, et plus de route de capacités : la
+// caméra n'a plus qu'un format à proposer, donc l'interface n'a plus rien à
+// choisir.
+
+// Les deux tests qui suivent passent par un VRAI serveur TCP : l'upgrade
+// WebSocket exige un état bas niveau que `oneshot` ne fournit pas (voir la
+// note plus bas).
 
 #[tokio::test]
-async fn capabilities_report_no_h264_when_encoding_is_disabled() {
-    // C'est sur cette réponse que l'interface décide de se rabattre sur le
-    // MJPEG, sans tenter une connexion vouée à l'échec.
-    let (state, _dir) = test_state("secret");
-    let app = create_router(state);
-
-    let response = app
-        .oneshot(get("/api/capabilities"))
-        .await
-        .expect("réponse HTTP");
-
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .expect("corps de réponse")
-        .to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("JSON valide");
-
-    assert_eq!(json["h264"], false);
-    // Le MJPEG est toujours là : c'est le repli de l'interface.
-    assert_eq!(json["mjpeg"], true);
-}
-
-#[tokio::test]
-async fn capabilities_report_h264_when_encoding_is_enabled() {
-    let dir = tempfile::tempdir().expect("dossier temporaire");
-    let state = state_with_h264("secret", dir.path(), Some(Arc::new(H264Stream::new())));
-    let app = create_router(state);
-
-    let response = app
-        .oneshot(get("/api/capabilities"))
-        .await
-        .expect("réponse HTTP");
-
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .expect("corps de réponse")
-        .to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("JSON valide");
-
-    assert_eq!(json["h264"], true);
-}
-
-// Les trois tests qui suivent passent par un VRAI serveur TCP, comme ceux du
-// WebSocket MJPEG : l'upgrade WebSocket exige un état bas niveau que
-// `oneshot` ne fournit pas (voir la note plus bas).
-
-#[tokio::test]
-async fn the_h264_socket_is_rejected_without_a_token() {
-    // Le flux H.264 montre la même image que le MJPEG, qui est authentifié.
-    let addr = spawn_test_server_with_h264("secret", Some(Arc::new(H264Stream::new()))).await;
-    let status = ws_upgrade_status(addr, "/ws/h264").await;
+async fn the_video_socket_is_rejected_without_a_token() {
+    let addr = spawn_test_server("secret").await;
+    let status = ws_upgrade_status(addr, "/ws").await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED.as_u16());
 }
 
 #[tokio::test]
-async fn the_h264_socket_reports_503_when_encoding_is_disabled() {
-    // 503 et non 404 : la route existe, c'est l'encodage qui est éteint.
-    // L'interface sait ainsi qu'elle doit se rabattre sur le MJPEG, et non
-    // qu'elle s'est trompée d'adresse.
+async fn the_video_socket_accepts_the_upgrade_with_the_right_token() {
     let addr = spawn_test_server("secret").await;
-    let status = ws_upgrade_status(addr, "/ws/h264?token=secret").await;
-
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE.as_u16());
-}
-
-#[tokio::test]
-async fn the_h264_socket_accepts_the_upgrade_with_the_right_token() {
-    let addr = spawn_test_server_with_h264("secret", Some(Arc::new(H264Stream::new()))).await;
-    let status = ws_upgrade_status(addr, "/ws/h264?token=secret").await;
+    let status = ws_upgrade_status(addr, "/ws?token=secret").await;
 
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS.as_u16());
 }
 
 #[tokio::test]
+async fn the_capabilities_route_is_gone() {
+    // Elle existait pour annoncer lequel des deux flux était disponible. Avec
+    // un seul format, la laisser répondre entretiendrait l'idée qu'il y a
+    // encore un choix à faire.
+    let (state, _dir) = test_state("secret");
+
+    let response = create_router(state)
+        .oneshot(get("/api/capabilities"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn the_player_route_serves_a_standalone_page_for_a_clip() {
     // Cette page est le point d'accès de la timeline du manager aux clips
-    // (voir `clip_player_handler`) : elle doit être servie par la caméra, et
-    // savoir lire le format d'enregistrement maison.
+    // (voir `clip_player_handler`) : elle doit être servie par la CAMÉRA,
+    // puisque c'est chez elle que vivent les clips.
     let (state, _dir) = test_state("secret");
     let app = create_router(state);
 
     let response = app
-        .oneshot(get("/play/evt_20260918_154207123.mjpeg"))
+        .oneshot(get("/play/evt_20260918_154207123.mp4"))
         .await
         .expect("réponse HTTP");
 
@@ -278,7 +223,7 @@ async fn the_player_page_is_served_without_a_token() {
     let app = create_router(state);
 
     let response = app
-        .oneshot(get("/play/evt.mjpeg"))
+        .oneshot(get("/play/evt.mp4"))
         .await
         .expect("réponse HTTP");
 
@@ -340,9 +285,9 @@ async fn recording_download_rejects_filenames_containing_path_traversal() {
     let app = create_router(state);
 
     // ".." dans le nom de fichier : rejeté avant tout accès disque (voir
-    // `stream_mjpeg_handler`).
+    // `is_safe_recording_name`).
     let response = app
-        .oneshot(get("/recordings/..evil.mjpeg"))
+        .oneshot(get("/recordings/..evil.mp4"))
         .await
         .expect("réponse HTTP");
 
@@ -350,7 +295,7 @@ async fn recording_download_rejects_filenames_containing_path_traversal() {
 }
 
 #[tokio::test]
-async fn recording_download_rejects_non_mjpeg_extensions() {
+async fn recording_download_rejects_an_extension_that_is_not_a_recording() {
     let (state, _dir) = test_state("secret");
     let app = create_router(state);
 
@@ -368,7 +313,7 @@ async fn recording_download_returns_404_for_a_legit_but_missing_file() {
     let app = create_router(state);
 
     let response = app
-        .oneshot(get("/recordings/rec_ne_existe_pas.mjpeg"))
+        .oneshot(get("/recordings/rec_ne_existe_pas.mp4"))
         .await
         .expect("réponse HTTP");
 
@@ -389,17 +334,11 @@ async fn recording_download_returns_404_for_a_legit_but_missing_file() {
 /// Démarre `create_router` sur un vrai `TcpListener` (port éphémère) via
 /// `axum::serve`, exactement comme `src/main.rs`, et retourne son adresse.
 async fn spawn_test_server(token: &str) -> SocketAddr {
-    spawn_test_server_with_h264(token, None).await
-}
-
-/// Comme [`spawn_test_server`], en choisissant si l'encodage H.264 est
-/// disponible : c'est lui qui décide du sort de `GET /ws/h264`.
-async fn spawn_test_server_with_h264(token: &str, h264: Option<Arc<H264Stream>>) -> SocketAddr {
     // Dossier volontairement « fuité » (`keep`) : le serveur vit dans une
     // tâche détachée qui survit au test, donc le supprimer ici le lui
     // retirerait sous les pieds.
     let dir = tempfile::tempdir().expect("dossier temporaire").keep();
-    let app = create_router(state_with_h264(token, &dir, h264));
+    let app = create_router(test_state_in(token, &dir));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("liaison sur un port éphémère");
@@ -504,7 +443,7 @@ async fn recording_delete_is_rejected_without_a_token() {
     let app = create_router(state);
 
     let response = app
-        .oneshot(delete("/api/recordings/rec_20260918_120854.mjpeg"))
+        .oneshot(delete("/api/recordings/rec_20260918_120854.mp4"))
         .await
         .expect("réponse HTTP");
 
@@ -518,7 +457,7 @@ async fn recording_delete_is_rejected_with_the_wrong_token() {
 
     let response = app
         .oneshot(delete(
-            "/api/recordings/rec_20260918_120854.mjpeg?token=mauvais-jeton",
+            "/api/recordings/rec_20260918_120854.mp4?token=mauvais-jeton",
         ))
         .await
         .expect("réponse HTTP");
@@ -535,7 +474,7 @@ async fn recording_delete_rejects_path_traversal_even_with_a_valid_token() {
     let app = create_router(state);
 
     let response = app
-        .oneshot(delete("/api/recordings/..evil.mjpeg?token=secret"))
+        .oneshot(delete("/api/recordings/..evil.mp4?token=secret"))
         .await
         .expect("réponse HTTP");
 
@@ -561,9 +500,7 @@ async fn recording_delete_returns_404_for_a_legit_but_missing_file() {
     let app = create_router(state);
 
     let response = app
-        .oneshot(delete(
-            "/api/recordings/rec_ne_existe_pas.mjpeg?token=secret",
-        ))
+        .oneshot(delete("/api/recordings/rec_ne_existe_pas.mp4?token=secret"))
         .await
         .expect("réponse HTTP");
 
@@ -578,7 +515,7 @@ async fn recording_delete_removes_an_existing_file() {
     let dir = tempfile::tempdir().expect("dossier temporaire");
     let app = create_router(test_state_in("secret", dir.path()));
 
-    let name = "rec_test_suppression_20260101_000000.mjpeg";
+    let name = "rec_test_suppression_20260101_000000.mp4";
     let path = dir.path().join(name);
     std::fs::write(&path, b"contenu de test").expect("écriture du fichier de test");
     assert!(path.exists());
