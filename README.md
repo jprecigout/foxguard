@@ -388,6 +388,56 @@ plutôt qu'au jugé.
 
 ---
 
+## 🔒 Ce qui est authentifié
+
+Tout ce qui porte des IMAGES exige le jeton de `[server] api_token`, dans la
+chaîne de requête :
+
+| Route | Jeton | Pourquoi |
+| --- | --- | --- |
+| `GET /ws` | **oui** | le direct |
+| `GET /api/recordings` | **oui** | la liste des archives |
+| `GET /recordings/{fichier}` | **oui** | les octets des archives |
+| `DELETE /api/recordings/{fichier}` | **oui** | seule route destructive |
+| `POST /api/monitoring` | **oui** | coupe la surveillance |
+| `rtsp://…/stream` | **oui** si `[rtsp] require_token` | le même flux |
+| `GET /`, `/live`, `/control`, `/play/{fichier}` | non | ce sont les PAGES, et c'est la caméra qui y injecte le jeton |
+| `GET /api/monitoring` | non | ne révèle qu'un booléen : la caméra veille, ou non |
+
+> Les archives ne l'étaient pas, et c'était le trou le plus large du système :
+> le direct exigeait un jeton, mais la liste et le téléchargement
+> n'en demandaient aucun. Quiconque atteignait le port récupérait
+> l'**intégralité** des enregistrements, clips de détection compris. Refuser à
+> un inconnu la scène en direct pour lui offrir la même scène enregistrée ne
+> protégeait rien.
+
+Les quatre pages sont servies sans jeton **parce que ce sont elles qui le
+portent** : la caméra l'injecte au moment de les servir, et elles le joignent
+à leurs propres requêtes. C'est ce qui permet au manager d'afficher un clip,
+un direct ou un interrupteur dans un cadre sans jamais connaître le jeton
+d'aucune caméra (voir « La timeline, les clips et le direct »).
+
+### Ce qui reste à faire
+
+Trois limites connues, par ordre d'importance :
+
+1. **Les pages distribuent le jeton MAÎTRE.** Qui atteint le port HTTP charge
+   `/live` ou `/control` et en extrait un jeton qui donne aussi la suppression
+   des archives et l'arrêt de la surveillance. Des jetons de capacité à durée
+   limitée, émis par la caméra pour chaque page, découpleraient les trois.
+2. **Aucun TLS.** HTTP, WebSocket et RTSP en clair ; le jeton transite dans
+   l'URL à chaque requête. Le traiter par un reverse-proxy devant la caméra
+   évite d'ajouter des dépendances cryptographiques à la compilation croisée
+   ARM64 — ce que ce dépôt s'applique à éviter.
+3. **Le jeton dans la chaîne de requête.** Contrainte réelle pour RTSP et pour
+   le WebSocket du navigateur, dont aucun ne permet d'en-tête. Pour les routes
+   appelées par notre propre JavaScript, un en-tête `Authorization`
+   l'empêcherait de finir dans les journaux d'accès et l'historique du
+   navigateur. La comparaison n'est par ailleurs pas en temps constant et rien
+   ne limite le débit des tentatives.
+
+---
+
 ## 🖥️ Le manager (`crates/manager/`)
 
 Déployé sur le serveur annexe, il s'abonne au broker MQTT sur lequel les
@@ -449,8 +499,8 @@ Conséquence : l'interface du manager, servie par une autre origine, ne peut
 pas lire ces fichiers elle-même — le navigateur le lui interdit. Ouvrir les
 enregistrements de la caméra à toutes les origines
 (`Access-Control-Allow-Origin: *`) serait une bien mauvaise façon de
-contourner cette protection, d'autant que ces routes ne sont déjà pas
-authentifiées.
+contourner cette protection, d'autant qu'elle serait désormais la seule :
+les archives sont authentifiées (voir « Ce qui est authentifié »).
 
 **La caméra sert donc elle-même la page qui sait lire son format**
 (`GET /play/{fichier}`), et c'est cette page que la timeline affiche dans un
@@ -781,7 +831,7 @@ copiée à côté du binaire, et non du code qui voyage dans le crate.
 
 Partez de `camera-config-sample.toml` pour créer votre propre `camera-config.toml`.
 
-* **`[server]`** : `host`, `port`, `api_token` (jeton exigé en paramètre `?token=` pour se connecter au WebSocket et, si `[rtsp] require_token`, au flux RTSP), `public_url` (URL par laquelle cette caméra est joignable depuis un navigateur, ex. `"http://192.168.1.42:8080"` — publiée dans les événements pour que la timeline du manager offre un lien vers les clips **et vers le direct de la caméra** ; vide par défaut, auquel cas aucun lien n'est proposé).
+* **`[server]`** : `host`, `port`, `api_token` (jeton exigé en paramètre `?token=` pour le WebSocket, les enregistrements et, si `[rtsp] require_token`, le flux RTSP — voir « Ce qui est authentifié »), `public_url` (URL par laquelle cette caméra est joignable depuis un navigateur, ex. `"http://192.168.1.42:8080"` — publiée dans les événements pour que la timeline du manager offre un lien vers les clips **et vers le direct de la caméra** ; vide par défaut, auquel cas aucun lien n'est proposé).
 * **`[camera]`** : `device_index` (index du périphérique V4L2, ex. `0` pour `/dev/video0`), `name` (nom de la caméra inclus dans les événements MQTT, optionnel — `"foxguard"` par défaut).
 * **`[detection]`** : `enabled` (surveillance active au démarrage), chemins des 3 modèles ONNX (`model_path`, `model_detect_face_path`, `model_face_path`, tous dans `crates/camera/models/`), tailles d'entrée (`input_size` pour YOLO, `input_face_size` pour ArcFace), `confidence_threshold` (seuil de détection YOLO), `email_cooldown_secs` et `known_faces_dir` (dossier des photos de référence, `"known_faces"` par défaut, relatif au répertoire de travail — à renseigner en absolu pour un déploiement en conteneur ou en service systemd).
 * **`[email]`** : `enabled`, identifiants SMTP (`smtp_server`, `smtp_user`, `smtp_password`), `from_address`, `to_address`.

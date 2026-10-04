@@ -119,8 +119,10 @@ pub struct MonitoringRequest {
 ///
 /// Deux appels HTTP, eux, ne coûtent rien et ne réveillent personne.
 ///
-/// Comme les autres routes de LECTURE, elle n'est pas authentifiée. L'ÉCRITURE
-/// l'est (voir [`set_monitoring_handler`]).
+/// Elle n'est PAS authentifiée : elle ne révèle qu'un booléen — la caméra
+/// veille, ou non — et la page de pilotage doit pouvoir l'afficher avant que
+/// l'utilisateur ne touche à quoi que ce soit. L'ÉCRITURE l'est (voir
+/// [`set_monitoring_handler`]).
 async fn monitoring_handler(State(state): State<Arc<SharedState>>) -> Json<MonitoringState> {
     Json(MonitoringState {
         detection: state.detection_enabled.load(Ordering::Relaxed),
@@ -167,8 +169,35 @@ async fn set_monitoring_handler(
     .into_response()
 }
 
-/// Handler pour lister les enregistrements disponibles dans `output_record/`
-async fn list_recordings_handler(State(state): State<Arc<SharedState>>) -> Json<Vec<VideoFile>> {
+/// Vrai si la requête porte le jeton d'API de cette caméra.
+///
+/// Partagée par TOUTES les routes authentifiées, et c'est le point : une
+/// vérification plus laxiste d'un côté que de l'autre est une faille, et c'est
+/// exactement ce qui s'était produit — la suppression d'un enregistrement
+/// était protégée, son TÉLÉCHARGEMENT ne l'était pas.
+fn is_authorized(auth: &AuthQuery, state: &SharedState) -> bool {
+    auth.token.as_deref() == Some(state.api_token.as_str())
+}
+
+/// Liste des enregistrements disponibles (`GET /api/recordings?token=...`).
+///
+/// # Pourquoi les archives sont authentifiées
+///
+/// Elles ne l'étaient pas, et c'était le trou le plus large du système : le
+/// WebSocket du direct exigeait un jeton, mais cette route et le
+/// téléchargement laissaient quiconque atteignait le port récupérer
+/// l'INTÉGRALITÉ des enregistrements — y compris le clip de chaque détection.
+/// Refuser à un inconnu de voir la scène en direct pour lui offrir la même
+/// scène enregistrée ne protégeait rien.
+async fn list_recordings_handler(
+    Query(auth): Query<AuthQuery>,
+    State(state): State<Arc<SharedState>>,
+) -> Response {
+    if !is_authorized(&auth, &state) {
+        warn!("⚠️ Liste des enregistrements refusée (Token invalide).");
+        return (StatusCode::UNAUTHORIZED, "Accès refusé").into_response();
+    }
+
     let mut files = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(&state.recordings_dir) {
@@ -189,7 +218,7 @@ async fn list_recordings_handler(State(state): State<Arc<SharedState>>) -> Json<
 
     // Tri par nom décroissant (du plus récent au plus ancien)
     files.sort_by(|a, b| b.name.cmp(&a.name));
-    Json(files)
+    Json(files).into_response()
 }
 
 /// Sert un fichier d'enregistrement (`GET /recordings/{filename}`).
@@ -212,9 +241,17 @@ async fn list_recordings_handler(State(state): State<Arc<SharedState>>) -> Json<
 /// `ServeFile` ne reçoit qu'un chemin déjà sûr.
 async fn recording_handler(
     Path(filename): Path<String>,
+    Query(auth): Query<AuthQuery>,
     State(state): State<Arc<SharedState>>,
     request: axum::extract::Request,
 ) -> Response {
+    // AUTHENTIFIÉ, comme la liste : c'est ici que passent les octets des
+    // enregistrements (voir [`list_recordings_handler`] pour pourquoi).
+    if !is_authorized(&auth, &state) {
+        warn!("⚠️ Téléchargement d'un enregistrement refusé (Token invalide).");
+        return (StatusCode::UNAUTHORIZED, "Accès refusé").into_response();
+    }
+
     if !is_safe_recording_name(&filename) {
         return StatusCode::BAD_REQUEST.into_response();
     }
@@ -253,16 +290,15 @@ fn is_safe_recording_name(filename: &str) -> bool {
 ///
 /// AUTHENTIFIÉ par le même jeton que le WebSocket : c'est la seule route
 /// destructive du serveur, elle ne peut pas rester ouverte à quiconque
-/// atteint le port. (Les routes de LECTURE, elles, restent non
-/// authentifiées, comme avant — voir la note dans le README.)
+/// atteint le port. Les archives le sont désormais aussi en LECTURE (voir
+/// [`list_recordings_handler`]) ; seules les PAGES restent servies sans
+/// jeton, puisque ce sont elles qui le portent.
 async fn delete_recording_handler(
     Path(filename): Path<String>,
     Query(auth): Query<AuthQuery>,
     State(state): State<Arc<SharedState>>,
 ) -> StatusCode {
-    let is_authorized = auth.token.as_deref() == Some(state.api_token.as_str());
-
-    if !is_authorized {
+    if !is_authorized(&auth, &state) {
         warn!("⚠️ Tentative de suppression d'enregistrement rejetée (Token invalide).");
         return StatusCode::UNAUTHORIZED;
     }
@@ -478,9 +514,14 @@ fn codec_string(nals: &[Vec<u8>]) -> Option<String> {
     ))
 }
 
-/// Handler pour servir le fichier HTML de contrôle
-async fn index_handler() -> Html<&'static str> {
-    Html(include_str!("../static/controller.html"))
+/// Interface complète de la caméra (`GET /`).
+///
+/// Le jeton y est injecté au moment de servir la page, comme pour `/live` et
+/// `/control`. Il y était auparavant ÉCRIT EN DUR : changer `[server]
+/// api_token` cassait silencieusement l'interface, qui continuait d'envoyer
+/// `secret123`.
+async fn index_handler(State(state): State<Arc<SharedState>>) -> Html<String> {
+    Html(include_str!("../static/controller.html").replace(API_TOKEN_PLACEHOLDER, &state.api_token))
 }
 
 /// Page de lecture autonome d'un clip (`GET /play/{filename}`).
@@ -496,20 +537,30 @@ async fn index_handler() -> Html<&'static str> {
 /// L'interface du manager, servie par une autre origine, ne peut donc pas
 /// lire ces fichiers elle-même : le navigateur le lui interdit, et ouvrir les
 /// enregistrements à toutes les origines (`Access-Control-Allow-Origin: *`)
-/// serait une bien mauvaise façon de contourner cette protection — ces routes
-/// ne sont déjà pas authentifiées. Elle affiche donc cette page, servie par
+/// serait une bien mauvaise façon de contourner cette protection — d'autant
+/// qu'elle serait désormais la seule. Elle affiche donc cette page, servie par
 /// la caméra, dans un cadre : la politique de même origine est respectée sans
 /// rien assouplir.
 ///
 /// Et le format d'enregistrement reste connu du seul composant qui l'écrit.
+///
+/// La PAGE n'est pas authentifiée, les OCTETS le sont : le jeton y est
+/// injecté, et c'est elle qui le joint à sa requête vers
+/// `GET /recordings/{filename}` (voir [`recording_handler`]). Le manager peut
+/// donc continuer d'afficher un clip sans rien connaître du jeton.
 ///
 /// Le nom du fichier n'est PAS vérifié ici : la page est statique, elle lit
 /// elle-même son nom dans l'URL et le redemande à
 /// `GET /recordings/{filename}`, qui valide (voir [`is_safe_recording_name`]).
 /// Servir la page pour un nom invalide ne donne donc accès à rien — la
 /// requête de données qui suivra sera, elle, rejetée.
-async fn clip_player_handler(Path(_filename): Path<String>) -> Html<&'static str> {
-    Html(include_str!("../static/clip-player.html"))
+async fn clip_player_handler(
+    Path(_filename): Path<String>,
+    State(state): State<Arc<SharedState>>,
+) -> Html<String> {
+    Html(
+        include_str!("../static/clip-player.html").replace(API_TOKEN_PLACEHOLDER, &state.api_token),
+    )
 }
 
 /// Marqueur remplacé par le jeton d'API au moment de servir la page de
@@ -534,8 +585,8 @@ const API_TOKEN_PLACEHOLDER: &str = "__FOXGUARD_API_TOKEN__";
 /// capture, pas de suppression. Le manager est en lecture seule, et le
 /// pilotage d'une caméra reste sur son interface complète.
 ///
-/// Comme les autres routes de lecture, elle n'est pas authentifiée : c'est la
-/// page, pas le flux. Le WebSocket qu'elle ouvre l'est, lui.
+/// Comme les autres PAGES, elle n'est pas authentifiée : c'est la page, pas le
+/// flux. Le WebSocket qu'elle ouvre l'est, lui.
 async fn live_handler(State(state): State<Arc<SharedState>>) -> Html<String> {
     // Le jeton est injecté ici plutôt qu'écrit dans le fichier : la page est
     // embarquée dans le binaire, et une valeur en dur y obligerait à

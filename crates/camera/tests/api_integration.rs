@@ -78,7 +78,7 @@ async fn an_mp4_recording_is_served_as_a_video() {
 
     let app = create_router(test_state_in("secret", dir.path()));
     let response = app
-        .oneshot(get("/recordings/rec_20260101_000000000.mp4"))
+        .oneshot(get("/recordings/rec_20260101_000000000.mp4?token=secret"))
         .await
         .expect("réponse HTTP");
 
@@ -96,7 +96,7 @@ async fn a_recording_announces_that_it_accepts_byte_ranges() {
 
     let app = create_router(test_state_in("secret", dir.path()));
     let response = app
-        .oneshot(get("/recordings/rec_20260101_000000000.mp4"))
+        .oneshot(get("/recordings/rec_20260101_000000000.mp4?token=secret"))
         .await
         .expect("réponse HTTP");
 
@@ -110,7 +110,7 @@ async fn a_byte_range_request_returns_only_that_range() {
 
     let app = create_router(test_state_in("secret", dir.path()));
     let request = Request::builder()
-        .uri("/recordings/rec_20260101_000000000.mp4")
+        .uri("/recordings/rec_20260101_000000000.mp4?token=secret")
         .header("Range", "bytes=2-5")
         .body(Body::empty())
         .expect("requête");
@@ -138,7 +138,7 @@ async fn a_legacy_recording_is_still_served() {
 
     let app = create_router(test_state_in("secret", dir.path()));
     let response = app
-        .oneshot(get("/recordings/rec_20260101_000000000.mjpeg"))
+        .oneshot(get("/recordings/rec_20260101_000000000.mjpeg?token=secret"))
         .await
         .expect("réponse HTTP");
 
@@ -254,7 +254,7 @@ async fn recordings_list_route_returns_a_json_array() {
     let app = create_router(state);
 
     let response = app
-        .oneshot(get("/api/recordings"))
+        .oneshot(get("/api/recordings?token=secret"))
         .await
         .expect("réponse HTTP");
 
@@ -287,7 +287,7 @@ async fn recording_download_rejects_filenames_containing_path_traversal() {
     // ".." dans le nom de fichier : rejeté avant tout accès disque (voir
     // `is_safe_recording_name`).
     let response = app
-        .oneshot(get("/recordings/..evil.mp4"))
+        .oneshot(get("/recordings/..evil.mp4?token=secret"))
         .await
         .expect("réponse HTTP");
 
@@ -300,7 +300,7 @@ async fn recording_download_rejects_an_extension_that_is_not_a_recording() {
     let app = create_router(state);
 
     let response = app
-        .oneshot(get("/recordings/rapport.pdf"))
+        .oneshot(get("/recordings/rapport.pdf?token=secret"))
         .await
         .expect("réponse HTTP");
 
@@ -313,7 +313,7 @@ async fn recording_download_returns_404_for_a_legit_but_missing_file() {
     let app = create_router(state);
 
     let response = app
-        .oneshot(get("/recordings/rec_ne_existe_pas.mp4"))
+        .oneshot(get("/recordings/rec_ne_existe_pas.mp4?token=secret"))
         .await
         .expect("réponse HTTP");
 
@@ -746,4 +746,133 @@ async fn the_control_page_does_not_open_the_video_socket() {
         !html.contains("/ws?token="),
         "la page de pilotage ne doit pas s'abonner au flux vidéo"
     );
+}
+
+// --- Authentification des ARCHIVES ----------------------------------------
+//
+// C'était le trou le plus large du serveur : le WebSocket du direct exigeait
+// un jeton, mais la liste et le téléchargement des enregistrements n'en
+// demandaient aucun. Refuser à un inconnu la scène en direct pour lui offrir
+// la même scène enregistrée ne protégeait rien.
+
+#[tokio::test]
+async fn listing_the_recordings_is_rejected_without_a_token() {
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
+
+    let response = app
+        .oneshot(get("/api/recordings"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn listing_the_recordings_is_rejected_with_the_wrong_token() {
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
+
+    let response = app
+        .oneshot(get("/api/recordings?token=pasbon"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn downloading_a_recording_is_rejected_without_a_token() {
+    // Et surtout : le fichier ne doit pas filtrer dans le corps de la
+    // réponse. C'est bien le refus qui est vérifié, pas seulement le code.
+    let dir = tempfile::tempdir().expect("dossier temporaire");
+    std::fs::write(
+        dir.path().join("rec_20260101_000000000.mp4"),
+        b"des images privees",
+    )
+    .expect("écriture");
+
+    let app = create_router(test_state_in("secret", dir.path()));
+    let response = app
+        .oneshot(get("/recordings/rec_20260101_000000000.mp4"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("corps de réponse")
+        .to_bytes();
+
+    assert!(
+        !body.windows(5).any(|w| w == b"image"),
+        "le contenu de l'enregistrement ne doit pas filtrer"
+    );
+}
+
+#[tokio::test]
+async fn downloading_a_recording_is_rejected_with_the_wrong_token() {
+    let dir = tempfile::tempdir().expect("dossier temporaire");
+    std::fs::write(dir.path().join("rec_20260101_000000000.mp4"), b"faux mp4").expect("écriture");
+
+    let app = create_router(test_state_in("secret", dir.path()));
+    let response = app
+        .oneshot(get("/recordings/rec_20260101_000000000.mp4?token=pasbon"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn the_token_is_checked_before_the_file_name_is_even_looked_at() {
+    // Un nom invalide répond 400 quand le jeton est bon. Sans jeton, c'est
+    // 401 : sinon la route distinguerait, pour un inconnu, un nom qu'elle
+    // accepte d'un nom qu'elle rejette.
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
+
+    let response = app
+        .oneshot(get("/recordings/rapport.pdf"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn the_pages_that_read_archives_carry_the_token_themselves() {
+    // L'interface complète et le lecteur de clip demandent tous deux des
+    // octets d'archive : ils doivent donc porter le jeton, comme `/live`.
+    // Il était ÉCRIT EN DUR dans `controller.html` — changer `api_token`
+    // cassait l'interface en silence.
+    let (state, _dir) = test_state("jeton-de-cette-camera");
+    let app = create_router(Arc::clone(&state));
+
+    for route in ["/", "/play/evt.mp4"] {
+        let response = app.clone().oneshot(get(route)).await.expect("réponse HTTP");
+
+        assert_eq!(response.status(), StatusCode::OK, "route {route}");
+
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("corps de réponse")
+            .to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).expect("HTML en UTF-8");
+
+        assert!(html.contains("jeton-de-cette-camera"), "route {route}");
+        assert!(
+            !html.contains("__FOXGUARD_API_TOKEN__"),
+            "le marqueur doit avoir été remplacé sur {route}"
+        );
+        assert!(
+            !html.contains("secret123"),
+            "aucun jeton en dur ne doit subsister dans {route}"
+        );
+    }
 }

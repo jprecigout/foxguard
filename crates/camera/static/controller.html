@@ -527,7 +527,11 @@
     </div>
 
     <script>
-        const API_TOKEN = "secret123";
+        // Injecté par la caméra au moment de servir la page (voir
+        // `index_handler` dans src/api.rs). Il y était ÉCRIT EN DUR : changer
+        // `[server] api_token` cassait alors silencieusement cette interface,
+        // qui continuait d'envoyer l'ancienne valeur.
+        const API_TOKEN = "__FOXGUARD_API_TOKEN__";
 
         let ws;
         let isSystemActive = false;
@@ -805,7 +809,11 @@
         async function loadRecordings() {
             const listEl = document.getElementById('recordingsList');
             try {
-                const res = await fetch('/api/recordings');
+                // Les archives sont AUTHENTIFIÉES : la liste comme les
+                // octets (voir `list_recordings_handler` côté Rust).
+                const res = await fetch(
+                    `/api/recordings?token=${encodeURIComponent(API_TOKEN)}`
+                );
                 if (!res.ok) throw new Error('Erreur HTTP ' + res.status);
 
                 const files = await res.json();
@@ -946,7 +954,8 @@
             // La route sert le fichier par PLAGES D'OCTETS (`ServeFile` côté
             // Rust) : c'est ce qui permet de se déplacer dans un
             // enregistrement sans le télécharger en entier.
-            video.src = `/recordings/${encodeURIComponent(filename)}`;
+            video.src = `/recordings/${encodeURIComponent(filename)}`
+                + `?token=${encodeURIComponent(API_TOKEN)}`;
             video.play().catch(() => { /* lecture refusée : les contrôles restent */ });
 
             if (title) {
