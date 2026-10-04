@@ -1,8 +1,13 @@
 //! Détection d'objets ONNX (YOLOv8), restreinte aux classes personne / chat
 //! / chien.
+//!
+//! L'entrée du modèle est un CARRÉ, alors que la caméra filme en 4:3. La
+//! frame y est donc mise en lettres plutôt qu'écrasée (voir [`letterbox`]),
+//! et les coordonnées prédites sont ramenées ensuite dans l'image d'origine
+//! (voir [`Letterboxed::to_source`]).
 
 use anyhow::Result;
-use image::{RgbImage, imageops::FilterType};
+use image::{Rgb, RgbImage, imageops::FilterType};
 use rayon::prelude::*;
 use std::sync::Arc;
 use tract_onnx::prelude::*;
@@ -96,6 +101,108 @@ pub const COCO_CLASSES: &[&str] = &[
     "toothbrush",
 ];
 
+/// Gris de remplissage des bandes du letterbox.
+///
+/// 114 sur les trois canaux : c'est la valeur que la chaîne d'entraînement de
+/// YOLOv8 utilise pour ses propres bandes. Un noir franc créerait aux bords
+/// un contraste que le modèle n'a jamais vu à l'entraînement.
+const LETTERBOX_FILL: Rgb<u8> = Rgb([114, 114, 114]);
+
+/// Frame mise à la taille d'entrée du modèle, et de quoi en ramener les
+/// prédictions vers l'image d'origine.
+struct Letterboxed {
+    /// Canevas carré soumis au modèle.
+    image: RgbImage,
+    /// Facteur appliqué à l'image d'origine pour la faire tenir dans le
+    /// canevas.
+    scale: f32,
+    /// Largeur de la bande gauche, en pixels du canevas.
+    pad_x: f32,
+    /// Hauteur de la bande haute, en pixels du canevas.
+    pad_y: f32,
+    source_width: f32,
+    source_height: f32,
+}
+
+/// Met la frame au format carré attendu par YOLO en CONSERVANT son cadrage :
+/// elle est mise à l'échelle par le plus contraignant des deux facteurs, puis
+/// centrée dans un carré dont le reste est rempli de [`LETTERBOX_FILL`].
+///
+/// # Pourquoi pas un simple redimensionnement
+///
+/// Un `resize` direct vers un carré ÉCRASE le 4:3 de la caméra : en 640x480
+/// vers 640x640, toute la scène est étirée d'un tiers en hauteur. Or YOLOv8 a
+/// été entraîné sur des images letterboxées — il n'a jamais vu de silhouettes
+/// déformées, et une personne allongée verticalement ressemble moins à ce
+/// qu'il connaît. Les scores baissent, et les détections les plus fragiles
+/// (personne lointaine, animal de dos) passent sous le seuil de confiance.
+///
+/// Le filtre est `Triangle` et non `Nearest` : un échantillonnage ponctuel
+/// jette plus de la moitié des pixels quand l'image est réduite, et c'est
+/// précisément sur les petits objets — ceux qui comptent ici — qu'il efface
+/// le détail dont le modèle a besoin. Quand aucune mise à l'échelle n'est
+/// nécessaire (caméra 640x480 et modèle 640, le cas nominal), les lignes sont
+/// recopiées telles quelles et il n'y a aucun rééchantillonnage.
+fn letterbox(img: &RgbImage, size: u32) -> Letterboxed {
+    let (source_width, source_height) = (img.width(), img.height());
+
+    let scale = (size as f32 / source_width as f32).min(size as f32 / source_height as f32);
+
+    let scaled_width = ((source_width as f32 * scale).round() as u32).clamp(1, size);
+    let scaled_height = ((source_height as f32 * scale).round() as u32).clamp(1, size);
+
+    let pad_x = (size - scaled_width) / 2;
+    let pad_y = (size - scaled_height) / 2;
+
+    let mut canvas = RgbImage::from_pixel(size, size, LETTERBOX_FILL);
+
+    if (scaled_width, scaled_height) == (source_width, source_height) {
+        image::imageops::overlay(&mut canvas, img, pad_x as i64, pad_y as i64);
+    } else {
+        let scaled =
+            image::imageops::resize(img, scaled_width, scaled_height, FilterType::Triangle);
+        image::imageops::overlay(&mut canvas, &scaled, pad_x as i64, pad_y as i64);
+    }
+
+    Letterboxed {
+        image: canvas,
+        scale,
+        pad_x: pad_x as f32,
+        pad_y: pad_y as f32,
+        source_width: source_width as f32,
+        source_height: source_height as f32,
+    }
+}
+
+impl Letterboxed {
+    /// Ramène une boîte prédite par le modèle (centre et dimensions, dans
+    /// l'espace du canevas) vers les coordonnées de l'image d'origine.
+    ///
+    /// Les bandes sont retirées, l'échelle défaite, et le résultat est rogné
+    /// aux bords de l'image : un modèle prédit volontiers une boîte qui
+    /// dépasse du cadre pour une personne coupée par un bord, et une
+    /// coordonnée hors image ferait dessiner l'incrustation dans le vide
+    /// (voir `crate::capture::overlay`) comme elle ferait recadrer la
+    /// vignette sur rien.
+    ///
+    /// Retourne `None` pour une boîte qui ne retombe pas sur au moins un
+    /// pixel — celle qui tiendrait entièrement dans une bande, par exemple.
+    fn to_source(&self, cx: f32, cy: f32, w: f32, h: f32) -> Option<(u32, u32, u32, u32)> {
+        let to_source_x = |x: f32| ((x - self.pad_x) / self.scale).clamp(0.0, self.source_width);
+        let to_source_y = |y: f32| ((y - self.pad_y) / self.scale).clamp(0.0, self.source_height);
+
+        let left = to_source_x(cx - w / 2.0);
+        let right = to_source_x(cx + w / 2.0);
+        let top = to_source_y(cy - h / 2.0);
+        let bottom = to_source_y(cy + h / 2.0);
+
+        let width = (right - left) as u32;
+        let height = (bottom - top) as u32;
+
+        (width > 0 && height > 0).then_some((left as u32, top as u32, width, height))
+    }
+}
+
 /// Détecteur d'objets ONNX (YOLOv8), restreint aux classes personne/chat/chien.
 pub struct ObjectDetector {
     model: Arc<TypedSimplePlan>,
@@ -114,10 +221,13 @@ impl ObjectDetector {
     /// Détection ultra-rapide et vectorisée avec ndarray et Rayon
     pub fn detect(&self, img: &RgbImage) -> Result<Vec<BoundingBox>> {
         let size = self.config.input_size;
-        let resized = image::imageops::resize(img, size, size, FilterType::Nearest);
+
+        // Mise en lettres, et non redimensionnement : le modèle attend un
+        // carré, la caméra filme en 4:3 (voir [`letterbox`]).
+        let letterboxed = letterbox(img, size);
 
         // Conversion et normalisation SIMD via ndarray
-        let raw_u8 = resized.as_raw();
+        let raw_u8 = letterboxed.image.as_raw();
         let nd_u8 =
             tract_ndarray::ArrayView::from_shape((size as usize, size as usize, 3), raw_u8)?;
         let nd_f32 = nd_u8.mapv(|x| x as f32 / 255.0);
@@ -136,11 +246,6 @@ impl ObjectDetector {
         }
 
         let num_anchors = shape[2];
-        let img_width = img.width() as f32;
-        let img_height = img.height() as f32;
-
-        let scale_x = img_width / size as f32;
-        let scale_y = img_height / size as f32;
 
         // Définition des classes autorisées pour la détection (personne, chat, chien)
         let allowed_classes = ["person", "cat", "dog"];
@@ -177,10 +282,9 @@ impl ObjectDetector {
                     return None;
                 }
 
-                let x = ((cx - w / 2.0) * scale_x).max(0.0) as u32;
-                let y = ((cy - h / 2.0) * scale_y).max(0.0) as u32;
-                let width = (w * scale_x) as u32;
-                let height = (h * scale_y) as u32;
+                // Espace du canevas -> image d'origine : bandes retirées,
+                // échelle défaite, débordements rognés.
+                let (x, y, width, height) = letterboxed.to_source(cx, cy, w, h)?;
 
                 Some(BoundingBox {
                     x,
@@ -254,6 +358,131 @@ mod tests {
             label: label.to_string(),
             confidence,
         }
+    }
+
+    /// Image unie, pour distinguer les pixels d'origine des bandes.
+    fn filled(width: u32, height: u32, color: [u8; 3]) -> RgbImage {
+        RgbImage::from_pixel(width, height, Rgb(color))
+    }
+
+    // --- letterbox ---
+
+    #[test]
+    fn letterbox_keeps_the_4_3_framing_and_pads_top_and_bottom() {
+        // Le cas nominal : caméra 640x480, modèle 640. L'image tient en
+        // largeur, et les 160 lignes manquantes se répartissent en deux
+        // bandes de 80.
+        let boxed = letterbox(&filled(640, 480, [10, 20, 30]), 640);
+
+        assert_eq!(boxed.image.dimensions(), (640, 640));
+        assert_eq!(boxed.scale, 1.0);
+        assert_eq!(boxed.pad_x, 0.0);
+        assert_eq!(boxed.pad_y, 80.0);
+    }
+
+    #[test]
+    fn the_bands_carry_the_training_gray_and_the_image_its_own_pixels() {
+        let boxed = letterbox(&filled(640, 480, [10, 20, 30]), 640);
+
+        // Bande haute, bande basse : le gris de l'entraînement.
+        assert_eq!(*boxed.image.get_pixel(320, 0), LETTERBOX_FILL);
+        assert_eq!(*boxed.image.get_pixel(320, 639), LETTERBOX_FILL);
+
+        // Entre les deux, l'image, intacte : à l'échelle 1 il n'y a eu aucun
+        // rééchantillonnage.
+        assert_eq!(*boxed.image.get_pixel(320, 320), Rgb([10, 20, 30]));
+        assert_eq!(*boxed.image.get_pixel(0, 80), Rgb([10, 20, 30]));
+    }
+
+    #[test]
+    fn a_landscape_frame_larger_than_the_model_is_scaled_down_not_squashed() {
+        // 1280x720 vers 640 : le facteur est celui de la LARGEUR (0.5), pas
+        // celui de la hauteur, sans quoi l'image déborderait du canevas.
+        let boxed = letterbox(&filled(1280, 720, [1, 2, 3]), 640);
+
+        assert_eq!(boxed.scale, 0.5);
+        assert_eq!(boxed.pad_x, 0.0);
+        assert_eq!(boxed.pad_y, 140.0);
+        assert_eq!(boxed.image.dimensions(), (640, 640));
+    }
+
+    #[test]
+    fn a_portrait_frame_is_padded_left_and_right() {
+        let boxed = letterbox(&filled(480, 640, [1, 2, 3]), 640);
+
+        assert_eq!(boxed.pad_x, 80.0);
+        assert_eq!(boxed.pad_y, 0.0);
+    }
+
+    #[test]
+    fn an_already_square_frame_gets_no_band_at_all() {
+        let boxed = letterbox(&filled(640, 640, [7, 7, 7]), 640);
+
+        assert_eq!(boxed.pad_x, 0.0);
+        assert_eq!(boxed.pad_y, 0.0);
+        assert_eq!(*boxed.image.get_pixel(0, 0), Rgb([7, 7, 7]));
+    }
+
+    // --- Letterboxed::to_source ---
+
+    #[test]
+    fn a_box_over_the_whole_image_maps_back_to_the_whole_image() {
+        let boxed = letterbox(&filled(640, 480, [0, 0, 0]), 640);
+
+        // Dans l'espace du canevas, l'image occupe y ∈ [80, 560] : une boîte
+        // qui l'épouse exactement doit redonner l'image entière.
+        assert_eq!(
+            boxed.to_source(320.0, 320.0, 640.0, 480.0),
+            Some((0, 0, 640, 480))
+        );
+    }
+
+    #[test]
+    fn the_bands_are_removed_from_the_vertical_coordinates() {
+        let boxed = letterbox(&filled(640, 480, [0, 0, 0]), 640);
+
+        // Boîte de 100x100 centrée sur le canevas : horizontalement
+        // inchangée, verticalement remontée des 80 lignes de la bande haute.
+        assert_eq!(
+            boxed.to_source(320.0, 320.0, 100.0, 100.0),
+            Some((270, 190, 100, 100))
+        );
+    }
+
+    #[test]
+    fn the_scale_is_undone_on_a_frame_larger_than_the_model() {
+        // 1280x720 réduit de moitié : une boîte de 100x100 dans le canevas
+        // vaut 200x200 dans l'image d'origine.
+        let boxed = letterbox(&filled(1280, 720, [0, 0, 0]), 640);
+
+        assert_eq!(
+            boxed.to_source(320.0, 320.0, 100.0, 100.0),
+            Some((540, 260, 200, 200))
+        );
+    }
+
+    #[test]
+    fn a_box_overflowing_the_frame_is_cropped_to_its_edges() {
+        // Une personne coupée par le bord gauche : le modèle prédit volontiers
+        // une boîte qui sort du cadre. Elle ne doit pas sortir de l'image.
+        let boxed = letterbox(&filled(640, 480, [0, 0, 0]), 640);
+
+        let (x, y, width, height) = boxed
+            .to_source(0.0, 320.0, 200.0, 200.0)
+            .expect("la boîte recouvre une partie de l'image");
+
+        assert_eq!((x, y), (0, 140));
+        assert_eq!(width, 100, "la moitié hors cadre est rognée");
+        assert_eq!(height, 200);
+    }
+
+    #[test]
+    fn a_box_entirely_inside_a_band_is_dropped() {
+        // Une prédiction qui ne tombe que dans le gris ne désigne aucun pixel
+        // de la caméra : la retenir ferait une boîte vide sur le flux.
+        let boxed = letterbox(&filled(640, 480, [0, 0, 0]), 640);
+
+        assert_eq!(boxed.to_source(320.0, 20.0, 40.0, 40.0), None);
     }
 
     #[test]

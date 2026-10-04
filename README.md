@@ -112,8 +112,8 @@ de travail.
   * **`clips.rs`** : Clips vidéo d'événement — tampon circulaire de pré-enregistrement et écriture du clip autour de chaque détection.
   * **`codec.rs`** : Décodage YUYV → RGB, parallélisé avec Rayon.
   * **`recording.rs`** : Écriture des enregistrements et des clips en MP4 fragmenté, avec une durée réelle par image.
-  * **`capture_loop.rs`** : Boucle principale de lecture V4L2 — incrustation des boîtes, alerte e-mail, alimentation des clips, encodage H.264, enregistrement disque et diffusion WebSocket. Rien n'y est encodé tant que personne n'en a l'usage, et la frame n'y est décodée **qu'une fois et que si quelqu'un en a besoin** — sur un Raspberry Pi, qui fournit du YUYV, le chemin nominal ne la décode donc pas du tout.
-* **`crates/camera/src/api.rs`** : Routage Axum, page de contrôle (`GET /`), vue en direct seule (`GET /live`) et lecteur d'un enregistrement (`GET /play/{filename}`), WebSocket vidéo H.264 authentifié par jeton (`GET /ws?token=...`), qui porte la vidéo dans un sens et les commandes JSON dans l'autre (`set_monitoring`, `set_detection`, `set_recording`, `capture_reference`), liste (`GET /api/recordings`), téléchargement (`GET /recordings/{filename}`, délégué à `ServeFile` donc servi par plages d'octets, ce dont un `<video>` a besoin pour se déplacer dans un MP4) et suppression (`DELETE /api/recordings/{filename}?token=...`, seule route destructive, authentifiée par le même jeton que le WebSocket) des enregistrements.
+  * **`capture_loop.rs`** : Boucle principale de lecture V4L2 — incrustation des boîtes, alerte e-mail, alimentation des clips, encodage H.264, enregistrement disque et diffusion WebSocket. Rien n'y est encodé tant que personne n'en a l'usage, et la frame n'y est décodée **qu'une fois et que si quelqu'un en a besoin** — sur un Raspberry Pi, qui fournit du YUYV, le chemin nominal ne la décode donc pas du tout. C'est aussi là que la **cadence de la reconnaissance** est décidée (250 ms), avant la copie de la frame : le worker ne reçoit que les frames qu'il va réellement analyser.
+* **`crates/camera/src/api.rs`** : Routage Axum, page de contrôle (`GET /`), vue en direct seule (`GET /live`), interrupteur de surveillance seul (`GET /control`) et lecteur d'un enregistrement (`GET /play/{filename}`), WebSocket vidéo H.264 authentifié par jeton (`GET /ws?token=...`), qui porte la vidéo dans un sens et les commandes JSON dans l'autre (`set_monitoring`, `set_detection`, `set_recording`, `capture_reference`), état et pilotage de la surveillance en HTTP (`GET /api/monitoring`, `POST /api/monitoring?token=...`, voir « Le pilotage depuis le manager »), liste (`GET /api/recordings`), téléchargement (`GET /recordings/{filename}`, délégué à `ServeFile` donc servi par plages d'octets, ce dont un `<video>` a besoin pour se déplacer dans un MP4) et suppression (`DELETE /api/recordings/{filename}?token=...`, authentifiée par le même jeton que le WebSocket) des enregistrements.
 * **`crates/camera/src/h264/`** : Encodage H.264 du flux (openh264), sans aucune connaissance du réseau.
   * **`i420.rs`** : Conversion vers le format d'entrée de l'encodeur, depuis le YUYV brut de la caméra (chemin le moins coûteux) ou depuis une image RGB déjà incrustée des boîtes de détection.
   * **`encoder.rs`** : L'encodeur lui-même, les unités d'accès produites et les jeux de paramètres (SPS/PPS).
@@ -128,7 +128,7 @@ de travail.
   * **`sdp.rs`** : Description du flux renvoyée à un `DESCRIBE`.
   * **`rtp.rs`** : Empaquetage des frames en paquets RTP (RFC 3550 / 6184, fragmentation FU-A comprise) et rapports RTCP.
 * **`crates/camera/src/vision/`** : Pipeline de vision par ordinateur, un fichier par étape.
-  * **`object_detector.rs`** : `ObjectDetector` (YOLOv8), restreint aux classes personne / chat / chien.
+  * **`object_detector.rs`** : `ObjectDetector` (YOLOv8), restreint aux classes personne / chat / chien. La frame y est mise en **letterbox** (bandes grises) et non écrasée vers le carré d'entrée du modèle : YOLOv8 a été entraîné ainsi, et déformer le 4:3 de la caméra lui présente des silhouettes qu'il n'a jamais vues.
   * **`face_detector.rs`** : `FaceDetectorYuNet`, détection et alignement de visage (recadré en 112x112).
   * **`face_recognition.rs`** : `FaceEmbedder`, empreinte ArcFace / MobileFaceNet et comparaison des identités par similarité cosinus.
   * **`model.rs`** : Chargement ONNX mutualisé par les trois modèles ci-dessus.
@@ -143,6 +143,7 @@ de travail.
 * **`crates/camera/static/controller.html`** : Interface utilisateur web — flux vidéo H.264 décodé par WebCodecs, interrupteurs, capture de photo de référence, liste et lecture des enregistrements (un `<video>` natif, les enregistrements étant des MP4).
 * **`crates/camera/static/clip-player.html`** : Lecteur autonome d'un enregistrement, servi par `GET /play/{fichier}`. Un `<video>` natif suffit, les enregistrements étant des MP4 ordinaires.
 * **`crates/camera/static/live.html`** : Vue en direct SEULE, servie par `GET /live`. C'est par elle que l'interface du manager affiche le direct d'une caméra, sans jamais recevoir son jeton d'API (voir « La timeline, les clips et le direct » plus bas).
+* **`crates/camera/static/control.html`** : Interrupteur de surveillance SEUL, servi par `GET /control`. Même mécanique que `live.html`, et pour la même raison : c'est par elle que l'interface du manager active ou coupe la surveillance d'une caméra, sans jamais recevoir son jeton (voir « Le pilotage depuis le manager » plus bas). Elle passe par `GET`/`POST /api/monitoring` et **n'ouvre pas le WebSocket** : s'y abonner démarrerait l'encodage H.264 pour une page qui n'affiche aucune image.
 * **`crates/camera/assets/logo.svg`** : Logo FoxGuard — affiché dans ce README et embarqué dans le binaire (`include_bytes!`) pour les e-mails d'alerte.
 * **`known_faces/`** : Photos de référence pour la reconnaissance faciale, nommées `<nom>_<horodatage>.jpg` (plusieurs fichiers possibles par personne).
 * **`output_record/`** : Enregistrements vidéo générés par l'application, en MP4 fragmenté (voir « Les enregistrements »).
@@ -401,6 +402,11 @@ caméras publient et expose leur historique :
 | `GET /api/cameras` | caméras ayant émis au moins un événement encore en mémoire |
 | `GET /` | interface React (`[server] ui_dir`) |
 
+Le manager n'a **aucune route d'écriture** : il agrège et expose. Les caméras
+renvoyées par `GET /api/cameras` portent l'adresse de leur direct (`live_url`)
+et de leur interrupteur de surveillance (`control_url`) — deux pages servies
+par la caméra elle-même (voir « Le pilotage depuis le manager »).
+
 Les événements renvoyés portent un identifiant et des URL de média prêtes à
 l'emploi (`thumbnail_url`, `clip_url`), toutes deux absentes quand il n'y a
 rien à montrer. La liste ne transporte **jamais** les octets des vignettes :
@@ -468,6 +474,43 @@ joignable depuis un navigateur — elle ne peut pas la deviner :
 [server]
 public_url = "http://192.168.1.42:8080"
 ```
+
+### Le pilotage depuis le manager
+
+La timeline propose aussi, par caméra, un bouton **« 🛡 Surveillance »** qui
+active ou coupe sa détection et son enregistrement.
+
+**Le manager ne le fait pourtant pas lui-même**, et c'est le point de
+conception : il reste sans aucune route d'écriture. Le pilotage d'une caméra
+est authentifié par son jeton d'API, et le lui confier voudrait dire recopier
+le jeton de chaque caméra dans sa base de données puis dans une page web —
+exactement ce que le direct s'applique à éviter, pour une écriture cette fois.
+
+La caméra sert donc **sa propre page d'interrupteur** (`GET /control`), que le
+manager affiche dans le même cadre que le direct et les clips. Elle injecte
+elle-même son jeton dans la page, et l'interrupteur appelle
+`POST /api/monitoring?token=...` sur la caméra. Le manager ne fait qu'indiquer
+l'adresse (`control_url`), au même titre que `live_url`.
+
+Deux détails qui comptent :
+
+* **Cette page n'ouvre pas le WebSocket vidéo**, alors que la commande
+  `set_monitoring` y existe déjà. S'abonner au WebSocket est précisément ce qui
+  *démarre* l'encodage H.264 : une page réduite à un bouton ferait tourner
+  l'encodeur logiciel — le poste de dépense le plus lourd du système — pour une
+  image que personne ne regarde. Deux requêtes HTTP ne réveillent personne.
+* **L'interface complète de la caméra relit l'état au chargement**
+  (`GET /api/monitoring`). Son interrupteur ne connaissait que ses propres
+  clics ; maintenant que la surveillance se bascule aussi depuis le manager, il
+  afficherait sinon « éteint » sur une caméra qui veille — le pire sens dans
+  lequel se tromper.
+
+> ⚠️ Comme `/live`, la page `/control` n'est **pas authentifiée** et porte le
+> jeton en clair : qui atteint le port HTTP de la caméra peut la charger, donc
+> couper sa surveillance. C'était déjà le modèle de `/live` — le port d'une
+> caméra n'est pas destiné à être exposé tel quel sur un réseau hostile — mais
+> la conséquence est plus lourde ici, puisqu'il s'agit d'une écriture. La route
+> `POST /api/monitoring`, elle, exige bien le jeton.
 
 Laissée vide, ni lecture ni direct ne sont proposés : mieux vaut pas de lien
 qu'un lien mort. La vignette, elle, reste visible dans tous les cas.
@@ -1011,7 +1054,7 @@ cadre noir. Le pilotage et les enregistrements, eux, restent accessibles.
 
 Utilisez l'interface pour :
 
-* Activer ou désactiver la surveillance (détection IA + enregistrement).
+* Activer ou désactiver la surveillance (détection IA + enregistrement) — aussi faisable depuis l'interface du manager, voir « Le pilotage depuis le manager ».
 * Capturer une photo de référence webcam pour la reconnaissance faciale (carte « 📸 Photo de référence »), pour un nom donné ; chaque capture s'ajoute aux précédentes pour ce nom.
 * Consulter, actualiser, relire et supprimer les enregistrements vidéo sauvegardés.
 

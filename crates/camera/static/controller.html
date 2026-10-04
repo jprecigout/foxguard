@@ -715,6 +715,30 @@
             };
         }
 
+        /**
+         * Aligne l'interrupteur sur l'état RÉEL de la caméra.
+         *
+         * La surveillance se pilote désormais aussi depuis l'interface du
+         * manager, qui passe par `POST /api/monitoring` (voir `control.html`).
+         * Un interrupteur qui ne connaîtrait que ses propres clics afficherait
+         * donc « éteint » sur une caméra qui veille — le pire sens dans lequel
+         * se tromper pour un système de surveillance.
+         */
+        async function syncMonitoringState() {
+            try {
+                const response = await fetch('/api/monitoring');
+                if (!response.ok) return;
+
+                const state = await response.json();
+                isSystemActive = Boolean(state.detection);
+                updateSystemUI(isSystemActive);
+            } catch (err) {
+                // La page vient de la caméra : si elle ne répond pas, le reste
+                // de l'interface le signalera déjà bien assez.
+                console.error('Lecture de la surveillance impossible :', err);
+            }
+        }
+
         function activateMonitoringSystem() {
             isSystemActive = !isSystemActive;
 
@@ -932,6 +956,7 @@
 
         startStream();
         loadRecordings();
+        syncMonitoringState();
     </script>
 </body>
 

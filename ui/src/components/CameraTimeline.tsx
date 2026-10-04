@@ -152,6 +152,7 @@ export function CameraTimeline({
   onSelect,
   onPlay,
   onWatchLive,
+  onControl,
 }: {
   day: string;
   cameraDay: CameraDay;
@@ -159,6 +160,7 @@ export function CameraTimeline({
   onSelect: (id: number) => void;
   onPlay: (url: string, title: string) => void;
   onWatchLive: (url: string, camera: string) => void;
+  onControl: (url: string, camera: string) => void;
 }) {
   // La pellicule se lit dans le sens du temps, alors que l'API renvoie du plus
   // récent au plus ancien (l'ordre d'une liste). On la retourne donc, sans
@@ -181,6 +183,20 @@ export function CameraTimeline({
             title={`Voir le direct de ${cameraDay.camera}`}
           >
             ● Direct
+          </button>
+        )}
+
+        {/* L'interrupteur de surveillance, lui aussi servi par la caméra
+            (voir `CameraFrameDialog` pour pourquoi le manager n'en pilote
+            aucune lui-même). Même condition que le direct : sans URL
+            publique déclarée, le manager ne sait pas où est la caméra. */}
+        {cameraDay.controlUrl && (
+          <button
+            className="control"
+            onClick={() => onControl(cameraDay.controlUrl!, cameraDay.camera)}
+            title={`Activer ou couper la surveillance de ${cameraDay.camera}`}
+          >
+            🛡 Surveillance
           </button>
         )}
 

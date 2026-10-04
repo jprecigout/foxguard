@@ -380,6 +380,23 @@ async fn a_camera_exposes_the_url_of_its_live_view() {
 }
 
 #[tokio::test]
+async fn a_camera_exposes_the_url_of_its_monitoring_switch() {
+    // Le manager indique OÙ est l'interrupteur, il ne le bascule pas : il n'a
+    // aucune route d'écriture, et pas le jeton de la caméra.
+    let repo = repo_or_skip!();
+    repo.record(&event("salon", None).with_base_url("http://192.168.1.42:8080"))
+        .await
+        .expect("écriture");
+
+    let body = get_json(repo, "/api/cameras").await;
+
+    assert_eq!(
+        body[0]["control_url"].as_str(),
+        Some("http://192.168.1.42:8080/control")
+    );
+}
+
+#[tokio::test]
 async fn a_camera_without_a_public_url_exposes_no_live_link() {
     let repo = repo_or_skip!();
     repo.record(&event("salon", None)).await.expect("écriture");
@@ -387,6 +404,7 @@ async fn a_camera_without_a_public_url_exposes_no_live_link() {
     let body = get_json(repo, "/api/cameras").await;
 
     assert!(body[0]["live_url"].is_null());
+    assert!(body[0]["control_url"].is_null());
 }
 
 #[tokio::test]

@@ -193,6 +193,18 @@ button.live:hover:not(:disabled) {
   background: rgba(229, 57, 53, 0.14);
 }
 
+/* Interrupteur de surveillance d'une caméra. Volontairement neutre, là où le
+   direct est rouge : le bouton ne dit pas l'état de la surveillance, il ouvre
+   la page qui le dit (et qui, elle, le colore). */
+button.control {
+  font-size: 0.78rem;
+  padding: 3px 10px;
+}
+
+button.control:hover:not(:disabled) {
+  background: rgba(224, 224, 224, 0.1);
+}
+
 /* --- Timeline : bande de 24 heures -----------------------------------
  *
  * Une piste en position relative, dans laquelle graduations, marques et

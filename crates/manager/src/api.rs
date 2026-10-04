@@ -1,7 +1,9 @@
 //! API HTTP de consultation du manager, et service du bundle de l'interface.
 //!
 //! En LECTURE SEULE : le manager agrège et expose, il ne pilote aucune
-//! caméra. Le pilotage reste sur l'interface embarquée de chaque caméra.
+//! caméra. Le pilotage reste sur l'interface embarquée de chaque caméra — y
+//! compris l'interrupteur de surveillance, dont le manager ne fait que donner
+//! l'adresse (voir [`CameraInfo::control_url`]).
 
 use std::sync::Arc;
 
@@ -125,6 +127,17 @@ pub struct CameraInfo {
     /// est authentifié par un jeton que le manager n'a pas — et qu'il n'a
     /// aucune raison d'avoir (voir `live_handler` côté caméra).
     pub live_url: Option<String>,
+
+    /// URL de la page de PILOTAGE de la surveillance de cette caméra, ou
+    /// `null` si elle n'a pas déclaré son URL publique.
+    ///
+    /// Elle pointe elle aussi vers la caméra, et le manager reste donc SANS
+    /// route d'écriture : il indique où se trouve l'interrupteur, il ne le
+    /// bascule pas. Confier le pilotage au manager voudrait dire recopier le
+    /// jeton d'API de chaque caméra dans cette base de données, ce qui
+    /// dégraderait le modèle de sécurité de tout le système pour un bouton
+    /// (voir `control_handler` côté caméra).
+    pub control_url: Option<String>,
 }
 
 impl EventRecord {
@@ -250,12 +263,17 @@ async fn cameras_handler(State(state): State<Arc<AppState>>) -> Response {
         Ok(cameras) => Json(
             cameras
                 .into_iter()
-                .map(|camera| CameraInfo {
-                    live_url: camera
+                .map(|camera| {
+                    let base = camera
                         .base_url
                         .as_deref()
-                        .map(|base| format!("{}/live", base.trim_end_matches('/'))),
-                    name: camera.name,
+                        .map(|base| base.trim_end_matches('/').to_string());
+
+                    CameraInfo {
+                        live_url: base.as_deref().map(|base| format!("{base}/live")),
+                        control_url: base.as_deref().map(|base| format!("{base}/control")),
+                        name: camera.name,
+                    }
                 })
                 .collect::<Vec<_>>(),
         )

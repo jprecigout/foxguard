@@ -226,6 +226,15 @@ impl DetectionEvent {
         Some(format!("{}/live", self.camera_base()?))
     }
 
+    /// URL de la page de PILOTAGE de la surveillance de la caméra émettrice.
+    ///
+    /// Servie par la caméra, comme le direct et pour la même raison : c'est
+    /// elle qui détient le jeton d'API, et il n'a aucune raison de voyager
+    /// jusqu'au manager (voir `control_handler` côté caméra).
+    pub fn control_url(&self) -> Option<String> {
+        Some(format!("{}/control", self.camera_base()?))
+    }
+
     /// URL de base, débarrassée d'une éventuelle barre oblique finale.
     fn camera_base(&self) -> Option<&str> {
         let base_url = self.base_url.as_deref()?.trim_end_matches('/');
@@ -461,6 +470,18 @@ mod tests {
     }
 
     #[test]
+    fn a_control_url_points_at_the_cameras_own_switch() {
+        // L'interrupteur est servi par la CAMÉRA, comme le direct : le
+        // manager donne l'adresse, il ne pilote rien.
+        let event = event(PersonStatus::Unknown).with_base_url("http://192.168.1.42:8080");
+
+        assert_eq!(
+            event.control_url().as_deref(),
+            Some("http://192.168.1.42:8080/control")
+        );
+    }
+
+    #[test]
     fn a_trailing_slash_in_the_public_url_does_not_double_up() {
         let event = event(PersonStatus::Unknown)
             .with_base_url("http://cam.local/")
@@ -471,6 +492,10 @@ mod tests {
             Some("http://cam.local/play/evt.mp4")
         );
         assert_eq!(event.live_url().as_deref(), Some("http://cam.local/live"));
+        assert_eq!(
+            event.control_url().as_deref(),
+            Some("http://cam.local/control")
+        );
     }
 
     #[test]

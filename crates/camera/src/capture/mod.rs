@@ -36,7 +36,7 @@ pub use state::SharedState;
 
 use anyhow::{Context, Result};
 use image::RgbImage;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, atomic::AtomicBool, mpsc};
 use std::time::Duration;
 use tracing::info;
 use v4l::buffer::Type;
@@ -47,7 +47,7 @@ use crate::config::Config;
 use crate::h264::{H264Encoder, H264Stream};
 use crate::vision::BoundingBox;
 
-use capture_loop::{H264Output, Pipeline};
+use capture_loop::{DETECTION_INTERVAL, H264Output, Pipeline};
 use models::Models;
 use worker::EventPublishing;
 
@@ -89,10 +89,17 @@ pub fn start_camera_loop(
     let (detect_tx, detect_rx) = mpsc::sync_channel::<RgbImage>(1);
     let last_boxes: Arc<Mutex<Vec<BoundingBox>>> = Arc::new(Mutex::new(Vec::new()));
 
+    // Disponibilité du worker, qu'il tient lui-même à jour : c'est ce qui
+    // permet à la boucle de capture de ne copier une frame que lorsqu'il y a
+    // quelqu'un pour la traiter (voir `capture_loop::Pipeline::detect_idle`).
+    // Vrai au départ : le worker démarre les mains libres.
+    let detect_idle = Arc::new(AtomicBool::new(true));
+
     // Worker IA : mouvement -> YOLO -> PersonTracker -> YuNet + ArcFace (voir
     // worker::spawn_recognition_worker)
     worker::spawn_recognition_worker(
         detect_rx,
+        Arc::clone(&detect_idle),
         Arc::clone(&last_boxes),
         models.detector,
         Arc::clone(&models.face_detector),
@@ -126,6 +133,8 @@ pub fn start_camera_loop(
             mailer: models.mailer,
             email_cooldown_secs: config.detection.email_cooldown_secs,
             detect_tx,
+            detect_interval: DETECTION_INTERVAL,
+            detect_idle,
             last_boxes,
             face_detector: models.face_detector,
             face_embedder: models.face_embedder,

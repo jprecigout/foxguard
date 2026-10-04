@@ -142,6 +142,13 @@ export default function App() {
                 hint: "Le direct vient de la caméra elle-même, qui l'encode en H.264 quand le navigateur sait le décoder.",
               })
             }
+            onControl={(url, camera) =>
+              setOpenFrame({
+                url,
+                title: `${camera} — surveillance`,
+                hint: "L'interrupteur est servi par la caméra, qui l'applique elle-même : le manager n'écrit rien et n'a pas son jeton.",
+              })
+            }
           />
         ))}
       </div>

@@ -16,4 +16,16 @@ name: string,
  * est authentifié par un jeton que le manager n'a pas — et qu'il n'a
  * aucune raison d'avoir (voir `live_handler` côté caméra).
  */
-live_url: string | null, };
+live_url: string | null, 
+/**
+ * URL de la page de PILOTAGE de la surveillance de cette caméra, ou
+ * `null` si elle n'a pas déclaré son URL publique.
+ *
+ * Elle pointe elle aussi vers la caméra, et le manager reste donc SANS
+ * route d'écriture : il indique où se trouve l'interrupteur, il ne le
+ * bascule pas. Confier le pilotage au manager voudrait dire recopier le
+ * jeton d'API de chaque caméra dans cette base de données, ce qui
+ * dégraderait le modèle de sécurité de tout le système pour un bouton
+ * (voir `control_handler` côté caméra).
+ */
+control_url: string | null, };

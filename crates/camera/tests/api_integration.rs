@@ -531,3 +531,219 @@ async fn recording_delete_removes_an_existing_file() {
         "le fichier doit avoir été supprimé du disque"
     );
 }
+
+// --- Pilotage de la surveillance (GET / POST /api/monitoring) --------------
+//
+// La seconde route d'ÉCRITURE du serveur, et celle qui porte le plus de
+// conséquences : couper la surveillance d'une caméra. Comme pour la
+// suppression d'un enregistrement, on vérifie d'abord qu'elle refuse ce
+// qu'elle doit refuser.
+
+/// Requête POST portant un corps JSON.
+fn post_json(uri: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("requête POST valide")
+}
+
+/// Corps de réponse décodé en JSON.
+async fn json_body(response: axum::response::Response) -> serde_json::Value {
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("corps de réponse")
+        .to_bytes();
+
+    serde_json::from_slice(&bytes).expect("corps JSON")
+}
+
+#[tokio::test]
+async fn the_monitoring_state_is_readable_without_a_token() {
+    // Route de LECTURE : comme la liste des enregistrements, elle n'est pas
+    // authentifiée (voir la note du README).
+    let (state, _dir) = test_state("secret");
+    state
+        .detection_enabled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let app = create_router(Arc::clone(&state));
+
+    let response = app
+        .oneshot(get("/api/monitoring"))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    assert_eq!(body["detection"], serde_json::json!(true));
+    assert_eq!(body["recording"], serde_json::json!(false));
+}
+
+#[tokio::test]
+async fn enabling_monitoring_is_rejected_without_a_token() {
+    let (state, _dir) = test_state("secret");
+    let app = create_router(Arc::clone(&state));
+
+    let response = app
+        .oneshot(post_json("/api/monitoring", r#"{"enabled":true}"#))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        !state
+            .detection_enabled
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "une requête refusée ne doit rien avoir changé"
+    );
+}
+
+#[tokio::test]
+async fn enabling_monitoring_is_rejected_with_the_wrong_token() {
+    let (state, _dir) = test_state("secret");
+    let app = create_router(Arc::clone(&state));
+
+    let response = app
+        .oneshot(post_json(
+            "/api/monitoring?token=pasbon",
+            r#"{"enabled":true}"#,
+        ))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        !state
+            .detection_enabled
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "une requête refusée ne doit rien avoir changé"
+    );
+}
+
+#[tokio::test]
+async fn enabling_monitoring_switches_detection_and_recording_together() {
+    // « Surveillance » veut dire détecter ET enregistrer, exactement comme la
+    // commande WebSocket `set_monitoring` de l'interface de la caméra.
+    let (state, _dir) = test_state("secret");
+    let app = create_router(Arc::clone(&state));
+
+    let response = app
+        .oneshot(post_json(
+            "/api/monitoring?token=secret",
+            r#"{"enabled":true}"#,
+        ))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // L'état est renvoyé, pour que l'appelant n'ait pas à le redemander.
+    let body = json_body(response).await;
+    assert_eq!(body["detection"], serde_json::json!(true));
+    assert_eq!(body["recording"], serde_json::json!(true));
+
+    assert!(
+        state
+            .detection_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    assert!(
+        state
+            .recording_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+}
+
+#[tokio::test]
+async fn cutting_monitoring_switches_both_off() {
+    let (state, _dir) = test_state("secret");
+    state
+        .detection_enabled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    state
+        .recording_enabled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let app = create_router(Arc::clone(&state));
+
+    let response = app
+        .oneshot(post_json(
+            "/api/monitoring?token=secret",
+            r#"{"enabled":false}"#,
+        ))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        !state
+            .detection_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    assert!(
+        !state
+            .recording_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+}
+
+#[tokio::test]
+async fn the_control_page_is_served_with_the_camera_token_inlined() {
+    // Comme `/live` : la page vient de la caméra et porte son jeton, pour que
+    // le manager puisse l'afficher dans un cadre sans jamais le connaître.
+    let (state, _dir) = test_state("jeton-de-cette-camera");
+    let app = create_router(state);
+
+    let response = app.oneshot(get("/control")).await.expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("corps de réponse")
+        .to_bytes();
+    let html = String::from_utf8(bytes.to_vec()).expect("HTML en UTF-8");
+
+    assert!(html.contains("jeton-de-cette-camera"));
+    assert!(
+        !html.contains("__FOXGUARD_API_TOKEN__"),
+        "le marqueur doit avoir été remplacé"
+    );
+}
+
+#[tokio::test]
+async fn the_control_page_does_not_open_the_video_socket() {
+    // Garde-fou : s'abonner au WebSocket est ce qui DÉMARRE l'encodage H.264.
+    // Une page réduite à un interrupteur ne doit pas faire tourner l'encodeur
+    // logiciel pour une image que personne ne regarde.
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
+
+    let response = app.oneshot(get("/control")).await.expect("réponse HTTP");
+
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("corps de réponse")
+        .to_bytes();
+    let html = String::from_utf8(bytes.to_vec()).expect("HTML en UTF-8");
+
+    // Le commentaire d'en-tête de la page EXPLIQUE pourquoi elle n'en ouvre
+    // pas : on cherche donc l'ouverture elle-même, pas le mot.
+    assert!(
+        !html.contains("new WebSocket"),
+        "la page de pilotage ne doit pas ouvrir de WebSocket"
+    );
+    assert!(
+        !html.contains("/ws?token="),
+        "la page de pilotage ne doit pas s'abonner au flux vidéo"
+    );
+}

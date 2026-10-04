@@ -20,15 +20,25 @@
 //! (voir `h264_is_wanted`), et la cadence de `[h264] fps` écarte les frames
 //! en trop avant l'encodeur.
 //!
-//! Le DÉCODAGE, lui, n'a lieu que si quelqu'un en a besoin — la détection,
-//! qui travaille en RGB, ou une source déjà compressée dont l'encodeur ne
-//! peut rien tirer sans les pixels. Sur un Raspberry Pi, qui fournit du YUYV,
-//! le chemin nominal ne décode donc RIEN : le buffer brut part directement à
-//! l'encodeur (voir `needs_decode` ci-dessous).
+//! Le DÉCODAGE, lui, n'a lieu que si quelqu'un en a besoin — une frame à
+//! analyser, une boîte à incruster, ou une source déjà compressée dont
+//! l'encodeur ne peut rien tirer sans les pixels. Sur un Raspberry Pi, qui
+//! fournit du YUYV, le chemin nominal ne décode donc RIEN : le buffer brut
+//! part directement à l'encodeur (voir `needs_decode` ci-dessous).
+//!
+//! Et la RECONNAISSANCE est cadencée ici, du côté qui détient la frame (voir
+//! [`DETECTION_INTERVAL`]). Elle l'était auparavant dans le worker, qui
+//! recevait une copie de chaque frame pour en jeter cinq sur six : la copie
+//! était faite, puis jetée. C'est désormais la boucle qui décide AVANT de
+//! copier.
 
 use anyhow::Result;
 use image::{ImageFormat, RgbImage};
-use std::sync::{Arc, Mutex, atomic::Ordering, mpsc};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use v4l::io::traits::CaptureStream;
@@ -46,6 +56,21 @@ use super::known_faces::try_capture_reference;
 use super::overlay::draw_detections;
 use super::recording::{Frame, RecordingFormat, RecordingWriter};
 use super::state::SharedState;
+
+/// Cadence maximale du pipeline de reconnaissance : intervalle minimal entre
+/// deux frames soumises au worker (voir `super::worker`).
+///
+/// 250 ms, soit au plus quatre analyses par seconde. C'est la cadence que
+/// l'ancien compteur « une frame sur six » visait sur une caméra à 25 im/s,
+/// mais exprimée dans la grandeur qui compte réellement : une caméra à 10
+/// im/s n'analysait plus que 1,7 fois par seconde, et une caméra à 60 im/s en
+/// faisait dix — la même constante donnait donc deux systèmes différents.
+///
+/// Pourquoi ce n'est pas plus souvent : le suivi de personnes (voir
+/// `super::tracking`) rapproche deux détections espacées de 250 ms sans
+/// difficulté, et sur un Raspberry Pi une inférence YOLO dure de toute façon
+/// plus longtemps que cela.
+pub(super) const DETECTION_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Encodage H.264 du flux — le seul chemin vidéo de la caméra.
 pub(super) struct H264Output {
@@ -70,6 +95,19 @@ pub(super) struct Pipeline {
     pub(super) mailer: Mailer,
     pub(super) email_cooldown_secs: u64,
     pub(super) detect_tx: mpsc::SyncSender<RgbImage>,
+    /// Intervalle minimal entre deux frames soumises au pipeline de
+    /// reconnaissance, voir [`DETECTION_INTERVAL`].
+    pub(super) detect_interval: Duration,
+    /// Vrai quand le worker de reconnaissance n'a plus rien sur les bras.
+    ///
+    /// Posé à faux par la boucle de capture juste avant de lui confier une
+    /// frame, remis à vrai par le worker lui-même une fois celle-ci traitée
+    /// (voir `super::worker`). C'est ce qui permet de ne JAMAIS copier une
+    /// frame qui n'aurait nulle part où aller : sur un Raspberry Pi, une
+    /// inférence YOLO dure bien plus longtemps que
+    /// [`DETECTION_INTERVAL`], et sans cet indicateur la cadence seule
+    /// ferait copier des frames pour les voir refusées par un canal plein.
+    pub(super) detect_idle: Arc<AtomicBool>,
     pub(super) last_boxes: Arc<Mutex<Vec<BoundingBox>>>,
     pub(super) face_detector: Arc<Option<FaceDetectorYuNet>>,
     pub(super) face_embedder: Arc<Option<FaceEmbedder>>,
@@ -96,6 +134,7 @@ pub(super) fn run(
     let mut recording: Option<RecordingWriter> = None;
     let mut last_email_time = Instant::now() - email_cooldown;
     let mut last_encoded: Option<Instant> = None;
+    let mut last_detection: Option<Instant> = None;
 
     // Format des enregistrements : il attend la première image clé, qui porte
     // les jeux de paramètres (SPS/PPS) sans lesquels un MP4 ne peut pas
@@ -139,18 +178,48 @@ pub(super) fn run(
         let wants_h264 = h264_is_wanted
             && last_encoded.is_none_or(|last| last.elapsed() >= pipeline.h264.frame_interval);
 
+        // Faut-il soumettre cette frame à la reconnaissance ?
+        //
+        // La question est tranchée ICI, avant la moindre copie — c'est tout
+        // l'intérêt. Trois conditions :
+        //
+        //  - la surveillance doit être active ;
+        //  - la cadence de [`DETECTION_INTERVAL`] doit être échue ;
+        //  - le worker doit être LIBRE. Une frame confiée à un worker
+        //    occupé rassirait dans le canal, et la copier n'aurait servi
+        //    qu'à cela.
+        let wants_detection = is_detection_active
+            && last_detection.is_none_or(|last| last.elapsed() >= pipeline.detect_interval)
+            && pipeline.detect_idle.load(Ordering::Acquire);
+
+        // Boîtes du dernier passage de reconnaissance, lues une seule fois
+        // (voir [`read_last_boxes`]) : elles servent à l'incrustation, à
+        // l'alerte e-mail, et à décider s'il faut décoder.
+        let boxes = read_last_boxes(&pipeline.last_boxes, is_detection_active);
+
+        // Enrôlement à chaud demandé depuis l'interface ? Il lui faut la
+        // frame en pixels, et il est rare — d'où ce coup d'œil avant de
+        // décoder plutôt qu'un décodage systématique.
+        let wants_enrollment =
+            is_detection_active && state.pending_enrollment.lock_or_recover().is_some();
+
         // DÉCODAGE, au plus une fois par frame, et seulement si quelqu'un en
         // a besoin :
         //
-        // - détection active : le pipeline de vision travaille sur du RGB ;
+        // - frame à analyser, ou à capturer comme photo de référence : le
+        //   pipeline de vision travaille sur du RGB ;
         // - frame à encoder depuis une source JPEG : l'encodeur a besoin des
-        //   pixels, qui ne sont nulle part ailleurs.
+        //   pixels, qui ne sont nulle part ailleurs ;
+        // - frame à encoder portant des boîtes : l'incrustation se fait sur
+        //   les pixels. Sans boîte à dessiner, il n'y a rien à incruster, et
+        //   le buffer brut donne exactement la même image.
         //
-        // Une source YUYV sans détection — le chemin nominal du Raspberry Pi
-        // — n'est donc JAMAIS décodée : son buffer part tel quel à
-        // l'encodeur, qui n'y fait qu'un sous-échantillonnage (voir
-        // `crate::h264::I420Buffer`).
-        let needs_decode = is_detection_active || (wants_h264 && is_jpeg);
+        // Une source YUYV hors cadence de reconnaissance — le chemin nominal
+        // du Raspberry Pi devant une scène vide — n'est donc JAMAIS décodée :
+        // son buffer part tel quel à l'encodeur, qui n'y fait qu'un
+        // sous-échantillonnage (voir `crate::h264::I420Buffer`).
+        let needs_decode =
+            wants_detection || wants_enrollment || (wants_h264 && (is_jpeg || !boxes.is_empty()));
 
         let decoded = if needs_decode {
             decode_frame(buf, is_jpeg, width, height)
@@ -158,19 +227,37 @@ pub(super) fn run(
             None
         };
 
-        let decoded = if is_detection_active {
-            prepare_detected_frame(
-                decoded,
+        // Capture de photo de référence (enrôlement à chaud), voir
+        // `try_capture_reference`. Sur la frame BRUTE, avant incrustation.
+        if let Some(img) = &decoded
+            && wants_enrollment
+        {
+            try_capture_reference(
                 &state,
-                &mut pipeline,
-                &mut last_email_time,
-                email_cooldown,
-            )
-        } else {
-            pipeline.last_boxes.lock_or_recover().clear();
+                img,
+                &pipeline.face_detector,
+                &pipeline.face_embedder,
+                &pipeline.known_people,
+                &pipeline.known_faces_dir,
+            );
+        }
 
-            decoded
-        };
+        // SOUMISSION À LA RECONNAISSANCE, également sur la frame brute : le
+        // worker ne doit pas voir les boîtes du passage précédent.
+        if let Some(img) = &decoded
+            && wants_detection
+            && submit_for_detection(&pipeline, img)
+        {
+            last_detection = Some(Instant::now());
+        }
+
+        let decoded = draw_and_alert(
+            decoded,
+            &boxes,
+            &mut pipeline,
+            &mut last_email_time,
+            email_cooldown,
+        );
 
         // ENCODAGE H.264
         //
@@ -290,50 +377,94 @@ fn decode_frame(buf: &[u8], is_jpeg: bool, width: u32, height: u32) -> Option<Rg
     }
 }
 
-/// Traite une frame pendant que la détection est active : enrôlement à
-/// chaud, transmission au worker, incrustation des boîtes et alerte e-mail.
+/// Boîtes du dernier passage de reconnaissance, telles que la frame courante
+/// doit les voir.
 ///
-/// Retourne l'image décodée, boîtes incrustées — rendue à l'appelant pour
-/// l'encodage, afin que TOUS les consommateurs du flux (navigateurs, lecteurs
-/// RTSP, enregistrements) voient exactement la même image.
-fn prepare_detected_frame(
+/// Lue UNE SEULE fois par frame, et c'est pour cela que cette fonction
+/// existe : le même verrou servait à l'incrustation, à l'alerte e-mail, et
+/// sert désormais aussi à décider s'il faut décoder la frame. Trois prises
+/// pour une valeur qui ne change pas entre-temps.
+///
+/// Surveillance éteinte, le cache est VIDÉ : les dernières boîtes d'une
+/// surveillance qu'on vient d'arrêter resteraient sinon incrustées sur le
+/// flux indéfiniment.
+fn read_last_boxes(
+    last_boxes: &Mutex<Vec<BoundingBox>>,
+    is_detection_active: bool,
+) -> Vec<BoundingBox> {
+    let mut cached = last_boxes.lock_or_recover();
+
+    if !is_detection_active {
+        cached.clear();
+        return Vec::new();
+    }
+
+    cached.clone()
+}
+
+/// Confie une frame au worker de reconnaissance. Retourne vrai si elle a bien
+/// été prise en charge.
+///
+/// # La copie, et pourquoi il en reste une
+///
+/// Le worker travaille sur la frame BRUTE, que la boucle garde de son côté
+/// pour y incruster les boîtes et l'encoder. Deux versions de l'image sont
+/// donc réellement nécessaires, et cette copie-là est inévitable.
+///
+/// Ce qui a disparu, c'est la copie INUTILE : elle était faite à chaque
+/// frame, le worker en jetant ensuite cinq sur six. Elle n'a plus lieu que
+/// pour les frames réellement analysées (voir `wants_detection` dans
+/// [`run`]), soit quatre par seconde au lieu de vingt-cinq.
+///
+/// Le worker est déclaré OCCUPÉ avant l'envoi, et c'est lui qui se déclarera
+/// libre une fois la frame traitée : la frame suivante ne sera donc pas
+/// copiée pendant que YOLO tourne encore.
+fn submit_for_detection(pipeline: &Pipeline, img: &RgbImage) -> bool {
+    pipeline.detect_idle.store(false, Ordering::Release);
+
+    if pipeline.detect_tx.try_send(img.clone()).is_err() {
+        // Ne peut pas arriver tant que l'indicateur fait son travail : il
+        // n'est vrai que lorsque le worker a fini, donc que le canal est
+        // vide. On le rend tout de même, pour ne pas river la reconnaissance
+        // à « occupé » sur un worker disparu.
+        pipeline.detect_idle.store(true, Ordering::Release);
+        return false;
+    }
+
+    true
+}
+
+/// Incruste les boîtes sur la frame et déclenche l'alerte e-mail s'il y a
+/// lieu.
+///
+/// Retourne l'image, boîtes incrustées — rendue à l'appelant pour l'encodage,
+/// afin que TOUS les consommateurs du flux (navigateurs, lecteurs RTSP,
+/// enregistrements) voient exactement la même image.
+fn draw_and_alert(
     decoded: Option<RgbImage>,
-    state: &Arc<SharedState>,
+    boxes: &[BoundingBox],
     pipeline: &mut Pipeline,
     last_email_time: &mut Instant,
     email_cooldown: Duration,
 ) -> Option<RgbImage> {
     let mut img = decoded?;
 
-    // Capture de photo de référence (enrôlement à chaud), voir
-    // `try_capture_reference`.
-    try_capture_reference(
-        state,
-        &img,
-        &pipeline.face_detector,
-        &pipeline.face_embedder,
-        &pipeline.known_people,
-        &pipeline.known_faces_dir,
-    );
+    if boxes.is_empty() {
+        return Some(img);
+    }
 
-    let _ = pipeline.detect_tx.try_send(img.clone());
+    // Une personne reconnue (visage identifié) n'est pas une intrusion : on
+    // n'alerte par e-mail que s'il reste au moins une détection non reconnue
+    // (personne inconnue, chat ou chien) dans la frame (voir
+    // `draw_detections`).
+    let should_alert = draw_detections(&mut img, boxes);
 
-    let current_boxes = pipeline.last_boxes.lock_or_recover().clone();
-
-    if !current_boxes.is_empty() {
-        // Une personne reconnue (visage identifié) n'est pas une
-        // intrusion : on n'alerte par e-mail que s'il reste au
-        // moins une détection non reconnue (personne inconnue,
-        // chat ou chien) dans la frame (voir `draw_detections`).
-        let should_alert = draw_detections(&mut img, &current_boxes);
-
-        if should_alert && last_email_time.elapsed() >= email_cooldown {
-            let mut alert_encoded = Vec::new();
-            let mut cursor = std::io::Cursor::new(&mut alert_encoded);
-            if img.write_to(&mut cursor, ImageFormat::Jpeg).is_ok() {
-                pipeline.mailer.send_alert(alert_encoded);
-                *last_email_time = Instant::now();
-            }
+    if should_alert && last_email_time.elapsed() >= email_cooldown {
+        let mut alert_encoded = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut alert_encoded);
+        if img.write_to(&mut cursor, ImageFormat::Jpeg).is_ok() {
+            pipeline.mailer.send_alert(alert_encoded);
+            *last_email_time = Instant::now();
         }
     }
 

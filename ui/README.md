@@ -53,18 +53,19 @@ La logique vit dans `timeline.ts`, `grouping.ts` et `dates.ts` plutôt que dans
 les composants : ce sont des fonctions pures, et ce sont les seules choses de
 l'interface qui méritent d'être relues attentivement.
 
-## Les clips et le direct
+## Les clips, le direct et l'interrupteur
 
-Cette interface donne accès à deux médias qu'elle ne lit **pas elle-même** :
-le clip d'une détection, et le flux en direct d'une caméra. Les deux vivent
-sur la caméra, donc sur une autre origine, et c'est la caméra qui sert la page
-capable de les afficher. `CameraFrameDialog` ne fait que mettre cette page
-dans un cadre :
+Cette interface donne accès à trois pages qu'elle ne produit **pas
+elle-même** : le clip d'une détection, le flux en direct d'une caméra, et
+l'interrupteur de sa surveillance. Les trois appartiennent à la caméra, donc à
+une autre origine, et c'est la caméra qui sert la page capable de les
+afficher. `CameraFrameDialog` ne fait que mettre cette page dans un cadre :
 
 | Média | Page servie par la caméra | D'où vient l'URL |
 | --- | --- | --- |
 | Le clip d'une détection | `GET /play/<fichier>` | `clip_url` de l'`EventRecord` |
 | Le flux en direct | `GET /live` | `live_url` du `CameraInfo` |
+| L'interrupteur de surveillance | `GET /control` | `control_url` du `CameraInfo` |
 
 Ouvrir les enregistrements de la caméra à toutes les origines serait une bien
 mauvaise façon de contourner la politique de même origine, d'autant que ces
@@ -77,11 +78,21 @@ Ni cette interface, ni le manager, ni sa base ne le voient jamais passer — et
 c'est heureux, car le serveur annexe est la pièce la plus exposée du système.
 Voir la section « La timeline, les clips et le direct » du README principal.
 
-Conséquence assumée : clip comme direct demandent que la **caméra** soit
-joignable depuis le navigateur, et l'un comme l'autre n'est proposé que si
-elle a déclaré son URL publique (`clip_url` et `live_url` valent `null`
-sinon). La vignette, elle, vient de la base du manager et reste visible dans
-tous les cas.
+**L'interrupteur suit exactement le même chemin, et c'est ce qui permet au
+manager de rester en lecture seule.** Le bouton « 🛡 Surveillance » n'appelle
+aucune route du manager : il ouvre la page `/control` de la caméra, qui porte
+le jeton injecté par la caméra et appelle `POST /api/monitoring?token=...` sur
+elle-même. Le manager se contente d'indiquer l'adresse (`control_url`). Lui
+confier le pilotage voudrait dire recopier le jeton de chaque caméra dans sa
+base, et faire du serveur annexe le point unique dont la compromission donne
+la main sur toutes les caméras — voir « Le pilotage depuis le manager » du
+README principal.
+
+Conséquence assumée : clip, direct et interrupteur demandent que la **caméra**
+soit joignable depuis le navigateur, et aucun des trois n'est proposé si elle
+n'a pas déclaré son URL publique (`clip_url`, `live_url` et `control_url`
+valent `null` sinon). La vignette, elle, vient de la base du manager et reste
+visible dans tous les cas.
 
 C'est volontairement la caméra qui décide **comment** afficher son direct :
 elle sert aujourd'hui du H.264 décodé par WebCodecs, et elle a servi du MJPEG

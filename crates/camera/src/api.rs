@@ -82,6 +82,91 @@ pub enum ClientCommand {
     CaptureReference { name: String },
 }
 
+/// État de surveillance de la caméra, tel que renvoyé par
+/// `GET /api/monitoring` et modifié par `POST /api/monitoring`.
+///
+/// Les deux interrupteurs sont renvoyés séparément parce qu'ils le sont
+/// réellement (voir [`ClientCommand::SetDetection`] et
+/// [`ClientCommand::SetRecording`]), même si la « surveillance » au sens de
+/// l'interface les bascule ensemble.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+pub struct MonitoringState {
+    /// Surveillance IA (YOLO/YuNet/ArcFace).
+    pub detection: bool,
+    /// Enregistrement continu sur disque.
+    pub recording: bool,
+}
+
+/// Corps de `POST /api/monitoring`.
+#[derive(Deserialize)]
+pub struct MonitoringRequest {
+    pub enabled: bool,
+}
+
+/// État de la surveillance (`GET /api/monitoring`).
+///
+/// # Pourquoi une route HTTP et pas la commande WebSocket existante
+///
+/// L'interrupteur existe déjà sur le WebSocket (voir
+/// [`ClientCommand::SetMonitoring`]), et c'est par là que passe l'interface
+/// complète de la caméra — qui a de toute façon le flux vidéo ouvert.
+///
+/// Mais s'abonner au WebSocket est précisément ce qui DÉMARRE l'encodage
+/// H.264 (voir `crate::capture::capture_loop`). Une page qui n'affiche qu'un
+/// interrupteur ferait donc tourner l'encodeur logiciel — le poste de dépense
+/// le plus lourd du système — pour une image que personne ne regarde. C'est
+/// exactement le garde-fou que la caméra s'applique à respecter.
+///
+/// Deux appels HTTP, eux, ne coûtent rien et ne réveillent personne.
+///
+/// Comme les autres routes de LECTURE, elle n'est pas authentifiée. L'ÉCRITURE
+/// l'est (voir [`set_monitoring_handler`]).
+async fn monitoring_handler(State(state): State<Arc<SharedState>>) -> Json<MonitoringState> {
+    Json(MonitoringState {
+        detection: state.detection_enabled.load(Ordering::Relaxed),
+        recording: state.recording_enabled.load(Ordering::Relaxed),
+    })
+}
+
+/// Active ou coupe la surveillance (`POST /api/monitoring?token=...`).
+///
+/// AUTHENTIFIÉE par le même jeton que le WebSocket et que la suppression
+/// d'enregistrement : couper la surveillance d'une caméra est l'action la plus
+/// lourde de conséquences qu'elle expose, et elle ne peut pas rester ouverte à
+/// quiconque atteint le port.
+///
+/// Les deux interrupteurs sont basculés ENSEMBLE, exactement comme
+/// [`ClientCommand::SetMonitoring`] : « surveillance » veut dire détecter et
+/// enregistrer, et les séparer donnerait à l'interface du manager un réglage
+/// que l'interface de la caméra n'a pas.
+///
+/// Retourne le nouvel état, pour que l'appelant n'ait pas à le redemander.
+async fn set_monitoring_handler(
+    Query(auth): Query<AuthQuery>,
+    State(state): State<Arc<SharedState>>,
+    Json(request): Json<MonitoringRequest>,
+) -> Response {
+    if auth.token.as_deref() != Some(state.api_token.as_str()) {
+        warn!("⚠️ Tentative de pilotage de la surveillance rejetée (Token invalide).");
+        return (StatusCode::UNAUTHORIZED, "Accès refusé").into_response();
+    }
+
+    state
+        .detection_enabled
+        .store(request.enabled, Ordering::Relaxed);
+    state
+        .recording_enabled
+        .store(request.enabled, Ordering::Relaxed);
+
+    info!("🛡️ Surveillance modifiée par HTTP : {}", request.enabled);
+
+    Json(MonitoringState {
+        detection: request.enabled,
+        recording: request.enabled,
+    })
+    .into_response()
+}
+
 /// Handler pour lister les enregistrements disponibles dans `output_record/`
 async fn list_recordings_handler(State(state): State<Arc<SharedState>>) -> Json<Vec<VideoFile>> {
     let mut files = Vec::new();
@@ -458,6 +543,36 @@ async fn live_handler(State(state): State<Arc<SharedState>>) -> Html<String> {
     Html(include_str!("../static/live.html").replace(API_TOKEN_PLACEHOLDER, &state.api_token))
 }
 
+/// Interrupteur de surveillance seul (`GET /control`).
+///
+/// # Pourquoi la caméra sert son propre interrupteur
+///
+/// Même raisonnement que pour [`live_handler`], et il vaut pour la même
+/// raison : l'interface du manager est servie par une AUTRE ORIGINE et n'a pas
+/// le jeton d'API de la caméra. Elle ne peut donc pas piloter la caméra
+/// elle-même, et le lui permettre voudrait dire recopier le jeton de chaque
+/// caméra dans une base de données puis dans une page web.
+///
+/// La caméra sert donc cette page, que le manager affiche dans un cadre —
+/// comme le direct et comme les clips. **Le jeton ne quitte jamais la
+/// caméra**, et le manager reste sans la moindre route d'écriture.
+///
+/// La page est volontairement RÉDUITE à l'interrupteur : pas de vidéo (voir
+/// [`monitoring_handler`] pour pourquoi elle n'ouvre surtout pas le
+/// WebSocket), pas de capture de référence, pas de suppression.
+///
+/// # Ce que cela suppose du réseau
+///
+/// Comme `/live`, cette page n'est pas authentifiée et porte le jeton en
+/// clair : qui peut atteindre le port HTTP de la caméra peut la charger, donc
+/// couper sa surveillance. C'est le modèle de sécurité qui était DÉJÀ celui de
+/// `/live` — le port d'une caméra n'est pas destiné à être exposé tel quel sur
+/// un réseau hostile — mais la conséquence est plus lourde ici, puisqu'il
+/// s'agit d'une écriture et non d'une lecture.
+async fn control_handler(State(state): State<Arc<SharedState>>) -> Html<String> {
+    Html(include_str!("../static/control.html").replace(API_TOKEN_PLACEHOLDER, &state.api_token))
+}
+
 /// Démarre la tâche qui traite les commandes JSON d'un client.
 ///
 /// Séparée de l'émission vidéo parce que les deux sens de la connexion n'ont
@@ -529,7 +644,12 @@ pub fn create_router(state: Arc<SharedState>) -> Router {
         .route("/", get(index_handler)) // Servir l'interface web sur la racine
         .route("/play/{filename}", get(clip_player_handler))
         .route("/live", get(live_handler))
+        .route("/control", get(control_handler))
         .route("/ws", get(ws_handler))
+        .route(
+            "/api/monitoring",
+            get(monitoring_handler).post(set_monitoring_handler),
+        )
         .route("/api/recordings", get(list_recordings_handler)) // API Liste des vidéos
         .route("/recordings/{filename}", get(recording_handler))
         .route(

@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="fr">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FoxGuard — Surveillance</title>
+
+    <!--
+      INTERRUPTEUR DE SURVEILLANCE SEUL, servi par la caméra.
+
+      Pourquoi cette page existe : l'interface du manager (voir `ui/`) donne
+      accès à chaque caméra, mais elle est servie par une AUTRE ORIGINE et
+      n'a pas le jeton d'API de la caméra. Elle ne peut donc pas la piloter
+      elle-même, et le lui permettre voudrait dire recopier le jeton de
+      chaque caméra dans une base puis dans une page web — une dégradation
+      nette du modèle de sécurité.
+
+      La caméra sert donc cet interrupteur, que le manager affiche dans un
+      cadre — exactement comme le direct (`live.html`) et les clips
+      (`clip-player.html`). Le jeton ne quitte jamais la caméra, et le
+      manager reste sans la moindre route d'écriture.
+
+      Pourquoi du HTTP et PAS le WebSocket, qui porte déjà la commande
+      `set_monitoring` : s'abonner au WebSocket est précisément ce qui
+      DÉMARRE l'encodage H.264. Une page qui n'affiche qu'un interrupteur
+      ferait tourner l'encodeur logiciel — le poste de dépense le plus lourd
+      du système — pour une image que personne ne regarde (voir
+      `monitoring_handler` dans src/api.rs).
+    -->
+    <style>
+        :root {
+            --bg: #121212;
+            --card: #1c1c1c;
+            --border: #333;
+            --text: #e0e0e0;
+            --muted: #8a8a8a;
+            --accent-red: #e53935;
+            --ok: #43a047;
+            color-scheme: dark;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            height: 100%;
+        }
+
+        body {
+            margin: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            background: var(--bg);
+            color: var(--text);
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        main {
+            width: 100%;
+            max-width: 340px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 16px;
+            padding: 24px 20px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: var(--card);
+            text-align: center;
+        }
+
+        /* Bouclier : vert et plein quand la surveillance veille, rouge et
+           barré quand elle est coupée. La couleur fait le travail, le
+           libellé la confirme. */
+        .shield {
+            font-size: 2.6rem;
+            line-height: 1;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.05rem;
+            font-weight: 600;
+        }
+
+        p.detail {
+            margin: 0;
+            font-size: 0.82rem;
+            color: var(--muted);
+            min-height: 2.4em;
+        }
+
+        button {
+            width: 100%;
+            padding: 11px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: transparent;
+            color: var(--text);
+            font: inherit;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.15s, border-color 0.15s;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: progress;
+        }
+
+        button.on {
+            border-color: var(--ok);
+            color: var(--ok);
+        }
+
+        button.on:hover:not(:disabled) {
+            background: rgba(67, 160, 71, 0.14);
+        }
+
+        button.off {
+            border-color: var(--accent-red);
+            color: var(--accent-red);
+        }
+
+        button.off:hover:not(:disabled) {
+            background: rgba(229, 57, 53, 0.14);
+        }
+    </style>
+</head>
+
+<body>
+    <main>
+        <span class="shield" id="shield" aria-hidden="true">🛡️</span>
+        <h1 id="title">Interrogation de la caméra…</h1>
+        <p class="detail" id="detail"></p>
+        <button id="toggle" disabled>…</button>
+    </main>
+
+    <script>
+        // Le jeton est injecté par la caméra au moment de servir la page (voir
+        // `control_handler` dans src/api.rs) : il ne transite jamais par le
+        // manager, qui n'a aucune raison de le connaître.
+        const API_TOKEN = "__FOXGUARD_API_TOKEN__";
+
+        // Relecture périodique de l'état.
+        //
+        // La surveillance se pilote aussi depuis l'interface complète de la
+        // caméra et depuis n'importe quel autre onglet : un interrupteur qui
+        // n'afficherait que sa propre dernière action mentirait dès qu'elle
+        // est basculée ailleurs.
+        const REFRESH_MS = 5000;
+
+        const shield = document.getElementById('shield');
+        const title = document.getElementById('title');
+        const detail = document.getElementById('detail');
+        const toggle = document.getElementById('toggle');
+
+        /** Dernier état connu, ou `null` tant que la caméra n'a pas répondu. */
+        let active = null;
+
+        function render() {
+            if (active === null) {
+                shield.textContent = '🛡️';
+                title.textContent = 'Caméra injoignable';
+                detail.textContent =
+                    "L'état de la surveillance n'a pas pu être lu. Cette page vient de "
+                    + 'la caméra : elle doit être joignable depuis ce navigateur.';
+                toggle.textContent = 'Réessayer';
+                toggle.className = '';
+                toggle.disabled = false;
+                return;
+            }
+
+            shield.textContent = active ? '🛡️' : '🚫';
+            title.textContent = active ? 'Surveillance active' : 'Surveillance coupée';
+            detail.textContent = active
+                ? 'La caméra analyse son flux et enregistre. Les détections remontent au manager.'
+                : "Aucune analyse, aucun enregistrement : la caméra ne détectera rien tant qu'elle"
+                + ' reste coupée.';
+            toggle.textContent = active ? 'Couper la surveillance' : 'Activer la surveillance';
+            toggle.className = active ? 'on' : 'off';
+            toggle.disabled = false;
+        }
+
+        function busy(message) {
+            toggle.disabled = true;
+            toggle.textContent = message;
+        }
+
+        /** Lit l'état courant. Silencieux sur les rafraîchissements de fond. */
+        async function refresh() {
+            try {
+                const response = await fetch('/api/monitoring');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const state = await response.json();
+                active = Boolean(state.detection);
+            } catch (err) {
+                console.error('Lecture de la surveillance impossible :', err);
+                active = null;
+            }
+
+            // Pas pendant une bascule en cours : écraser le bouton sous la
+            // main de l'utilisateur avec un état déjà périmé le ferait
+            // clignoter entre deux valeurs.
+            if (!toggle.disabled) render();
+        }
+
+        async function send(enabled) {
+            busy('Envoi…');
+
+            try {
+                const response = await fetch(`/api/monitoring?token=${API_TOKEN}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled }),
+                });
+
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const state = await response.json();
+                active = Boolean(state.detection);
+                render();
+            } catch (err) {
+                console.error('Bascule de la surveillance impossible :', err);
+                // L'état affiché n'est plus fiable : on le redemande à la
+                // caméra plutôt que de supposer que la commande est passée.
+                toggle.disabled = false;
+                await refresh();
+            }
+        }
+
+        toggle.addEventListener('click', () => {
+            if (active === null) {
+                // Bouton « Réessayer » : on redemande simplement l'état.
+                busy('Lecture…');
+                void refresh().finally(() => {
+                    toggle.disabled = false;
+                    render();
+                });
+                return;
+            }
+
+            void send(!active);
+        });
+
+        void refresh();
+        setInterval(refresh, REFRESH_MS);
+    </script>
+</body>
+
+</html>

@@ -10,7 +10,11 @@
 //! `super::thumbnail`) et référence du clip vidéo (voir `super::clips`),
 //! avant publication sur MQTT.
 
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 
 use image::RgbImage;
 use tracing::{debug, error};
@@ -24,6 +28,20 @@ use super::clips::ClipRecorder;
 use super::motion::MotionGate;
 use super::thumbnail;
 use super::tracking::{self, PersonTracker, StatusChange};
+
+/// Remet l'indicateur de disponibilité du worker à vrai en sortant de portée.
+///
+/// Un garde plutôt qu'un `store` en fin de boucle : le corps de la boucle
+/// compte plusieurs `continue` (pas de mouvement, erreur d'inférence), et
+/// chacun serait une occasion d'oublier de se déclarer libre — ce qui
+/// éteindrait la reconnaissance définitivement, en silence.
+struct IdleOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for IdleOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
 
 /// Ce dont le worker a besoin pour transformer un changement d'état en
 /// événement publiable.
@@ -51,9 +69,15 @@ pub(super) struct EventPublishing {
 /// changements d'état de reconnaissance retournés par
 /// `tracking::process_persons_parallel` sont publiés sur MQTT si
 /// `publishing.mqtt` est renseigné (voir `crate::mqtt`).
+///
+/// `idle` est l'indicateur par lequel ce worker dit à la boucle de capture
+/// qu'il est disponible (voir `Pipeline::detect_idle`). Il n'y a plus de
+/// cadence ici : c'est la boucle qui écarte les frames en trop, avant de les
+/// copier.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_recognition_worker(
     detect_rx: mpsc::Receiver<RgbImage>,
+    idle: Arc<AtomicBool>,
     last_boxes: Arc<Mutex<Vec<BoundingBox>>>,
     detector: ObjectDetector,
     face_detector: Arc<Option<FaceDetectorYuNet>>,
@@ -66,34 +90,20 @@ pub(super) fn spawn_recognition_worker(
         let mut tracker = PersonTracker::new();
         let mut motion = MotionGate::new(motion_config);
 
-        let mut frame_counter: u32 = 0;
-
-        // Caméra à ~25 FPS :
-        // YOLO sera exécuté au plus environ 4 fois/seconde.
-        const YOLO_INTERVAL: u32 = 6;
-
         while let Ok(img) = detect_rx.recv() {
-            frame_counter = frame_counter.wrapping_add(1);
-
-            // CADENCE MAXIMALE DE YOLO
-            //
-            // Première porte, purement périodique : inutile d'analyser deux
-            // frames espacées de 40 ms, le suivi n'y gagnerait rien.
-            if !frame_counter.is_multiple_of(YOLO_INTERVAL) {
-                // Pas de nouveau YOLO.
-                //
-                // On republie simplement les dernières détections
-                // (déjà dans last_boxes, lues côté flux vidéo).
-                // La reconnaissance faciale n'est donc PAS relancée.
-                continue;
-            }
+            // Quel que soit le chemin de sortie de cette itération — pas de
+            // mouvement, erreur YOLO, traitement complet — la boucle de
+            // capture doit nous retrouver disponibles. Un `store` posé à la
+            // main en fin de corps serait sauté par le premier `continue`,
+            // et la reconnaissance resterait éteinte pour de bon.
+            let _available = IdleOnDrop(&idle);
 
             // PRÉ-FILTRE DE MOUVEMENT
             //
-            // Seconde porte : l'image a-t-elle changé ? C'est l'économie
-            // décisive — sur une scène immobile, YOLO ne tourne plus du tout
-            // (voir `super::motion` pour les deux garde-fous qui évitent que
-            // cette économie se paie en détections manquées).
+            // L'image a-t-elle changé ? C'est l'économie décisive — sur une
+            // scène immobile, YOLO ne tourne plus du tout (voir
+            // `super::motion` pour les deux garde-fous qui évitent que cette
+            // économie se paie en détections manquées).
             let verdict = motion.evaluate(&img);
 
             if !verdict.scan {

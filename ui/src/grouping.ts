@@ -9,6 +9,8 @@ export interface CameraDay {
   camera: string;
   /** Vue en direct de cette caméra, si elle est joignable. */
   liveUrl: string | null;
+  /** Interrupteur de surveillance de cette caméra, s'il est joignable. */
+  controlUrl: string | null;
   /** Du plus récent au plus ancien. */
   events: EventRecord[];
   /** Détections dont le visage n'a PAS été reconnu. */
@@ -32,6 +34,7 @@ export interface CameraDay {
 export function groupByCamera(events: EventRecord[], knownCameras: CameraInfo[]): CameraDay[] {
   const byCamera = new Map<string, EventRecord[]>();
   const liveUrls = new Map(knownCameras.map((camera) => [camera.name, camera.live_url]));
+  const controlUrls = new Map(knownCameras.map((camera) => [camera.name, camera.control_url]));
 
   for (const camera of knownCameras) {
     byCamera.set(camera.name, []);
@@ -50,6 +53,7 @@ export function groupByCamera(events: EventRecord[], knownCameras: CameraInfo[])
     .map(([camera, cameraEvents]) => ({
       camera,
       liveUrl: liveUrls.get(camera) ?? null,
+      controlUrl: controlUrls.get(camera) ?? null,
       events: cameraEvents,
       unknownCount: cameraEvents.filter((e) => e.status === "unknown").length,
       // Le test porte sur `status` et non sur la présence de `name` : le type
