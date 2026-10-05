@@ -406,7 +406,7 @@ pub struct DetectionConfig {
     // Surveillance IA activée ou non au démarrage (bascule aussi via l'UI web)
     #[serde(default)]
     pub enabled: bool,
-    // Chemin du modèle ONNX YOLOv8 (détection personne/chat/chien)
+    // Chemin du modèle ONNX YOLO26 (détection personne/chat/chien)
     pub model_path: String,
     // Chemin du modèle ONNX YuNet (détection de visage)
     pub model_detect_face_path: String,
@@ -519,7 +519,7 @@ mod tests {
 
         [detection]
         enabled = true
-        model_path = "src/vision/models/yolov8n.onnx"
+        model_path = "crates/camera/models/yolo26n.onnx"
         model_detect_face_path = "src/vision/models/face_detection_yunet_2023mar.onnx"
         model_face_path = "src/vision/models/arcface-mobilefacenet.onnx"
         input_size = 640

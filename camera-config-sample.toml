@@ -28,12 +28,12 @@ name = "foxguard"
 
 [detection]
 enabled = false
-model_path = "crates/camera/models/yolov8n.onnx"
+model_path = "crates/camera/models/yolo26n.onnx"
 model_detect_face_path = "crates/camera/models/face_detection_yunet_2023mar.onnx"
 model_face_path = "crates/camera/models/arcface-mobilefacenet.onnx"
 input_size = 320
 input_face_size = 112
-confidence_threshold = 0.5
+confidence_threshold = 0.4
 email_cooldown_secs = 60
 # Dossier des photos de référence de la reconnaissance faciale, où sont aussi
 # écrites les captures déclenchées depuis l'interface web. Relatif au

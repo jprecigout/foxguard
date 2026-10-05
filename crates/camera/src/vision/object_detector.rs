@@ -1,14 +1,17 @@
-//! Détection d'objets ONNX (YOLOv8), restreinte aux classes personne / chat
-//! / chien.
+//! Détection d'objets ONNX (YOLO26), restreinte aux classes personne / chat /
+//! chien.
+//!
+//! Le modèle est un export « end-to-end » : il rend directement une ligne par
+//! objet, déjà dédoublonnée, et aucune suppression des non-maxima (NMS) n'est
+//! à faire ici.
 //!
 //! L'entrée du modèle est un CARRÉ, alors que la caméra filme en 4:3. La
 //! frame y est donc mise en lettres plutôt qu'écrasée (voir [`letterbox`]),
 //! et les coordonnées prédites sont ramenées ensuite dans l'image d'origine
 //! (voir [`Letterboxed::to_source`]).
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use image::{Rgb, RgbImage, imageops::FilterType};
-use rayon::prelude::*;
 use std::sync::Arc;
 use tract_onnx::prelude::*;
 
@@ -17,7 +20,7 @@ use crate::config::DetectionConfig;
 use super::model::load_onnx_model;
 use super::types::BoundingBox;
 
-/// Noms des 80 classes COCO, dans l'ordre attendu par la sortie du modèle YOLOv8.
+/// Noms des 80 classes COCO, dans l'ordre des identifiants rendus par le modèle.
 pub const COCO_CLASSES: &[&str] = &[
     "person",
     "bicycle",
@@ -103,8 +106,8 @@ pub const COCO_CLASSES: &[&str] = &[
 
 /// Gris de remplissage des bandes du letterbox.
 ///
-/// 114 sur les trois canaux : c'est la valeur que la chaîne d'entraînement de
-/// YOLOv8 utilise pour ses propres bandes. Un noir franc créerait aux bords
+/// 114 sur les trois canaux : c'est la valeur que la chaîne d'entraînement
+/// d'Ultralytics utilise pour ses propres bandes. Un noir franc créerait aux bords
 /// un contraste que le modèle n'a jamais vu à l'entraînement.
 const LETTERBOX_FILL: Rgb<u8> = Rgb([114, 114, 114]);
 
@@ -131,8 +134,8 @@ struct Letterboxed {
 /// # Pourquoi pas un simple redimensionnement
 ///
 /// Un `resize` direct vers un carré ÉCRASE le 4:3 de la caméra : en 640x480
-/// vers 640x640, toute la scène est étirée d'un tiers en hauteur. Or YOLOv8 a
-/// été entraîné sur des images letterboxées — il n'a jamais vu de silhouettes
+/// vers 640x640, toute la scène est étirée d'un tiers en hauteur. Or YOLO a été
+/// entraîné sur des images letterboxées — il n'a jamais vu de silhouettes
 /// déformées, et une personne allongée verticalement ressemble moins à ce
 /// qu'il connaît. Les scores baissent, et les détections les plus fragiles
 /// (personne lointaine, animal de dos) passent sous le seuil de confiance.
@@ -175,7 +178,7 @@ fn letterbox(img: &RgbImage, size: u32) -> Letterboxed {
 }
 
 impl Letterboxed {
-    /// Ramène une boîte prédite par le modèle (centre et dimensions, dans
+    /// Ramène une boîte prédite par le modèle (coins `x1, y1, x2, y2`, dans
     /// l'espace du canevas) vers les coordonnées de l'image d'origine.
     ///
     /// Les bandes sont retirées, l'échelle défaite, et le résultat est rogné
@@ -187,14 +190,14 @@ impl Letterboxed {
     ///
     /// Retourne `None` pour une boîte qui ne retombe pas sur au moins un
     /// pixel — celle qui tiendrait entièrement dans une bande, par exemple.
-    fn to_source(&self, cx: f32, cy: f32, w: f32, h: f32) -> Option<(u32, u32, u32, u32)> {
+    fn to_source(&self, x1: f32, y1: f32, x2: f32, y2: f32) -> Option<(u32, u32, u32, u32)> {
         let to_source_x = |x: f32| ((x - self.pad_x) / self.scale).clamp(0.0, self.source_width);
         let to_source_y = |y: f32| ((y - self.pad_y) / self.scale).clamp(0.0, self.source_height);
 
-        let left = to_source_x(cx - w / 2.0);
-        let right = to_source_x(cx + w / 2.0);
-        let top = to_source_y(cy - h / 2.0);
-        let bottom = to_source_y(cy + h / 2.0);
+        let left = to_source_x(x1);
+        let right = to_source_x(x2);
+        let top = to_source_y(y1);
+        let bottom = to_source_y(y2);
 
         let width = (right - left) as u32;
         let height = (bottom - top) as u32;
@@ -203,22 +206,41 @@ impl Letterboxed {
     }
 }
 
-/// Détecteur d'objets ONNX (YOLOv8), restreint aux classes personne/chat/chien.
+/// Classes retenues parmi les 80 du jeu COCO.
+const ALLOWED_CLASSES: &[&str] = &["person", "cat", "dog"];
+
+/// Nombre maximal de détections rendues par image.
+const MAX_DETECTIONS: usize = 10;
+
+/// Détecteur d'objets ONNX (YOLO26), restreint aux classes personne/chat/chien.
 pub struct ObjectDetector {
     model: Arc<TypedSimplePlan>,
     config: DetectionConfig,
 }
 
 impl ObjectDetector {
-    /// Charge le modèle YOLOv8 à la taille d'entrée fixée par `config.input_size`.
+    /// Charge le modèle YOLO26 à la taille d'entrée fixée par
+    /// `config.input_size`.
+    ///
+    /// L'export ONNX fige cette taille (les couches d'attention sont
+    /// dimensionnées pour elle) : toute autre valeur est refusée, et l'erreur
+    /// le rappelle plutôt que de laisser l'opérateur face au seul message de
+    /// tract.
     pub fn new(config: DetectionConfig) -> Result<Self> {
         let size = config.input_size;
-        let model = load_onnx_model(&config.model_path, size, size)?;
+        let model = load_onnx_model(&config.model_path, size, size).with_context(|| {
+            format!(
+                "chargement de {} en {size}x{size} (l'export ONNX fige la taille \
+                 d'entrée : `input_size` doit être celle de l'export)",
+                config.model_path
+            )
+        })?;
 
         Ok(Self { model, config })
     }
 
-    /// Détection ultra-rapide et vectorisée avec ndarray et Rayon
+    /// Détecte personnes, chats et chiens sur `img`, par confiance
+    /// décroissante.
     pub fn detect(&self, img: &RgbImage) -> Result<Vec<BoundingBox>> {
         let size = self.config.input_size;
 
@@ -240,125 +262,69 @@ impl ObjectDetector {
         let outputs = self.model.run(tvec!(tensor.into()))?;
         let output = outputs[0].to_plain_array_view::<f32>()?;
 
-        let shape = output.shape();
-        if shape.len() < 3 {
-            return Ok(Vec::new());
-        }
-
-        let num_anchors = shape[2];
-
-        // Définition des classes autorisées pour la détection (personne, chat, chien)
-        let allowed_classes = ["person", "cat", "dog"];
-
-        // PARALLÉLISATION RAYON : Décodage et filtrage parallèle de toutes les ancres YOLO
-        let mut detections: Vec<BoundingBox> = (0..num_anchors)
-            .into_par_iter()
-            .filter_map(|col| {
-                let cx = output[[0, 0, col]];
-                let cy = output[[0, 1, col]];
-                let w = output[[0, 2, col]];
-                let h = output[[0, 3, col]];
-
-                let mut max_score = 0.0f32;
-                let mut class_id = 0;
-
-                // Recherche de la classe à plus fort score pour cette ancre
-                for c in 0..80 {
-                    let score = output[[0, 4 + c, col]];
-                    if score > max_score {
-                        max_score = score;
-                        class_id = c;
-                    }
-                }
-
-                if max_score < self.config.confidence_threshold {
-                    return None;
-                }
-
-                let label = COCO_CLASSES.get(class_id).unwrap_or(&"inconnu");
-
-                // FILTRE : Seules les classes autorisées sont retenues
-                if !allowed_classes.contains(label) {
-                    return None;
-                }
-
-                // Espace du canevas -> image d'origine : bandes retirées,
-                // échelle défaite, débordements rognés.
-                let (x, y, width, height) = letterboxed.to_source(cx, cy, w, h)?;
-
-                Some(BoundingBox {
-                    x,
-                    y,
-                    width,
-                    height,
-                    label: label.to_string(),
-                    confidence: max_score,
-                })
-            })
-            .collect();
-
-        // PARALLÉLISATION RAYON : Tri rapide décroissant par score de confiance
-        detections.par_sort_unstable_by(|a, b| {
-            b.confidence
-                .partial_cmp(&a.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // Filtrage NMS (seuil IoU fixé à 0.45)
-        let mut final_detections = non_maximum_suppression(detections, 0.45);
-
-        // Conservation des 10 meilleures détections
-        final_detections.truncate(10);
-
-        Ok(final_detections)
+        decode(&output, &letterboxed, self.config.confidence_threshold)
     }
 }
 
-/// Calcule le chevauchement (Intersection over Union) entre deux boîtes (voir
-/// [`crate::geometry::iou`], partagé avec le tracking de personnes)
-fn calculate_iou(box1: &BoundingBox, box2: &BoundingBox) -> f32 {
-    let to_rect = |b: &BoundingBox| (b.x as f32, b.y as f32, b.width as f32, b.height as f32);
+/// Décode la sortie du modèle, `[1, détections, 6]` : une ligne par objet —
+/// coins `x1, y1, x2, y2` dans l'espace du canevas, score, classe.
+///
+/// Ne retient que les classes de [`ALLOWED_CLASSES`] au-dessus de `threshold`,
+/// ramenées dans l'image d'origine, et au plus [`MAX_DETECTIONS`], par
+/// confiance décroissante.
+fn decode(
+    output: &tract_ndarray::ArrayViewD<f32>,
+    letterboxed: &Letterboxed,
+    threshold: f32,
+) -> Result<Vec<BoundingBox>> {
+    let rows = match output.shape() {
+        [1, rows, 6] => *rows,
+        shape => anyhow::bail!(
+            "sortie de modèle inattendue {shape:?} : un export YOLO26 end-to-end \
+             rend [1, détections, 6]"
+        ),
+    };
 
-    crate::geometry::iou(to_rect(box1), to_rect(box2))
-}
+    let mut detections: Vec<BoundingBox> = (0..rows)
+        .filter_map(|row| {
+            let at = |col: usize| output[[0, row, col]];
 
-/// Filtre les détections doublons pour un même objet
-fn non_maximum_suppression(mut boxes: Vec<BoundingBox>, iou_threshold: f32) -> Vec<BoundingBox> {
-    let mut kept_boxes = Vec::new();
-
-    while !boxes.is_empty() {
-        // La boîte avec la plus haute confiance est extraite
-        let current = boxes.remove(0);
-
-        // On élimine les autres boîtes de même classe qui chevauchent trop la boîte courante
-        boxes.retain(|b| {
-            if b.label == current.label {
-                calculate_iou(&current, b) < iou_threshold
-            } else {
-                true
+            let confidence = at(4);
+            if confidence < threshold {
+                return None;
             }
-        });
 
-        kept_boxes.push(current);
-    }
+            let label = *COCO_CLASSES.get(at(5) as usize)?;
+            if !ALLOWED_CLASSES.contains(&label) {
+                return None;
+            }
 
-    kept_boxes
+            // Espace du canevas -> image d'origine : bandes retirées,
+            // échelle défaite, débordements rognés.
+            let (x, y, width, height) = letterboxed.to_source(at(0), at(1), at(2), at(3))?;
+
+            Some(BoundingBox {
+                x,
+                y,
+                width,
+                height,
+                label: label.to_string(),
+                confidence,
+            })
+        })
+        .collect();
+
+    // Le modèle trie déjà ses lignes, mais rien dans le format ne le
+    // garantit : le tri, sur une poignée de boîtes, ne coûte rien.
+    detections.sort_unstable_by(|a, b| b.confidence.total_cmp(&a.confidence));
+    detections.truncate(MAX_DETECTIONS);
+
+    Ok(detections)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn bbox(x: u32, y: u32, width: u32, height: u32, label: &str, confidence: f32) -> BoundingBox {
-        BoundingBox {
-            x,
-            y,
-            width,
-            height,
-            label: label.to_string(),
-            confidence,
-        }
-    }
 
     /// Image unie, pour distinguer les pixels d'origine des bandes.
     fn filled(width: u32, height: u32, color: [u8; 3]) -> RgbImage {
@@ -432,7 +398,7 @@ mod tests {
         // Dans l'espace du canevas, l'image occupe y ∈ [80, 560] : une boîte
         // qui l'épouse exactement doit redonner l'image entière.
         assert_eq!(
-            boxed.to_source(320.0, 320.0, 640.0, 480.0),
+            boxed.to_source(0.0, 80.0, 640.0, 560.0),
             Some((0, 0, 640, 480))
         );
     }
@@ -444,7 +410,7 @@ mod tests {
         // Boîte de 100x100 centrée sur le canevas : horizontalement
         // inchangée, verticalement remontée des 80 lignes de la bande haute.
         assert_eq!(
-            boxed.to_source(320.0, 320.0, 100.0, 100.0),
+            boxed.to_source(270.0, 270.0, 370.0, 370.0),
             Some((270, 190, 100, 100))
         );
     }
@@ -456,7 +422,7 @@ mod tests {
         let boxed = letterbox(&filled(1280, 720, [0, 0, 0]), 640);
 
         assert_eq!(
-            boxed.to_source(320.0, 320.0, 100.0, 100.0),
+            boxed.to_source(270.0, 270.0, 370.0, 370.0),
             Some((540, 260, 200, 200))
         );
     }
@@ -468,7 +434,7 @@ mod tests {
         let boxed = letterbox(&filled(640, 480, [0, 0, 0]), 640);
 
         let (x, y, width, height) = boxed
-            .to_source(0.0, 320.0, 200.0, 200.0)
+            .to_source(-100.0, 220.0, 100.0, 420.0)
             .expect("la boîte recouvre une partie de l'image");
 
         assert_eq!((x, y), (0, 140));
@@ -482,62 +448,70 @@ mod tests {
         // de la caméra : la retenir ferait une boîte vide sur le flux.
         let boxed = letterbox(&filled(640, 480, [0, 0, 0]), 640);
 
-        assert_eq!(boxed.to_source(320.0, 20.0, 40.0, 40.0), None);
+        assert_eq!(boxed.to_source(300.0, 0.0, 340.0, 40.0), None);
+    }
+
+    // --- decode ---
+
+    /// Sortie de modèle `[1, lignes, 6]` faite des `rows` donnés.
+    fn output(rows: &[[f32; 6]]) -> tract_ndarray::ArrayD<f32> {
+        tract_ndarray::Array3::from_shape_fn((1, rows.len(), 6), |(_, r, c)| rows[r][c]).into_dyn()
+    }
+
+    /// Canevas sans bande ni mise à l'échelle : les coordonnées du modèle
+    /// sont celles de l'image.
+    fn square() -> Letterboxed {
+        letterbox(&filled(640, 640, [0, 0, 0]), 640)
     }
 
     #[test]
-    fn calculate_iou_matches_geometry_iou() {
-        let a = bbox(0, 0, 10, 10, "person", 0.9);
-        let b = bbox(5, 0, 10, 10, "person", 0.8);
-        let expected = crate::geometry::iou((0.0, 0.0, 10.0, 10.0), (5.0, 0.0, 10.0, 10.0));
-        assert_eq!(calculate_iou(&a, &b), expected);
+    fn a_row_becomes_a_box_from_its_corners() {
+        // Coins (100, 200)-(300, 600), score 0.9, classe 15 (chat).
+        let out = output(&[[100.0, 200.0, 300.0, 600.0, 0.9, 15.0]]);
+
+        let boxes = decode(&out.view(), &square(), 0.4).unwrap();
+
+        assert_eq!(boxes.len(), 1);
+        let b = &boxes[0];
+        assert_eq!((b.x, b.y, b.width, b.height), (100, 200, 200, 400));
+        assert_eq!(b.label, "cat");
+        assert_eq!(b.confidence, 0.9);
     }
 
     #[test]
-    fn nms_on_empty_input_returns_empty_output() {
-        assert!(non_maximum_suppression(Vec::new(), 0.45).is_empty());
+    fn rows_under_the_threshold_or_of_another_class_are_dropped() {
+        let out = output(&[
+            [0.0, 0.0, 10.0, 10.0, 0.39, 0.0],  // personne, sous le seuil
+            [0.0, 0.0, 10.0, 10.0, 0.95, 2.0],  // voiture
+            [0.0, 0.0, 10.0, 10.0, 0.95, 99.0], // classe hors COCO
+            [0.0, 0.0, 10.0, 10.0, 0.41, 16.0], // chien, retenu
+        ]);
+
+        let boxes = decode(&out.view(), &square(), 0.4).unwrap();
+
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0].label, "dog");
     }
 
     #[test]
-    fn nms_keeps_a_single_detection() {
-        let boxes = vec![bbox(0, 0, 10, 10, "person", 0.9)];
-        let kept = non_maximum_suppression(boxes, 0.45);
-        assert_eq!(kept.len(), 1);
+    fn boxes_come_out_by_decreasing_confidence_and_capped() {
+        let rows: Vec<[f32; 6]> = (0..15)
+            .map(|i| [0.0, 0.0, 10.0, 10.0, 0.5 + i as f32 * 0.01, 0.0])
+            .collect();
+
+        let boxes = decode(&output(&rows).view(), &square(), 0.4).unwrap();
+
+        assert_eq!(boxes.len(), MAX_DETECTIONS);
+        assert!(boxes.windows(2).all(|w| w[0].confidence >= w[1].confidence));
+        assert!((boxes[0].confidence - 0.64).abs() < 1e-6);
     }
 
     #[test]
-    fn nms_suppresses_heavily_overlapping_boxes_of_the_same_label() {
-        // Deux boîtes quasi identiques pour "person" : seule celle avec la
-        // plus haute confiance doit être conservée.
-        let boxes = vec![
-            bbox(0, 0, 10, 10, "person", 0.95),
-            bbox(1, 1, 10, 10, "person", 0.80),
-        ];
-        let kept = non_maximum_suppression(boxes, 0.45);
-        assert_eq!(kept.len(), 1);
-        assert!((kept[0].confidence - 0.95).abs() < 1e-6);
-    }
+    fn an_output_of_another_shape_is_an_error() {
+        // Sortie à ancres d'un export non end-to-end : refusée plutôt que
+        // décodée de travers.
+        let out = tract_ndarray::Array3::<f32>::zeros((1, 84, 2100)).into_dyn();
 
-    #[test]
-    fn nms_keeps_overlapping_boxes_of_different_labels() {
-        // Un chat et une personne peuvent légitimement se chevaucher
-        // fortement (ex : chat porté dans les bras) : NMS ne compare que les
-        // boîtes de même label.
-        let boxes = vec![
-            bbox(0, 0, 10, 10, "person", 0.9),
-            bbox(0, 0, 10, 10, "cat", 0.85),
-        ];
-        let kept = non_maximum_suppression(boxes, 0.45);
-        assert_eq!(kept.len(), 2);
-    }
-
-    #[test]
-    fn nms_keeps_distant_boxes_of_the_same_label() {
-        let boxes = vec![
-            bbox(0, 0, 10, 10, "person", 0.9),
-            bbox(500, 500, 10, 10, "person", 0.8),
-        ];
-        let kept = non_maximum_suppression(boxes, 0.45);
-        assert_eq!(kept.len(), 2);
+        assert!(decode(&out.view(), &square(), 0.4).is_err());
     }
 }

@@ -106,7 +106,7 @@ COPY --from=builder --chown=foxguard:foxguard /app/target/release/foxguard-camer
 # il doit être présent dans l'image, pas seulement à la compilation.
 COPY --from=builder --chown=foxguard:foxguard /app/crates/camera/static /app/static
 COPY --chown=foxguard:foxguard camera-config.toml /app/camera-config.toml
-# Les 3 modèles ONNX (YOLOv8, YuNet, ArcFace)
+# Les 3 modèles ONNX (YOLO26, YuNet, ArcFace)
 COPY --chown=foxguard:foxguard crates/camera/models /app/crates/camera/models
 
 # 🔒 BASCULEMENT SUR L'UTILISATEUR NON-ROOT

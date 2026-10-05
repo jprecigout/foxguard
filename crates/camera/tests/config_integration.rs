@@ -73,7 +73,7 @@ fn load_round_trips_a_full_config_written_to_a_real_file_on_disk() {
 
         [detection]
         enabled = true
-        model_path = "src/vision/models/yolov8n.onnx"
+        model_path = "crates/camera/models/yolo26n.onnx"
         model_detect_face_path = "src/vision/models/face_detection_yunet_2023mar.onnx"
         model_face_path = "src/vision/models/arcface-mobilefacenet.onnx"
         input_size = 640
