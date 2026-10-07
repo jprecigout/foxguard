@@ -10,16 +10,6 @@ export type EventsResponse = {
  */
 count: number, 
 /**
- * Nombre total d'événements conservés en base.
- *
- * `ts(type = "number")` corrige la correspondance par défaut de ts-rs,
- * qui traduit `i64` en `bigint` par prudence sur la précision. Or
- * `serde_json` sérialise ce champ en nombre JSON ordinaire, et
- * `JSON.parse` en produit donc un `number` : annoncer `bigint` côté
- * TypeScript décrirait une valeur qui n'arrive jamais.
- */
-total: number, 
-/**
  * Du plus récent au plus ancien.
  */
 events: Array<EventRecord>, 

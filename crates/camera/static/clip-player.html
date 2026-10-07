@@ -151,10 +151,11 @@
             return last ? decodeURIComponent(last) : '';
         }
 
-        // Injecté par la caméra au moment de servir la page (voir
-        // `clip_player_handler` dans src/api.rs) : il ne transite jamais par
-        // le manager, qui n'a aucune raison de le connaître.
-        const API_TOKEN = "__FOXGUARD_API_TOKEN__";
+        // Chaîne de requête d'authentification, injectée par la caméra au
+        // moment de servir la page (voir `scoped_page` dans src/api.rs) : un
+        // ticket de SESSION limité à ce que fait cette page, jamais le jeton
+        // d'API de la caméra (sauf si la page a été ouverte avec lui).
+        const AUTH_QUERY = "__FOXGUARD_AUTH_QUERY__";
 
         /** Affiche un message d'erreur à la place du lecteur. */
         function fail(message) {
@@ -189,12 +190,9 @@
             // Rust) : c'est ce qui permet au `<video>` de se déplacer dans le
             // clip sans le télécharger en entier.
             //
-            // Elle est AUTHENTIFIÉE (voir `recording_handler` côté Rust) : le
-            // jeton est injecté dans cette page par la caméra, exactement
-            // comme pour le direct. Le manager, qui affiche cette page dans un
-            // cadre, ne le connaît toujours pas.
-            video.src = `/recordings/${encodeURIComponent(filename)}`
-                + `?token=${encodeURIComponent(API_TOKEN)}`;
+            // Elle est AUTHENTIFIÉE (voir `recording_handler` côté Rust), par
+            // un ticket qui n'ouvre que CE clip.
+            video.src = `/recordings/${encodeURIComponent(filename)}?${AUTH_QUERY}`;
 
             video.addEventListener('loadeddata', () => {
                 statusEl.hidden = true;

@@ -32,7 +32,7 @@ mod worker;
 
 pub use clips::ClipRecorder;
 pub use recording::RecordingFormat;
-pub use state::SharedState;
+pub use state::{DEFAULT_MAX_STREAM_CLIENTS, SharedState};
 
 use anyhow::{Context, Result};
 use image::RgbImage;

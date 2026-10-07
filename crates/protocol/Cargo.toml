@@ -20,12 +20,15 @@ ts-rs = { workspace = true, optional = true }
 # revendiqué ci-dessus : c'est de la sérialisation, exactement le périmètre
 # de ce crate, et base64 est du Rust pur sans assembleur par architecture.
 base64 = { workspace = true }
-# Signature des tickets de visionnage du direct (voir `src/stream_ticket.rs`).
+# Signature des tickets d'accès aux caméras (voir `src/ticket.rs`).
 # Admis pour la même raison que base64 : c'est le CONTRAT entre la caméra qui
 # vérifie et le manager qui signe, et les deux doivent calculer exactement la
 # même chose. Pur Rust, sans assembleur (voir le Cargo.toml du workspace).
 hmac = { workspace = true }
 sha2 = { workspace = true }
+# Comparaison des jetons en temps constant (voir `src/auth.rs`), déjà tiré
+# par `hmac`.
+subtle = { workspace = true }
 
 [features]
 # Génère les définitions TypeScript de ces types (voir `ui/src/generated/`).

@@ -120,10 +120,11 @@
     </main>
 
     <script>
-        // Le jeton est injecté par la caméra au moment de servir la page (voir
-        // `live_handler` dans src/api.rs) : il ne transite jamais par le
-        // manager, qui n'a aucune raison de le connaître.
-        const API_TOKEN = "__FOXGUARD_API_TOKEN__";
+        // Chaîne de requête d'authentification, injectée par la caméra au
+        // moment de servir la page (voir `scoped_page` dans src/api.rs) : un
+        // ticket de SESSION limité à ce que fait cette page, jamais le jeton
+        // d'API de la caméra (sauf si la page a été ouverte avec lui).
+        const AUTH_QUERY = "__FOXGUARD_AUTH_QUERY__";
 
         const statusEl = document.getElementById('status');
         const canvas = document.getElementById('canvas');
@@ -192,7 +193,7 @@
         function connect() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             socket = new WebSocket(
-                `${protocol}//${window.location.host}/ws?token=${API_TOKEN}`
+                `${protocol}//${window.location.host}/ws?${AUTH_QUERY}`
             );
             socket.binaryType = 'arraybuffer';
 

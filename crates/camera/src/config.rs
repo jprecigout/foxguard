@@ -370,10 +370,9 @@ pub struct ServerConfig {
     /// URL de base par laquelle cette caméra est joignable depuis un
     /// navigateur, ex. `http://192.168.1.42:8080`.
     ///
-    /// Publiée dans les événements MQTT pour que la timeline de l'interface
-    /// du manager puisse offrir un lien direct vers le clip d'une détection
-    /// ET vers la vue en direct de la caméra (voir
-    /// `foxguard_protocol::DetectionEvent::clip_url` et `::live_url`).
+    /// Publiée dans les événements MQTT pour que l'interface du manager
+    /// puisse ouvrir le clip d'une détection, le direct de la caméra et son
+    /// interrupteur (voir `foxguard_protocol::DetectionEvent::base_url`).
     ///
     /// La caméra NE PEUT PAS la deviner : elle écoute en général sur
     /// `0.0.0.0`, et son adresse vue du navigateur dépend du réseau et d'un
@@ -383,18 +382,41 @@ pub struct ServerConfig {
     #[serde(default)]
     pub public_url: String,
 
-    /// Secret partagé avec le manager, avec lequel il signe des tickets de
-    /// visionnage du direct (voir `foxguard_protocol::stream_ticket`).
+    /// Secret partagé avec le manager, avec lequel il signe des tickets
+    /// d'accès (voir `foxguard_protocol::ticket`).
     ///
-    /// Un ticket ouvre `GET /ws` en LECTURE SEULE, pour cette caméra et pour
-    /// quelques minutes : c'est ce qui permet à l'interface du manager
-    /// d'afficher le direct sans jamais connaître [`Self::api_token`], qui
-    /// donne tous les droits.
+    /// Un ticket n'accorde qu'UNE portée — regarder le direct, piloter la
+    /// surveillance, ou lire un clip — pour cette caméra et pour quelques
+    /// minutes : c'est ce qui permet à l'interface du manager d'ouvrir ces
+    /// pages sans jamais connaître [`Self::api_token`], qui donne tous les
+    /// droits.
     ///
-    /// Vide (le défaut), les tickets sont refusés et seul le jeton ouvre le
-    /// flux. Il doit être IDENTIQUE à `[stream] ticket_secret` du manager.
+    /// Vide (le défaut), les tickets du manager sont refusés : son interface
+    /// ne propose alors ni direct, ni clip, ni interrupteur. Il doit être
+    /// IDENTIQUE à `[stream] ticket_secret` du manager.
     #[serde(default)]
     pub stream_ticket_secret: String,
+
+    /// Origine de l'interface du manager, ex. `https://foxguard.maison`.
+    ///
+    /// Si elle est renseignée, seules ses pages peuvent afficher celles de la
+    /// caméra dans un cadre (`Content-Security-Policy: frame-ancestors`).
+    /// Vide (le défaut), n'importe quelle origine le peut — les pages restent
+    /// protégées par le ticket qu'elles exigent.
+    #[serde(default)]
+    pub manager_origin: String,
+
+    /// Nombre maximal de clients simultanés du flux vidéo (`GET /ws`).
+    ///
+    /// Chaque connexion force l'encodeur à produire une image clé : sans
+    /// plafond, un ticket rejoué en boucle suffirait à saturer le Raspberry
+    /// Pi. Au-delà, la caméra répond 503.
+    #[serde(default = "default_max_stream_clients")]
+    pub max_stream_clients: usize,
+}
+
+fn default_max_stream_clients() -> usize {
+    crate::capture::DEFAULT_MAX_STREAM_CLIENTS
 }
 
 /// Paramètres de la caméra V4L2.
@@ -510,7 +532,7 @@ impl Config {
         let content = std::fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
 
-        foxguard_protocol::stream_ticket::validate_secret(&config.server.stream_ticket_secret)
+        foxguard_protocol::ticket::validate_secret(&config.server.stream_ticket_secret)
             .map_err(|e| anyhow::anyhow!("[server] stream_ticket_secret : {e}"))?;
 
         Ok(config)

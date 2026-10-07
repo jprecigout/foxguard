@@ -44,6 +44,8 @@ base64 = "0.22"
 # présents dans le lock, tirés par d'autres dépendances.
 hmac = "0.12"
 sha2 = "0.10"
+# Comparaison de secrets en temps constant (voir `foxguard_protocol::auth`).
+subtle = "2.6"
 tower-http = { version = "0.7.0", features = ["fs"] }
 chrono = "0.4"
 serde = { version = "1.0", features = ["derive"] }

@@ -1,0 +1,28 @@
+# Reverse-proxy TLS devant le manager (service `caddy` de compose.yml, profil
+# `tls`).
+#
+# Pourquoi un proxy plutôt que TLS dans le manager : un composant éprouvé, des
+# certificats renouvelés tout seuls, et la même recette devant les caméras
+# (voir deploy/camera/Caddyfile), qui ne peuvent PAS embarquer de TLS sans
+# casser leur compilation croisée ARM64.
+#
+# Deux variables, dans le `.env` à côté du compose :
+#
+#   FOXGUARD_SITE   l'adresse sous laquelle le manager est joint :
+#                     foxguard.example.com   (un vrai nom de domaine)
+#                     https://192.168.1.50   (une IP de votre réseau local)
+#   FOXGUARD_TLS    « internal » (défaut) : Caddy signe lui-même ses
+#                   certificats avec sa propre autorité, à installer une fois
+#                   sur chaque appareil client (voir le README) ;
+#                   ou une adresse e-mail : certificat Let's Encrypt, si le
+#                   nom de domaine est joignable depuis Internet.
+#
+# ⚠️ Activer TLS ici impose de l'activer AUSSI devant chaque caméra : une page
+# HTTPS ne peut ni ouvrir un `ws://`, ni afficher un cadre `http://`.
+
+{$FOXGUARD_SITE:localhost} {
+	tls {$FOXGUARD_TLS:internal}
+
+	# Le manager compresse déjà ses réponses : pas de second `encode` ici.
+	reverse_proxy manager:8090
+}

@@ -11,15 +11,36 @@ port = 8090
 # les routes /api/* répondent.
 ui_dir = "ui/dist"
 
-# Mosaïque des directs de l'interface (section optionnelle).
+# SECTION OBLIGATOIRE : le manager refuse de démarrer sans elle. Ouvert, il
+# donnerait l'historique, les directs et les interrupteurs de toutes les
+# caméras à quiconque atteint son port.
+#
+# Le navigateur demande ces identifiants (authentification HTTP Basic). Le
+# mot de passe n'est JAMAIS écrit ici, seulement son hachage :
+#
+#   docker run --rm -i foxguard-manager:latest ./foxguard-manager hash-password
+#   (ou, depuis le dépôt : cargo run -p foxguard-manager -- hash-password)
+#
+# HTTP Basic transmet le mot de passe à chaque requête : servez le manager en
+# HTTPS (service `caddy` de compose.yml, profil `tls`) dès qu'il sort de votre
+# réseau local.
+[auth]
+username = "admin"
+password_hash = ""
+# Pour laisser le manager OUVERT (derrière un proxy qui authentifie lui-même,
+# par exemple), il faut l'écrire explicitement :
+# disabled = true
+
+# Accès aux caméras depuis l'interface : direct, clips, interrupteur.
 [stream]
-# Secret partagé avec les caméras : le manager signe avec lui des tickets de
-# visionnage, qui ouvrent le flux vidéo d'UNE caméra, en LECTURE SEULE, pour
-# deux minutes. Il ne connaît ainsi le jeton d'API d'aucune caméra.
+# Secret partagé avec les caméras : le manager signe avec lui des tickets qui
+# n'ouvrent qu'UNE chose — le direct d'une caméra (lecture seule), son
+# interrupteur, ou un clip — pour deux minutes. Il ne connaît ainsi le jeton
+# d'API d'aucune caméra.
 #
 # Doit être IDENTIQUE à `[server] stream_ticket_secret` de chaque caméra, et
 # faire au moins 32 caractères (`openssl rand -hex 32`). VIDE (le défaut) :
-# l'interface ne propose pas de direct.
+# l'interface ne propose ni direct, ni clip, ni interrupteur.
 ticket_secret = ""
 
 # SEULE SECTION OBLIGATOIRE : sans broker, le manager n'a rien à agréger.

@@ -9,7 +9,8 @@ use axum::{
         ConnectInfo, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
+    middleware,
     response::{Html, IntoResponse, Response},
     routing::{delete, get},
 };
@@ -26,8 +27,9 @@ use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{debug, error, info, warn};
 
-use foxguard_protocol::stream_ticket::{self, TicketError};
+use foxguard_protocol::ticket::Scope;
 
+use crate::auth::{self, Access, has_token};
 use crate::capture::SharedState;
 use crate::h264::{H264Stream, NAL_SPS, nal_type};
 use crate::retention::is_recording_file;
@@ -61,16 +63,7 @@ pub struct VideoFile {
     pub size_mb: f64,
 }
 
-/// Paramètres de requête d'authentification (`?token=...`, ou `?ticket=...`
-/// sur `GET /ws` uniquement).
-#[derive(Deserialize)]
-pub struct AuthQuery {
-    pub token: Option<String>,
-    /// Ticket de visionnage signé par le manager (voir
-    /// `foxguard_protocol::stream_ticket`). N'est accepté QUE par
-    /// [`ws_handler`], et n'y ouvre qu'un flux en lecture seule.
-    pub ticket: Option<String>,
-}
+pub use crate::auth::AuthQuery;
 
 /// Ce qu'une connexion WebSocket a le droit de faire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,7 +161,9 @@ async fn set_monitoring_handler(
     State(state): State<Arc<SharedState>>,
     Json(request): Json<MonitoringRequest>,
 ) -> Response {
-    if auth.token.as_deref() != Some(state.api_token.as_str()) {
+    // Le jeton, ou un ticket de portée « surveillance » : c'est ce que reçoit
+    // la page `/control` ouverte depuis le manager (voir `crate::auth`).
+    if auth::authorize(&auth, &state, Scope::Monitoring).is_none() {
         warn!("⚠️ Tentative de pilotage de la surveillance rejetée (Token invalide).");
         return (StatusCode::UNAUTHORIZED, "Accès refusé").into_response();
     }
@@ -191,12 +186,12 @@ async fn set_monitoring_handler(
 
 /// Vrai si la requête porte le jeton d'API de cette caméra.
 ///
-/// Partagée par TOUTES les routes authentifiées, et c'est le point : une
+/// Partagée par TOUTES les routes réservées au jeton, et c'est le point : une
 /// vérification plus laxiste d'un côté que de l'autre est une faille, et c'est
 /// exactement ce qui s'était produit — la suppression d'un enregistrement
 /// était protégée, son TÉLÉCHARGEMENT ne l'était pas.
 fn is_authorized(auth: &AuthQuery, state: &SharedState) -> bool {
-    auth.token.as_deref() == Some(state.api_token.as_str())
+    has_token(auth, state)
 }
 
 /// Liste des enregistrements disponibles (`GET /api/recordings?token=...`).
@@ -266,8 +261,9 @@ async fn recording_handler(
     request: axum::extract::Request,
 ) -> Response {
     // AUTHENTIFIÉ, comme la liste : c'est ici que passent les octets des
-    // enregistrements (voir [`list_recordings_handler`] pour pourquoi).
-    if !is_authorized(&auth, &state) {
+    // enregistrements (voir [`list_recordings_handler`] pour pourquoi). Un
+    // ticket n'ouvre que le clip pour lequel il a été émis.
+    if auth::authorize(&auth, &state, Scope::Clip(&filename)).is_none() {
         warn!("⚠️ Téléchargement d'un enregistrement refusé (Token invalide).");
         return (StatusCode::UNAUTHORIZED, "Accès refusé").into_response();
     }
@@ -367,8 +363,28 @@ pub async fn ws_handler(
     Query(auth): Query<AuthQuery>,
     State(state): State<Arc<SharedState>>,
 ) -> Response {
-    let Some(access) = ws_access(&auth, &state) else {
-        return (StatusCode::UNAUTHORIZED, "Accès refusé").into_response();
+    let access = match auth::authorize(&auth, &state, Scope::Stream) {
+        Some(Access::Token) => WsAccess::Full,
+        Some(Access::Ticket) => WsAccess::ViewOnly,
+        None => {
+            warn!("⚠️ Tentative de connexion WebSocket rejetée (Token invalide).");
+            return (StatusCode::UNAUTHORIZED, "Accès refusé").into_response();
+        }
+    };
+
+    // La place est réservée AVANT l'upgrade : deux connexions simultanées ne
+    // peuvent pas passer toutes les deux sur la dernière place libre.
+    let Some(slot) = StreamSlot::acquire(&state) else {
+        warn!(
+            "⚠️ [WS] Connexion refusée pour {addr} : {} clients déjà connectés \
+             (`[server] max_stream_clients`).",
+            state.max_stream_clients
+        );
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Trop de clients connectés au flux vidéo",
+        )
+            .into_response();
     };
 
     let stream = Arc::clone(&state.h264);
@@ -379,52 +395,34 @@ pub async fn ws_handler(
         client_id, addr, access
     );
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state, stream, client_id, addr, access))
-        .into_response()
+    ws.on_upgrade(move |socket| async move {
+        // La place est libérée quand la connexion se termine, quelle qu'en
+        // soit la raison.
+        let _slot = slot;
+        handle_socket(socket, state, stream, client_id, addr, access).await;
+    })
+    .into_response()
 }
 
-/// Droits d'une demande de connexion WebSocket, ou `None` si elle est refusée.
-///
-/// Le jeton d'API d'abord, exactement comme avant : l'interface complète de
-/// la caméra n'est pas concernée par les tickets. Un ticket ensuite, s'ils
-/// sont activés (`[server] stream_ticket_secret`).
-///
-/// Chaque refus est journalisé avec sa CAUSE : un ticket expiré est presque
-/// toujours une horloge déréglée sur la caméra ou le manager, et un 401 sans
-/// explication laisserait chercher longtemps.
-fn ws_access(auth: &AuthQuery, state: &SharedState) -> Option<WsAccess> {
-    if is_authorized(auth, state) {
-        return Some(WsAccess::Full);
+/// Une place parmi les `max_stream_clients` du flux vidéo, rendue à sa
+/// destruction.
+struct StreamSlot(Arc<SharedState>);
+
+impl StreamSlot {
+    fn acquire(state: &Arc<SharedState>) -> Option<Self> {
+        state
+            .stream_clients
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < state.max_stream_clients).then_some(count + 1)
+            })
+            .ok()
+            .map(|_| Self(Arc::clone(state)))
     }
+}
 
-    let Some(ticket) = auth.ticket.as_deref() else {
-        warn!("⚠️ Tentative de connexion WebSocket rejetée (Token invalide).");
-        return None;
-    };
-
-    let Some(secret) = state.stream_ticket_secret.as_deref() else {
-        warn!(
-            "⚠️ Ticket de direct présenté mais refusé : `[server] stream_ticket_secret` \
-             n'est pas configuré sur cette caméra."
-        );
-        return None;
-    };
-
-    let now = chrono::Utc::now().timestamp();
-
-    match stream_ticket::verify(secret.as_bytes(), &state.camera_name, ticket, now) {
-        Ok(()) => Some(WsAccess::ViewOnly),
-        Err(TicketError::Expired) => {
-            warn!(
-                "⚠️ Ticket de direct expiré : vérifiez que les horloges de la caméra et du \
-                 manager sont synchronisées (NTP)."
-            );
-            None
-        }
-        Err(e) => {
-            warn!("⚠️ Ticket de direct refusé : {e:?}.");
-            None
-        }
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        self.0.stream_clients.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -581,112 +579,134 @@ fn codec_string(nals: &[Vec<u8>]) -> Option<String> {
 
 /// Interface complète de la caméra (`GET /`).
 ///
-/// Le jeton y est injecté au moment de servir la page, comme pour `/live` et
-/// `/control`. Il y était auparavant ÉCRIT EN DUR : changer `[server]
-/// api_token` cassait silencieusement l'interface, qui continuait d'envoyer
-/// `secret123`.
-async fn index_handler(State(state): State<Arc<SharedState>>) -> Html<String> {
+/// Elle reçoit le jeton d'API, puisqu'elle pilote TOUT : elle est donc
+/// protégée par une authentification HTTP Basic dont le mot de passe est ce
+/// même jeton (voir [`auth::has_basic_token`]). Elle était auparavant servie à
+/// quiconque atteignait le port — et avec elle, le jeton maître.
+///
+/// Le jeton y est injecté au moment de servir la page plutôt qu'écrit dans le
+/// fichier : il y était auparavant ÉCRIT EN DUR, et changer `[server]
+/// api_token` cassait silencieusement l'interface.
+async fn index_handler(State(state): State<Arc<SharedState>>, headers: HeaderMap) -> Response {
+    if !auth::has_basic_token(&headers, &state) {
+        return auth::basic_challenge();
+    }
+
     Html(include_str!("../static/controller.html").replace(API_TOKEN_PLACEHOLDER, &state.api_token))
+        .into_response()
 }
 
-/// Page de lecture autonome d'un clip (`GET /play/{filename}`).
+/// Marqueur remplacé par le jeton d'API dans l'interface complète.
+const API_TOKEN_PLACEHOLDER: &str = "__FOXGUARD_API_TOKEN__";
+
+/// Marqueur remplacé, dans les pages à portée limitée, par la chaîne de
+/// requête qui les authentifie (`ticket=…`, ou `token=…` si la page a été
+/// ouverte avec le jeton). Voir [`auth::page_auth_query`].
+const AUTH_QUERY_PLACEHOLDER: &str = "__FOXGUARD_AUTH_QUERY__";
+
+/// Sert une page à portée limitée, ou la refuse.
 ///
-/// # Pourquoi la caméra sert une page de lecture
+/// # Pourquoi ces pages existent
 ///
-/// La timeline de l'interface du manager donne un accès direct au clip de
-/// chaque détection. Or les clips restent SUR LA CAMÉRA : ils pèsent
-/// plusieurs mégaoctets et n'ont aucune raison de traverser le réseau pour
-/// finir dans une base de données (seule la vignette, elle, voyage dans
-/// l'événement — voir `foxguard_protocol::DetectionEvent`).
+/// L'interface du manager est servie par une AUTRE ORIGINE : elle ne peut lire
+/// ni les enregistrements de la caméra, ni piloter sa surveillance — le
+/// navigateur le lui interdit, et ouvrir ces routes à toutes les origines
+/// (`Access-Control-Allow-Origin: *`) serait une bien mauvaise façon de
+/// contourner cette protection. La caméra sert donc elle-même la page capable
+/// de le faire, que le manager affiche dans un cadre. Et le format
+/// d'enregistrement reste connu du seul composant qui l'écrit.
 ///
-/// L'interface du manager, servie par une autre origine, ne peut donc pas
-/// lire ces fichiers elle-même : le navigateur le lui interdit, et ouvrir les
-/// enregistrements à toutes les origines (`Access-Control-Allow-Origin: *`)
-/// serait une bien mauvaise façon de contourner cette protection — d'autant
-/// qu'elle serait désormais la seule. Elle affiche donc cette page, servie par
-/// la caméra, dans un cadre : la politique de même origine est respectée sans
-/// rien assouplir.
+/// # Pourquoi elles exigent un ticket
 ///
-/// Et le format d'enregistrement reste connu du seul composant qui l'écrit.
+/// Elles étaient servies sans authentification, avec le jeton maître injecté :
+/// qui atteignait le port HTTP de la caméra en extrayait un jeton capable de
+/// supprimer les archives. Elles exigent désormais un ticket de LEUR portée,
+/// que le manager signe au moment du clic, et reçoivent en retour un ticket de
+/// session de même portée — jamais le jeton.
+fn scoped_page(
+    page: &'static str,
+    auth: &AuthQuery,
+    state: &SharedState,
+    scope: Scope<'_>,
+) -> Response {
+    let Some(access) = auth::authorize(auth, state, scope) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Html(
+                "<!doctype html><meta charset=\"utf-8\"><title>FoxGuard</title>\
+                 <body style=\"font-family:sans-serif;background:#121212;color:#e0e0e0;padding:24px\">\
+                 <p>Accès refusé : ouvrez cette page depuis l'interface du manager, \
+                 ou avec le jeton de la caméra.</p></body>",
+            ),
+        )
+            .into_response();
+    };
+
+    Html(page.replace(
+        AUTH_QUERY_PLACEHOLDER,
+        &auth::page_auth_query(access, state, scope),
+    ))
+    .into_response()
+}
+
+/// Page de lecture autonome d'un clip (`GET /play/{filename}?ticket=…`).
 ///
-/// La PAGE n'est pas authentifiée, les OCTETS le sont : le jeton y est
-/// injecté, et c'est elle qui le joint à sa requête vers
-/// `GET /recordings/{filename}` (voir [`recording_handler`]). Le manager peut
-/// donc continuer d'afficher un clip sans rien connaître du jeton.
+/// Le ticket n'ouvre QUE ce clip : la page reçoit de quoi lire ce fichier,
+/// pas la liste des archives ni le droit d'en supprimer.
 ///
-/// Le nom du fichier n'est PAS vérifié ici : la page est statique, elle lit
-/// elle-même son nom dans l'URL et le redemande à
-/// `GET /recordings/{filename}`, qui valide (voir [`is_safe_recording_name`]).
-/// Servir la page pour un nom invalide ne donne donc accès à rien — la
-/// requête de données qui suivra sera, elle, rejetée.
+/// Le nom du fichier n'est PAS validé ici : il n'entre que dans la portée du
+/// ticket, et `GET /recordings/{filename}`, qui sert les octets, le valide
+/// (voir [`is_safe_recording_name`]).
 async fn clip_player_handler(
-    Path(_filename): Path<String>,
+    Path(filename): Path<String>,
+    Query(auth): Query<AuthQuery>,
     State(state): State<Arc<SharedState>>,
-) -> Html<String> {
-    Html(
-        include_str!("../static/clip-player.html").replace(API_TOKEN_PLACEHOLDER, &state.api_token),
+) -> Response {
+    scoped_page(
+        include_str!("../static/clip-player.html"),
+        &auth,
+        &state,
+        Scope::Clip(&filename),
     )
 }
 
-/// Marqueur remplacé par le jeton d'API au moment de servir la page de
-/// direct.
-const API_TOKEN_PLACEHOLDER: &str = "__FOXGUARD_API_TOKEN__";
-
-/// Vue en direct seule (`GET /live`).
+/// Vue en direct seule (`GET /live?ticket=…`).
 ///
-/// # Pourquoi la caméra sert sa propre vue en direct
-///
-/// L'interface du manager donne accès au direct de chaque caméra, mais elle
-/// est servie par une AUTRE ORIGINE : elle ne peut pas ouvrir elle-même le
-/// WebSocket d'une caméra. Et quand bien même — il faudrait lui confier le
-/// jeton d'API de chaque caméra, c'est-à-dire le recopier dans une base de
-/// données puis dans une page web. Ce serait une dégradation nette du modèle
-/// de sécurité pour afficher une image.
-///
-/// La caméra sert donc sa vue en direct, que le manager affiche dans un cadre
-/// — exactement comme pour les clips. **Le jeton ne quitte jamais la caméra.**
-///
-/// La page est volontairement RÉDUITE au direct : pas d'interrupteur, pas de
-/// capture, pas de suppression. Le manager est en lecture seule, et le
-/// pilotage d'une caméra reste sur son interface complète.
-///
-/// Comme les autres PAGES, elle n'est pas authentifiée : c'est la page, pas le
-/// flux. Le WebSocket qu'elle ouvre l'est, lui.
-async fn live_handler(State(state): State<Arc<SharedState>>) -> Html<String> {
-    // Le jeton est injecté ici plutôt qu'écrit dans le fichier : la page est
-    // embarquée dans le binaire, et une valeur en dur y obligerait à
-    // recompiler pour changer de jeton.
-    Html(include_str!("../static/live.html").replace(API_TOKEN_PLACEHOLDER, &state.api_token))
+/// L'interface du manager n'en a plus besoin — elle décode le direct
+/// elle-même — mais la page reste utile pour afficher le direct d'une seule
+/// caméra, sur un écran dédié par exemple. Volontairement RÉDUITE au direct :
+/// pas d'interrupteur, pas de capture, pas de suppression.
+async fn live_handler(
+    Query(auth): Query<AuthQuery>,
+    State(state): State<Arc<SharedState>>,
+) -> Response {
+    scoped_page(
+        include_str!("../static/live.html"),
+        &auth,
+        &state,
+        Scope::Stream,
+    )
 }
 
-/// Interrupteur de surveillance seul (`GET /control`).
+/// Interrupteur de surveillance seul (`GET /control?ticket=…`).
 ///
-/// # Pourquoi la caméra sert son propre interrupteur
-///
-/// Même raisonnement que pour [`live_handler`], et il vaut pour la même
-/// raison : l'interface du manager est servie par une AUTRE ORIGINE et n'a pas
-/// le jeton d'API de la caméra. Elle ne peut donc pas piloter la caméra
-/// elle-même, et le lui permettre voudrait dire recopier le jeton de chaque
-/// caméra dans une base de données puis dans une page web.
-///
-/// La caméra sert donc cette page, que le manager affiche dans un cadre —
-/// comme le direct et comme les clips. **Le jeton ne quitte jamais la
-/// caméra**, et le manager reste sans la moindre route d'écriture.
+/// Le manager n'a toujours AUCUNE route d'écriture : il signe un ticket de
+/// portée « surveillance », et c'est cette page, servie par la caméra, qui
+/// appelle `POST /api/monitoring` sur elle-même.
 ///
 /// La page est volontairement RÉDUITE à l'interrupteur : pas de vidéo (voir
 /// [`monitoring_handler`] pour pourquoi elle n'ouvre surtout pas le
 /// WebSocket), pas de capture de référence, pas de suppression.
-///
-/// # Ce que cela suppose du réseau
-///
-/// Comme `/live`, cette page n'est pas authentifiée et porte le jeton en
-/// clair : qui peut atteindre le port HTTP de la caméra peut la charger, donc
-/// couper sa surveillance. C'est le modèle de sécurité qui était DÉJÀ celui de
-/// `/live` — le port d'une caméra n'est pas destiné à être exposé tel quel sur
-/// un réseau hostile — mais la conséquence est plus lourde ici, puisqu'il
-/// s'agit d'une écriture et non d'une lecture.
-async fn control_handler(State(state): State<Arc<SharedState>>) -> Html<String> {
-    Html(include_str!("../static/control.html").replace(API_TOKEN_PLACEHOLDER, &state.api_token))
+async fn control_handler(
+    Query(auth): Query<AuthQuery>,
+    State(state): State<Arc<SharedState>>,
+) -> Response {
+    scoped_page(
+        include_str!("../static/control.html"),
+        &auth,
+        &state,
+        Scope::Monitoring,
+    )
 }
 
 /// Démarre la tâche qui traite les commandes JSON d'un client.
@@ -785,6 +805,17 @@ pub fn create_router(state: Arc<SharedState>) -> Router {
             delete(delete_recording_handler),
         )
         .nest_service("/static", ServeDir::new("static"))
+        // Les couches s'appliquent de l'intérieur vers l'extérieur : les
+        // en-têtes de sécurité sont posés sur TOUTES les réponses, y compris
+        // le 429 de la limitation.
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            auth::throttle_failures,
+        ))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            auth::security_headers,
+        ))
         .with_state(state)
 }
 
@@ -792,56 +823,6 @@ pub fn create_router(state: Arc<SharedState>) -> Router {
 mod tests {
     use super::*;
     use crate::h264::AccessUnit;
-
-    const SECRET: &str = "0123456789abcdef0123456789abcdef";
-
-    fn state(stream_ticket_secret: Option<&str>) -> SharedState {
-        SharedState {
-            detection_enabled: Default::default(),
-            recording_enabled: Default::default(),
-            api_token: "jeton".to_string(),
-            camera_name: "jardin".to_string(),
-            stream_ticket_secret: stream_ticket_secret.map(str::to_string),
-            h264: Arc::new(H264Stream::new()),
-            pending_enrollment: Default::default(),
-            recordings_dir: String::new(),
-        }
-    }
-
-    fn auth(token: Option<&str>, ticket: Option<String>) -> AuthQuery {
-        AuthQuery {
-            token: token.map(str::to_string),
-            ticket,
-        }
-    }
-
-    fn ticket() -> String {
-        let expires_at = chrono::Utc::now().timestamp() + stream_ticket::TICKET_TTL_SECS;
-        stream_ticket::issue(SECRET.as_bytes(), "jardin", expires_at)
-    }
-
-    #[test]
-    fn the_api_token_grants_full_access() {
-        assert_eq!(
-            ws_access(&auth(Some("jeton"), None), &state(Some(SECRET))),
-            Some(WsAccess::Full)
-        );
-    }
-
-    #[test]
-    fn a_ticket_grants_view_only_access() {
-        // C'est ce qui fait ignorer ses commandes (voir `spawn_command_task`) :
-        // un ticket ne doit jamais permettre de couper la surveillance.
-        assert_eq!(
-            ws_access(&auth(None, Some(ticket())), &state(Some(SECRET))),
-            Some(WsAccess::ViewOnly)
-        );
-    }
-
-    #[test]
-    fn tickets_are_refused_when_no_secret_is_configured() {
-        assert_eq!(ws_access(&auth(None, Some(ticket())), &state(None)), None);
-    }
 
     /// SPS plausible : en-tête 0x67, profil 0x42 (Baseline), contraintes
     /// 0xC0, niveau 0x1E (3.0).

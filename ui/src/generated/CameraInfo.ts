@@ -9,24 +9,14 @@ export type CameraInfo = {
  */
 name: string, 
 /**
- * URL de la vue en DIRECT de cette caméra, ou `null` si elle n'a pas
- * déclaré son URL publique.
+ * Route du manager qui ouvre la page de PILOTAGE de la surveillance de
+ * cette caméra, ou `null` si elle n'est pas joignable (pas d'URL
+ * publique, ou tickets désactivés).
  *
- * Elle pointe vers la caméra, qui sert elle-même cette page : son flux
- * est authentifié par un jeton que le manager n'a pas — et qu'il n'a
- * aucune raison d'avoir (voir `live_handler` côté caméra).
- */
-live_url: string | null, 
-/**
- * URL de la page de PILOTAGE de la surveillance de cette caméra, ou
- * `null` si elle n'a pas déclaré son URL publique.
- *
- * Elle pointe elle aussi vers la caméra, et le manager reste donc SANS
- * route d'écriture : il indique où se trouve l'interrupteur, il ne le
- * bascule pas. Confier le pilotage au manager voudrait dire recopier le
- * jeton d'API de chaque caméra dans cette base de données, ce qui
- * dégraderait le modèle de sécurité de tout le système pour un bouton
- * (voir `control_handler` côté caméra).
+ * La route redirige vers la page `/control` de la CAMÉRA, munie d'un
+ * ticket de portée « surveillance ». Le manager reste donc SANS route
+ * d'écriture : il autorise l'ouverture de l'interrupteur, il ne le
+ * bascule pas, et il ne connaît pas le jeton d'API de la caméra.
  */
 control_url: string | null, 
 /**

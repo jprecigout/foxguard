@@ -197,10 +197,32 @@ impl EventRepository {
     /// d'adresse doit pouvoir être rejointe à la nouvelle. Les événements
     /// passés gardent la leur, qui décrit où elle était joignable à l'époque
     /// (voir la migration `0003`).
+    ///
+    /// # Pourquoi une requête récursive
+    ///
+    /// `SELECT DISTINCT ON (camera) …` lisait TOUTE la table : PostgreSQL ne
+    /// sait pas « sauter » d'une valeur à la suivante dans un index. Or cette
+    /// requête est appelée toutes les 15 s par la timeline et à chaque ticket
+    /// signé, sur 90 jours d'historique par défaut — son coût grandissait avec
+    /// l'historique.
+    ///
+    /// La récursion fait ce saut à la main : chaque étape demande à l'index
+    /// `(camera, occurred_at DESC)` la caméra suivante, puis le dernier
+    /// événement de chacune. Le coût devient proportionnel au nombre de
+    /// CAMÉRAS, quelques-unes, et non plus d'événements.
     pub async fn cameras(&self) -> Result<Vec<Camera>> {
         let rows = sqlx::query(
-            "SELECT DISTINCT ON (camera) camera, base_url FROM detection_events \
-             ORDER BY camera, occurred_at DESC, id DESC",
+            "WITH RECURSIVE names(camera) AS ( \
+                 (SELECT camera FROM detection_events ORDER BY camera LIMIT 1) \
+                 UNION ALL \
+                 SELECT (SELECT e.camera FROM detection_events e \
+                         WHERE e.camera > names.camera ORDER BY e.camera LIMIT 1) \
+                 FROM names WHERE names.camera IS NOT NULL \
+             ) \
+             SELECT n.camera, \
+                    (SELECT e.base_url FROM detection_events e WHERE e.camera = n.camera \
+                     ORDER BY e.occurred_at DESC, e.id DESC LIMIT 1) AS base_url \
+             FROM names n WHERE n.camera IS NOT NULL ORDER BY n.camera",
         )
         .fetch_all(&self.pool)
         .await
@@ -214,6 +236,22 @@ impl EventRepository {
                 })
             })
             .collect()
+    }
+
+    /// Un événement par son identifiant, sans sa vignette.
+    ///
+    /// Sert à retrouver où lire le clip d'une détection au moment où
+    /// l'interface le demande (voir `crate::api`).
+    pub async fn event(&self, id: i64) -> Result<Option<StoredEvent>> {
+        let row = sqlx::query(&format!(
+            "SELECT {LIST_COLUMNS} FROM detection_events WHERE id = $1"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("lecture de l'événement impossible")?;
+
+        row.as_ref().map(row_to_stored_event).transpose()
     }
 
     /// Supprime les événements antérieurs à `days` jours et retourne le

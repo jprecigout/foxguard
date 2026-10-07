@@ -7,18 +7,17 @@
 //! port éphémère (voir la note plus bas).
 
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use foxguard_camera::api::create_router;
 use foxguard_camera::capture::SharedState;
 use foxguard_camera::h264::H264Stream;
-use foxguard_protocol::stream_ticket;
+use foxguard_protocol::ticket::{self, Scope};
 
 /// Nom de la caméra des tests : il entre dans la signature des tickets.
 const TEST_CAMERA: &str = "jardin";
@@ -26,10 +25,10 @@ const TEST_CAMERA: &str = "jardin";
 /// Secret des tickets de direct des tests (32 caractères, le minimum admis).
 const TEST_TICKET_SECRET: &str = "0123456789abcdef0123456789abcdef";
 
-/// Ticket valable deux minutes pour `camera`, signé avec `secret`.
-fn fresh_ticket(secret: &str, camera: &str) -> String {
-    let expires_at = chrono::Utc::now().timestamp() + stream_ticket::TICKET_TTL_SECS;
-    stream_ticket::issue(secret.as_bytes(), camera, expires_at)
+/// Ticket du manager valable deux minutes pour `camera` et `scope`.
+fn fresh_ticket(secret: &str, camera: &str, scope: Scope<'_>) -> String {
+    let expires_at = chrono::Utc::now().timestamp() + ticket::TICKET_TTL_SECS;
+    ticket::issue(secret.as_bytes(), camera, scope, expires_at)
 }
 
 /// Construit un [`SharedState`] minimal pour les tests, avec le jeton API
@@ -46,16 +45,14 @@ fn fresh_ticket(secret: &str, camera: &str) -> String {
 /// son `Drop` : l'appelant doit le garder vivant tant qu'il utilise le
 /// routeur.
 fn test_state_in(token: &str, dir: &std::path::Path) -> Arc<SharedState> {
-    Arc::new(SharedState {
-        detection_enabled: AtomicBool::new(false),
-        recording_enabled: AtomicBool::new(false),
-        api_token: token.to_string(),
-        camera_name: TEST_CAMERA.to_string(),
-        stream_ticket_secret: Some(TEST_TICKET_SECRET.to_string()),
-        h264: Arc::new(H264Stream::new()),
-        pending_enrollment: Mutex::new(None),
-        recordings_dir: dir.to_string_lossy().to_string(),
-    })
+    let mut state = SharedState::new(
+        token,
+        TEST_CAMERA,
+        Arc::new(H264Stream::new()),
+        dir.to_string_lossy().to_string(),
+    );
+    state.stream_ticket_secret = Some(TEST_TICKET_SECRET.to_string());
+    Arc::new(state)
 }
 
 /// Comme [`test_state_in`], avec son propre dossier temporaire.
@@ -63,6 +60,29 @@ fn test_state(token: &str) -> (Arc<SharedState>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("dossier temporaire");
     let state = test_state_in(token, dir.path());
     (state, dir)
+}
+
+/// Corps d'une réponse, en texte.
+async fn body_text(response: axum::response::Response) -> String {
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("corps de réponse")
+        .to_bytes();
+    String::from_utf8(bytes.to_vec()).expect("corps en UTF-8")
+}
+
+/// Requête GET authentifiée en HTTP Basic, avec `password` comme mot de passe.
+fn get_with_basic(uri: &str, password: &str) -> Request<Body> {
+    use base64::Engine;
+
+    let credentials = base64::engine::general_purpose::STANDARD.encode(format!("admin:{password}"));
+    Request::builder()
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Basic {credentials}"))
+        .body(Body::empty())
+        .expect("requête GET valide")
 }
 
 /// Requête GET simple, sans corps.
@@ -208,21 +228,17 @@ async fn the_player_route_serves_a_standalone_page_for_a_clip() {
     // puisque c'est chez elle que vivent les clips.
     let (state, _dir) = test_state("secret");
     let app = create_router(state);
+    let clip = "evt_20260918_154207123.mp4";
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA, Scope::Clip(clip));
 
     let response = app
-        .oneshot(get("/play/evt_20260918_154207123.mp4"))
+        .oneshot(get(&format!("/play/{clip}?ticket={ticket}")))
         .await
         .expect("réponse HTTP");
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .expect("corps de réponse")
-        .to_bytes();
-    let html = String::from_utf8(body.to_vec()).expect("HTML en UTF-8");
+    let html = body_text(response).await;
 
     assert!(html.contains("<html"), "la page servie doit être du HTML");
     // La page lit elle-même les données par la route des enregistrements.
@@ -230,37 +246,156 @@ async fn the_player_route_serves_a_standalone_page_for_a_clip() {
 }
 
 #[tokio::test]
-async fn the_player_page_is_served_without_a_token() {
-    // Comme les autres routes de LECTURE (voir la note du README) : c'est la
-    // page, pas les données, et l'interface du manager l'affiche dans un
-    // cadre sans avoir le jeton de la caméra.
+async fn the_scoped_pages_are_refused_without_a_ticket() {
+    // Elles étaient servies à quiconque atteignait le port, avec le jeton
+    // maître injecté : c'est précisément ce qui ne doit plus arriver.
     let (state, _dir) = test_state("secret");
     let app = create_router(state);
 
+    for route in ["/live", "/control", "/play/evt.mp4"] {
+        let response = app.clone().oneshot(get(route)).await.expect("réponse HTTP");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "route {route}");
+    }
+}
+
+#[tokio::test]
+async fn a_ticket_opens_only_the_page_of_its_scope() {
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
+    let stream = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA, Scope::Stream);
+
+    let live = app
+        .clone()
+        .oneshot(get(&format!("/live?ticket={stream}")))
+        .await
+        .expect("réponse HTTP");
+    assert_eq!(live.status(), StatusCode::OK);
+
+    // Regarder ne permet pas de couper la surveillance.
+    let control = app
+        .oneshot(get(&format!("/control?ticket={stream}")))
+        .await
+        .expect("réponse HTTP");
+    assert_eq!(control.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_clip_ticket_does_not_open_another_clip() {
+    let (state, _dir) = test_state("secret");
+    let app = create_router(state);
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA, Scope::Clip("evt_1.mp4"));
+
     let response = app
-        .oneshot(get("/play/evt.mp4"))
+        .oneshot(get(&format!("/play/evt_2.mp4?ticket={ticket}")))
         .await
         .expect("réponse HTTP");
 
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_page_opened_with_a_ticket_never_receives_the_token() {
+    let (state, _dir) = test_state("jeton-de-cette-camera");
+    let app = create_router(state);
+    let clip = "evt.mp4";
+
+    for (route, scope) in [
+        ("/live".to_string(), Scope::Stream),
+        ("/control".to_string(), Scope::Monitoring),
+        (format!("/play/{clip}"), Scope::Clip(clip)),
+    ] {
+        let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA, scope);
+        let response = app
+            .clone()
+            .oneshot(get(&format!("{route}?ticket={ticket}")))
+            .await
+            .expect("réponse HTTP");
+
+        assert_eq!(response.status(), StatusCode::OK, "route {route}");
+
+        let html = body_text(response).await;
+        assert!(!html.contains("jeton-de-cette-camera"), "route {route}");
+        assert!(
+            !html.contains("__FOXGUARD_"),
+            "marqueur non remplacé sur {route}"
+        );
+        assert!(html.contains("ticket="), "route {route}");
+    }
+}
+
+#[tokio::test]
+async fn the_session_ticket_of_a_clip_page_reads_that_clip() {
+    // Le chemin complet du lecteur : ticket du manager → page → ticket de
+    // session → octets du clip.
+    let dir = tempfile::tempdir().expect("dossier temporaire");
+    let clip = "rec_20260101_000000000.mp4";
+    std::fs::write(dir.path().join(clip), b"0123456789").expect("écriture");
+
+    let app = create_router(test_state_in("secret", dir.path()));
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA, Scope::Clip(clip));
+
+    let page = body_text(
+        app.clone()
+            .oneshot(get(&format!("/play/{clip}?ticket={ticket}")))
+            .await
+            .expect("réponse HTTP"),
+    )
+    .await;
+
+    let session = page
+        .split("const AUTH_QUERY = \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("chaîne d'authentification injectée");
+
+    let response = app
+        .oneshot(get(&format!("/recordings/{clip}?{session}")))
+        .await
+        .expect("réponse HTTP");
     assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
-async fn index_route_serves_the_control_html_page() {
+async fn the_full_interface_asks_for_the_token_as_a_password() {
     let (state, _dir) = test_state("secret");
     let app = create_router(state);
 
     let response = app.oneshot(get("/")).await.expect("réponse HTTP");
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response
-        .into_body()
-        .collect()
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    // C'est cet en-tête qui fait afficher au navigateur son invite.
+    assert!(
+        response
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .is_some_and(|value| value.to_str().unwrap().starts_with("Basic"))
+    );
+}
+
+#[tokio::test]
+async fn index_route_serves_the_control_html_page() {
+    let (state, _dir) = test_state("jeton-de-cette-camera");
+    let app = create_router(state);
+
+    let response = app
+        .oneshot(get_with_basic("/", "jeton-de-cette-camera"))
         .await
-        .expect("corps de réponse")
-        .to_bytes();
-    let html = String::from_utf8(body.to_vec()).expect("HTML en UTF-8");
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    // Le refus d'être affichée dans un cadre : elle porte le jeton maître.
+    assert_eq!(
+        response.headers()[header::CONTENT_SECURITY_POLICY],
+        "frame-ancestors 'none'"
+    );
+
+    let html = body_text(response).await;
     assert!(html.contains("<html"), "la page servie doit être du HTML");
+    // Elle porte le jeton, injecté — il y était ÉCRIT EN DUR, et changer
+    // `api_token` cassait l'interface en silence.
+    assert!(html.contains("jeton-de-cette-camera"));
+    assert!(!html.contains("__FOXGUARD_API_TOKEN__"));
+    assert!(!html.contains("secret123"));
 }
 
 #[tokio::test]
@@ -353,7 +488,12 @@ async fn spawn_test_server(token: &str) -> SocketAddr {
     // tâche détachée qui survit au test, donc le supprimer ici le lui
     // retirerait sous les pieds.
     let dir = tempfile::tempdir().expect("dossier temporaire").keep();
-    let app = create_router(test_state_in(token, &dir));
+    spawn_server_with(test_state_in(token, &dir)).await
+}
+
+/// Comme [`spawn_test_server`], sur un état préparé par l'appelant.
+async fn spawn_server_with(state: Arc<SharedState>) -> SocketAddr {
+    let app = create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("liaison sur un port éphémère");
@@ -374,6 +514,12 @@ async fn spawn_test_server(token: &str) -> SocketAddr {
 /// Envoie une requête HTTP/1.1 brute d'upgrade WebSocket vers `addr` et
 /// retourne le code de statut de la ligne de réponse.
 async fn ws_upgrade_status(addr: SocketAddr, path_and_query: &str) -> u16 {
+    ws_upgrade_open(addr, path_and_query).await.0
+}
+
+/// Comme [`ws_upgrade_status`], en gardant la connexion ouverte : tant que le
+/// flux retourné vit, le client occupe une place côté caméra.
+async fn ws_upgrade_open(addr: SocketAddr, path_and_query: &str) -> (u16, tokio::net::TcpStream) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut stream = tokio::net::TcpStream::connect(addr)
@@ -403,12 +549,14 @@ async fn ws_upgrade_status(addr: SocketAddr, path_and_query: &str) -> u16 {
     let response = String::from_utf8_lossy(&buf[..n]);
 
     let status_line = response.lines().next().expect("au moins une ligne");
-    status_line
+    let status = status_line
         .split_whitespace()
         .nth(1)
         .expect("code de statut présent")
         .parse()
-        .expect("code de statut numérique")
+        .expect("code de statut numérique");
+
+    (status, stream)
 }
 
 #[tokio::test]
@@ -438,7 +586,7 @@ async fn websocket_upgrade_succeeds_with_the_correct_token() {
 #[tokio::test]
 async fn websocket_upgrade_succeeds_with_a_ticket_from_the_manager() {
     let addr = spawn_test_server("secret-correct").await;
-    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA);
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA, Scope::Stream);
 
     let status = ws_upgrade_status(addr, &format!("/ws?ticket={ticket}")).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS.as_u16());
@@ -447,7 +595,7 @@ async fn websocket_upgrade_succeeds_with_a_ticket_from_the_manager() {
 #[tokio::test]
 async fn a_ticket_issued_for_another_camera_is_rejected() {
     let addr = spawn_test_server("secret-correct").await;
-    let ticket = fresh_ticket(TEST_TICKET_SECRET, "garage");
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, "garage", Scope::Stream);
 
     let status = ws_upgrade_status(addr, &format!("/ws?ticket={ticket}")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED.as_u16());
@@ -456,9 +604,10 @@ async fn a_ticket_issued_for_another_camera_is_rejected() {
 #[tokio::test]
 async fn an_expired_ticket_is_rejected() {
     let addr = spawn_test_server("secret-correct").await;
-    let expired = stream_ticket::issue(
+    let expired = ticket::issue(
         TEST_TICKET_SECRET.as_bytes(),
         TEST_CAMERA,
+        Scope::Stream,
         chrono::Utc::now().timestamp() - 1,
     );
 
@@ -471,7 +620,7 @@ async fn a_ticket_does_not_open_the_authenticated_http_routes() {
     // Un ticket ne vaut QUE pour le flux. Les archives, la suppression et
     // l'interrupteur exigent toujours le jeton d'API.
     let (state, _dir) = test_state("secret");
-    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA);
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA, Scope::Stream);
 
     let response = create_router(state)
         .oneshot(get(&format!("/api/recordings?ticket={ticket}")))
@@ -479,6 +628,47 @@ async fn a_ticket_does_not_open_the_authenticated_http_routes() {
         .expect("réponse HTTP");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn the_video_socket_refuses_clients_beyond_its_limit() {
+    let dir = tempfile::tempdir().expect("dossier temporaire").keep();
+    let mut state = SharedState::new(
+        "secret",
+        TEST_CAMERA,
+        Arc::new(H264Stream::new()),
+        dir.to_string_lossy(),
+    );
+    state.max_stream_clients = 1;
+    let addr = spawn_server_with(Arc::new(state)).await;
+
+    let (first, held) = ws_upgrade_open(addr, "/ws?token=secret").await;
+    assert_eq!(first, StatusCode::SWITCHING_PROTOCOLS.as_u16());
+
+    // La place est prise tant que la première connexion vit.
+    let (second, _) = ws_upgrade_open(addr, "/ws?token=secret").await;
+    assert_eq!(second, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+
+    drop(held);
+}
+
+#[tokio::test]
+async fn an_address_is_blocked_after_repeated_authentication_failures() {
+    let addr = spawn_test_server("secret").await;
+
+    for _ in 0..foxguard_protocol::auth::MAX_FAILURES {
+        assert_eq!(
+            ws_upgrade_status(addr, "/ws?token=devine").await,
+            StatusCode::UNAUTHORIZED.as_u16()
+        );
+    }
+
+    // Même le BON jeton est refusé jusqu'à la fin de la fenêtre : sinon le
+    // blocage renseignerait sur la justesse de la tentative.
+    assert_eq!(
+        ws_upgrade_status(addr, "/ws?token=secret").await,
+        StatusCode::TOO_MANY_REQUESTS.as_u16()
+    );
 }
 
 #[tokio::test]
@@ -756,28 +946,56 @@ async fn cutting_monitoring_switches_both_off() {
 }
 
 #[tokio::test]
-async fn the_control_page_is_served_with_the_camera_token_inlined() {
-    // Comme `/live` : la page vient de la caméra et porte son jeton, pour que
-    // le manager puisse l'afficher dans un cadre sans jamais le connaître.
-    let (state, _dir) = test_state("jeton-de-cette-camera");
-    let app = create_router(state);
+async fn the_control_page_ticket_allows_toggling_monitoring() {
+    // Le manager n'a aucune route d'écriture : il signe un ticket
+    // « surveillance », et c'est la page de la caméra qui bascule.
+    let (state, _dir) = test_state("secret");
+    let app = create_router(Arc::clone(&state));
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA, Scope::Monitoring);
 
-    let response = app.oneshot(get("/control")).await.expect("réponse HTTP");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/monitoring?ticket={ticket}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":true}"#))
+                .unwrap(),
+        )
+        .await
+        .expect("réponse HTTP");
 
     assert_eq!(response.status(), StatusCode::OK);
-
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("corps de réponse")
-        .to_bytes();
-    let html = String::from_utf8(bytes.to_vec()).expect("HTML en UTF-8");
-
-    assert!(html.contains("jeton-de-cette-camera"));
     assert!(
-        !html.contains("__FOXGUARD_API_TOKEN__"),
-        "le marqueur doit avoir été remplacé"
+        state
+            .detection_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+}
+
+#[tokio::test]
+async fn a_stream_ticket_cannot_toggle_monitoring() {
+    let (state, _dir) = test_state("secret");
+    let app = create_router(Arc::clone(&state));
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA, Scope::Stream);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/monitoring?ticket={ticket}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":true}"#))
+                .unwrap(),
+        )
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        !state
+            .detection_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
     );
 }
 
@@ -788,8 +1006,13 @@ async fn the_control_page_does_not_open_the_video_socket() {
     // logiciel pour une image que personne ne regarde.
     let (state, _dir) = test_state("secret");
     let app = create_router(state);
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA, Scope::Monitoring);
 
-    let response = app.oneshot(get("/control")).await.expect("réponse HTTP");
+    let response = app
+        .oneshot(get(&format!("/control?ticket={ticket}")))
+        .await
+        .expect("réponse HTTP");
+    assert_eq!(response.status(), StatusCode::OK);
 
     let bytes = response
         .into_body()
@@ -904,38 +1127,4 @@ async fn the_token_is_checked_before_the_file_name_is_even_looked_at() {
         .expect("réponse HTTP");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn the_pages_that_read_archives_carry_the_token_themselves() {
-    // L'interface complète et le lecteur de clip demandent tous deux des
-    // octets d'archive : ils doivent donc porter le jeton, comme `/live`.
-    // Il était ÉCRIT EN DUR dans `controller.html` — changer `api_token`
-    // cassait l'interface en silence.
-    let (state, _dir) = test_state("jeton-de-cette-camera");
-    let app = create_router(Arc::clone(&state));
-
-    for route in ["/", "/play/evt.mp4"] {
-        let response = app.clone().oneshot(get(route)).await.expect("réponse HTTP");
-
-        assert_eq!(response.status(), StatusCode::OK, "route {route}");
-
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .expect("corps de réponse")
-            .to_bytes();
-        let html = String::from_utf8(bytes.to_vec()).expect("HTML en UTF-8");
-
-        assert!(html.contains("jeton-de-cette-camera"), "route {route}");
-        assert!(
-            !html.contains("__FOXGUARD_API_TOKEN__"),
-            "le marqueur doit avoir été remplacé sur {route}"
-        );
-        assert!(
-            !html.contains("secret123"),
-            "aucun jeton en dur ne doit subsister dans {route}"
-        );
-    }
 }

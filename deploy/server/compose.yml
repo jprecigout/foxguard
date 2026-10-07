@@ -78,6 +78,32 @@ services:
       # Configuration du manager, montée en lecture seule.
       - ../../manager-config.toml:/app/manager-config.toml:ro
 
+  # Reverse-proxy TLS OPTIONNEL devant le manager (voir ./Caddyfile).
+  #
+  # Derrière un profil, comme le broker : `--profile tls` pour l'activer. Il
+  # faut alors activer TLS devant CHAQUE caméra aussi (deploy/camera/Caddyfile),
+  # et ne plus publier le port 8090 qu'en local (`127.0.0.1:8090:8090`) pour
+  # que le manager ne reste pas joignable en clair à côté.
+  caddy:
+    profiles: ["tls"]
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - manager
+    ports:
+      - "443:443"
+      # Uniquement utile à Let's Encrypt (`FOXGUARD_TLS` = une adresse e-mail).
+      - "80:80"
+    environment:
+      FOXGUARD_SITE: ${FOXGUARD_SITE:-localhost}
+      FOXGUARD_TLS: ${FOXGUARD_TLS:-internal}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificats ET autorité interne : à conserver, sans quoi les appareils
+      # clients devraient refaire confiance à une nouvelle autorité.
+      - caddy_data:/data
+
 volumes:
+  caddy_data:
   mosquitto_data:
   postgres_data:

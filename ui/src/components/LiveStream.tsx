@@ -25,15 +25,32 @@ import { ApiError, fetchStreamTicket } from "../api";
 //
 // S'abonner au WebSocket est ce qui DÉMARRE l'encodeur H.264 de la caméra, le
 // poste le plus lourd de son Raspberry Pi. Le composant ferme donc la
-// connexion dès que l'onglet est masqué, et la rouvre au retour : une
-// mosaïque oubliée dans un onglet de fond ne doit pas faire chauffer toutes
-// les caméras de la maison.
+// connexion dès que l'onglet est masqué OU que la vignette sort de l'écran
+// (mosaïque défilée), et la rouvre au retour : une mosaïque oubliée dans un
+// onglet de fond ne doit pas faire chauffer toutes les caméras de la maison.
+//
+// Côté navigateur, le décodage peut prendre du retard (machine lente, beaucoup
+// de vignettes). Plutôt que de laisser la file du décodeur grossir — et le
+// « direct » dériver de plusieurs secondes —, on jette les images jusqu'à la
+// prochaine image clé : l'affichage saute, mais il reste en direct.
 
 /** Délai avant reconnexion, après une coupure. */
 const RETRY_MS = 2000;
 
 /** Taille de l'en-tête binaire précédant chaque unité d'accès. */
 const FRAME_HEADER = 1 + 8;
+
+/**
+ * Images en attente dans le décodeur au-delà desquelles on rattrape le direct
+ * (voir l'en-tête du fichier). À 12 images par seconde, une demi-seconde.
+ */
+const MAX_DECODE_QUEUE = 6;
+
+/**
+ * Marge autour de l'écran dans laquelle une vignette est considérée visible :
+ * le flux démarre un peu avant qu'elle n'apparaisse au défilement.
+ */
+const ON_SCREEN_MARGIN = "200px";
 
 type StreamStatus =
   | { kind: "connecting" }
@@ -61,6 +78,27 @@ function usePageVisible(): boolean {
   return visible;
 }
 
+/** Vrai tant que l'élément est à l'écran (ou presque, voir `ON_SCREEN_MARGIN`). */
+function useOnScreen(ref: React.RefObject<HTMLElement | null>): boolean {
+  // Vrai par défaut : sans `IntersectionObserver`, mieux vaut un flux de trop
+  // qu'une vignette qui ne démarre jamais.
+  const [onScreen, setOnScreen] = useState(true);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element || typeof IntersectionObserver !== "function") return;
+
+    const observer = new IntersectionObserver(
+      (entries) => setOnScreen(entries.some((entry) => entry.isIntersecting)),
+      { rootMargin: ON_SCREEN_MARGIN },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [ref]);
+
+  return onScreen;
+}
+
 /** Texte affiché par-dessus le canevas, ou `null` quand l'image suffit. */
 function statusText(status: StreamStatus): string | null {
   switch (status.kind) {
@@ -69,7 +107,7 @@ function statusText(status: StreamStatus): string | null {
     case "live":
       return null;
     case "paused":
-      return "En pause (onglet masqué)";
+      return "En pause";
     case "retrying":
       return `${status.reason} — nouvelle tentative…`;
     case "failed":
@@ -78,9 +116,12 @@ function statusText(status: StreamStatus): string | null {
 }
 
 export function LiveStream({ streamUrl, camera }: { streamUrl: string; camera: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [status, setStatus] = useState<StreamStatus>({ kind: "connecting" });
-  const visible = usePageVisible();
+  const pageVisible = usePageVisible();
+  const onScreen = useOnScreen(containerRef);
+  const visible = pageVisible && onScreen;
 
   useEffect(() => {
     // Il n'y a qu'un format : sans WebCodecs, aucun repli possible. On le
@@ -156,6 +197,10 @@ export function LiveStream({ streamUrl, camera }: { streamUrl: string; camera: s
       // repasser à chaque frame ferait un rendu React par image.
       let showing = false;
 
+      // Vrai quand on a jeté des images pour rattraper le direct : plus rien
+      // n'est décodable avant la prochaine image clé.
+      let awaitingKeyframe = false;
+
       ws.onmessage = (event: MessageEvent) => {
         if (typeof event.data === "string") {
           let announcement: { type?: string; codec?: string };
@@ -202,11 +247,16 @@ export function LiveStream({ streamUrl, camera }: { streamUrl: string; camera: s
         if (event.data.byteLength <= FRAME_HEADER) return;
 
         const view = new DataView(event.data);
+        const keyframe = view.getUint8(0) === 1;
+
+        if (decoder.decodeQueueSize > MAX_DECODE_QUEUE) awaitingKeyframe = true;
+        if (awaitingKeyframe && !keyframe) return;
+        awaitingKeyframe = false;
 
         try {
           decoder.decode(
             new EncodedVideoChunk({
-              type: view.getUint8(0) === 1 ? "key" : "delta",
+              type: keyframe ? "key" : "delta",
               timestamp: Number(view.getBigUint64(1)),
               data: new Uint8Array(event.data, FRAME_HEADER),
             }),
@@ -244,7 +294,7 @@ export function LiveStream({ streamUrl, camera }: { streamUrl: string; camera: s
   const text = statusText(status);
 
   return (
-    <div className="stream">
+    <div className="stream" ref={containerRef}>
       <canvas
         ref={canvasRef}
         aria-label={`Direct de ${camera}`}

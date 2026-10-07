@@ -353,7 +353,12 @@ fn handle_request(
     }
 
     if let Some(expected) = &context.api_token {
-        if request.query_parameter("token") == Some(expected.as_str()) {
+        // Temps constant, comme sur le serveur HTTP (voir
+        // `foxguard_protocol::auth::secure_eq`).
+        if request
+            .query_parameter("token")
+            .is_some_and(|token| foxguard_protocol::auth::secure_eq(token, expected))
+        {
             session.authenticated = true;
         }
 

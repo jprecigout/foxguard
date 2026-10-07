@@ -142,10 +142,11 @@
     </main>
 
     <script>
-        // Le jeton est injecté par la caméra au moment de servir la page (voir
-        // `control_handler` dans src/api.rs) : il ne transite jamais par le
-        // manager, qui n'a aucune raison de le connaître.
-        const API_TOKEN = "__FOXGUARD_API_TOKEN__";
+        // Chaîne de requête d'authentification, injectée par la caméra au
+        // moment de servir la page (voir `scoped_page` dans src/api.rs) : un
+        // ticket de SESSION limité à ce que fait cette page, jamais le jeton
+        // d'API de la caméra (sauf si la page a été ouverte avec lui).
+        const AUTH_QUERY = "__FOXGUARD_AUTH_QUERY__";
 
         // Relecture périodique de l'état.
         //
@@ -215,7 +216,7 @@
             busy('Envoi…');
 
             try {
-                const response = await fetch(`/api/monitoring?token=${API_TOKEN}`, {
+                const response = await fetch(`/api/monitoring?${AUTH_QUERY}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ enabled }),
@@ -249,7 +250,14 @@
             void send(!active);
         });
 
-        void refresh();
+        // Première lecture : le bouton est désactivé tant qu'on ne sait rien,
+        // et `refresh` ne redessine jamais sous un bouton désactivé (pour ne
+        // pas écraser une bascule en cours). Il faut donc le libérer ici,
+        // faute de quoi la page resterait sur « Interrogation… » pour de bon.
+        void refresh().finally(() => {
+            toggle.disabled = false;
+            render();
+        });
         setInterval(refresh, REFRESH_MS);
     </script>
 </body>

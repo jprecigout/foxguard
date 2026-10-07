@@ -8,6 +8,7 @@
 //! seule la frontière binaire/bibliothèque a été introduite ici.
 
 pub mod api;
+pub mod auth;
 pub mod capture;
 pub mod config;
 pub mod geometry;

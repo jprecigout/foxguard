@@ -1,0 +1,27 @@
+# Reverse-proxy TLS devant une caméra, sur le Raspberry Pi.
+#
+# La caméra n'embarque pas TLS : ses dépendances cryptographiques (ring et son
+# assembleur par architecture) font échouer la compilation croisée ARM64 sous
+# QEMU. Caddy, lui, est distribué tout compilé pour ARM64.
+#
+# Lancement (réseau de l'hôte, pour joindre la caméra sur 127.0.0.1) :
+#
+#   docker run -d --name foxguard_tls --network host --restart unless-stopped \
+#     -e FOXGUARD_SITE=https://192.168.1.42 \
+#     -v $(pwd)/Caddyfile:/etc/caddy/Caddyfile:ro \
+#     -v caddy_data:/data \
+#     caddy:2
+#
+# Puis, dans camera-config.toml : `public_url = "https://192.168.1.42"`. Le
+# manager en déduit `wss://` pour le direct.
+#
+# Publiez alors le port de la caméra sur 127.0.0.1 SEULEMENT
+# (`-p 127.0.0.1:8080:8080`) : sinon le port en clair reste ouvert à côté du
+# port chiffré, et TLS ne protège plus rien.
+#
+# Variables : voir deploy/server/Caddyfile (mêmes noms, même sens).
+
+{$FOXGUARD_SITE:localhost} {
+	tls {$FOXGUARD_TLS:internal}
+	reverse_proxy 127.0.0.1:8080
+}

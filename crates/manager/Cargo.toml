@@ -20,7 +20,17 @@ sqlx = { workspace = true }
 ts-rs = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
-tower-http = { workspace = true }
+# `compression-gzip` : les réponses JSON d'une journée se compressent très
+# bien (voir `create_router`). Activée ICI et non dans le workspace : la
+# caméra ne la compile pas.
+tower-http = { workspace = true, features = ["compression-gzip"] }
+# Hachage des mots de passe de l'interface (voir `src/auth.rs`). Argon2id :
+# le standard actuel, conçu pour rendre coûteuse une attaque par
+# dictionnaire si la configuration fuit. Pur Rust (RustCrypto), et compilé
+# pour le seul manager.
+argon2 = "0.5"
+base64 = { workspace = true }
+sha2 = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 

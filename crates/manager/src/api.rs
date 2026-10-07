@@ -1,13 +1,16 @@
 //! API HTTP de consultation du manager, et service du bundle de l'interface.
 //!
 //! En LECTURE SEULE : le manager agrège et expose, il ne pilote aucune
-//! caméra. Le pilotage reste sur l'interface embarquée de chaque caméra — y
-//! compris l'interrupteur de surveillance, dont le manager ne fait que donner
-//! l'adresse (voir [`CameraInfo::control_url`]).
+//! caméra lui-même.
 //!
-//! Il SIGNE en revanche des tickets de visionnage du direct (voir
-//! [`StreamTicket`]) : ils ouvrent le flux vidéo d'une caméra, et rien
-//! d'autre.
+//! Il SIGNE en revanche des tickets (voir `foxguard_protocol::ticket`), chacun
+//! limité à une portée : regarder le direct d'une caméra ([`StreamTicket`]),
+//! ouvrir le clip d'une détection, ou ouvrir la page d'interrupteur d'une
+//! caméra — c'est cette page, servie par la caméra, qui bascule. Le manager ne
+//! connaît le jeton d'API d'aucune caméra.
+//!
+//! Toutes les routes, sauf la sonde de disponibilité, exigent une
+//! authentification (voir `crate::auth`).
 
 use std::sync::Arc;
 
@@ -17,16 +20,20 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     http::header,
-    response::{IntoResponse, Response},
+    middleware,
+    response::{IntoResponse, Redirect, Response},
     routing::get,
 };
 use serde::{Deserialize, Serialize};
+use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 use ts_rs::TS;
 
 use chrono::{DateTime, Local, NaiveDate};
 use foxguard_protocol::PersonStatus;
-use foxguard_protocol::stream_ticket;
+use foxguard_protocol::ticket::{self, Scope};
+
+use crate::auth::{self, Authenticator};
 
 use crate::db::{EventRepository, StoredEvent};
 
@@ -46,9 +53,13 @@ const MAX_DAY_EVENTS: usize = 5000;
 /// État partagé avec les handlers HTTP.
 pub struct AppState {
     pub repository: Arc<EventRepository>,
-    /// Secret des tickets de visionnage (`[stream] ticket_secret`), ou
-    /// `None` si le direct est désactivé.
+    /// Secret des tickets (`[stream] ticket_secret`), ou `None` s'ils sont
+    /// désactivés : l'interface ne propose alors ni direct, ni clip, ni
+    /// interrupteur.
     pub stream_ticket_secret: Option<String>,
+    /// Vérification des identifiants, ou `None` si l'authentification est
+    /// désactivée (`[auth] disabled = true`).
+    pub authenticator: Option<Arc<Authenticator>>,
 }
 
 /// Traduit une erreur de base en réponse HTTP.
@@ -110,14 +121,15 @@ pub struct EventRecord {
     /// fonctionnalité).
     pub thumbnail_url: Option<String>,
 
-    /// URL du clip vidéo sur la caméra, ou `null` si la caméra n'a pas
-    /// déclaré son URL publique (voir `[server] public_url` de sa
-    /// configuration) ou n'a pas écrit de clip.
+    /// Route du manager qui ouvre le clip vidéo de cette détection, ou
+    /// `null` s'il n'y en a pas : clip non écrit, caméra sans URL publique
+    /// (`[server] public_url`), ou tickets désactivés.
     ///
-    /// Elle pointe vers la CAMÉRA et non vers le manager : le clip pèse
-    /// plusieurs mégaoctets et reste là où il a été écrit. Un lien mort est
-    /// donc possible — la caméra peut être hors ligne, ou le clip purgé — ce
-    /// que l'interface signale plutôt que de le masquer.
+    /// La route REDIRIGE vers la page de lecture de la CAMÉRA, munie d'un
+    /// ticket signé au moment du clic et qui n'ouvre que ce clip : le clip
+    /// pèse plusieurs mégaoctets et reste là où il a été écrit. Un lien mort
+    /// reste donc possible — la caméra peut être hors ligne, ou le clip
+    /// purgé — ce que la page de la caméra signale plutôt que de le masquer.
     pub clip_url: Option<String>,
 }
 
@@ -128,23 +140,14 @@ pub struct CameraInfo {
     /// Nom déclaré par la caméra (`[camera] name`).
     pub name: String,
 
-    /// URL de la vue en DIRECT de cette caméra, ou `null` si elle n'a pas
-    /// déclaré son URL publique.
+    /// Route du manager qui ouvre la page de PILOTAGE de la surveillance de
+    /// cette caméra, ou `null` si elle n'est pas joignable (pas d'URL
+    /// publique, ou tickets désactivés).
     ///
-    /// Elle pointe vers la caméra, qui sert elle-même cette page : son flux
-    /// est authentifié par un jeton que le manager n'a pas — et qu'il n'a
-    /// aucune raison d'avoir (voir `live_handler` côté caméra).
-    pub live_url: Option<String>,
-
-    /// URL de la page de PILOTAGE de la surveillance de cette caméra, ou
-    /// `null` si elle n'a pas déclaré son URL publique.
-    ///
-    /// Elle pointe elle aussi vers la caméra, et le manager reste donc SANS
-    /// route d'écriture : il indique où se trouve l'interrupteur, il ne le
-    /// bascule pas. Confier le pilotage au manager voudrait dire recopier le
-    /// jeton d'API de chaque caméra dans cette base de données, ce qui
-    /// dégraderait le modèle de sécurité de tout le système pour un bouton
-    /// (voir `control_handler` côté caméra).
+    /// La route redirige vers la page `/control` de la CAMÉRA, munie d'un
+    /// ticket de portée « surveillance ». Le manager reste donc SANS route
+    /// d'écriture : il autorise l'ouverture de l'interrupteur, il ne le
+    /// bascule pas, et il ne connaît pas le jeton d'API de la caméra.
     pub control_url: Option<String>,
 
     /// Route du manager qui délivre un ticket de visionnage pour cette
@@ -175,12 +178,16 @@ pub struct StreamTicket {
 
 impl EventRecord {
     /// Construit la vue d'API d'un événement conservé.
-    fn from_stored(stored: StoredEvent) -> Self {
+    ///
+    /// `tickets` : vrai si le manager peut signer des tickets, sans quoi la
+    /// caméra refuserait d'ouvrir le clip et le lien serait mort.
+    fn from_stored(stored: StoredEvent, tickets: bool) -> Self {
         Self {
             thumbnail_url: stored
                 .has_thumbnail
                 .then(|| format!("/api/events/{}/thumbnail", stored.id)),
-            clip_url: stored.event.clip_url(),
+            clip_url: (tickets && stored.event.clip_url().is_some())
+                .then(|| format!("/api/events/{}/clip", stored.id)),
             id: stored.id,
             camera: stored.event.camera,
             timestamp: stored.event.timestamp,
@@ -195,15 +202,6 @@ impl EventRecord {
 pub struct EventsResponse {
     /// Nombre d'événements retournés dans `events`.
     pub count: usize,
-    /// Nombre total d'événements conservés en base.
-    ///
-    /// `ts(type = "number")` corrige la correspondance par défaut de ts-rs,
-    /// qui traduit `i64` en `bigint` par prudence sur la précision. Or
-    /// `serde_json` sérialise ce champ en nombre JSON ordinaire, et
-    /// `JSON.parse` en produit donc un `number` : annoncer `bigint` côté
-    /// TypeScript décrirait une valeur qui n'arrive jamais.
-    #[ts(type = "number")]
-    pub total: i64,
     /// Du plus récent au plus ancien.
     pub events: Vec<EventRecord>,
     /// Vrai si le plafond a été atteint et que la journée comporte donc
@@ -248,16 +246,18 @@ async fn events_handler(
         }
     };
 
-    let total = match state.repository.count().await {
-        Ok(total) => total,
-        Err(e) => return internal_error("Comptage des événements", e),
-    };
+    // Plus de `total` : il imposait un `count(*)` — la lecture de toute la
+    // table — à chaque rafraîchissement de la timeline, pour un nombre que
+    // l'interface n'affichait pas.
+    let tickets = state.stream_ticket_secret.is_some();
 
     Json(EventsResponse {
         count: events.len(),
-        total,
         truncated: events.len() >= cap,
-        events: events.into_iter().map(EventRecord::from_stored).collect(),
+        events: events
+            .into_iter()
+            .map(|event| EventRecord::from_stored(event, tickets))
+            .collect(),
     })
     .into_response()
 }
@@ -302,13 +302,19 @@ async fn cameras_handler(State(state): State<Arc<AppState>>) -> Response {
                         .as_deref()
                         .map(|base| base.trim_end_matches('/').to_string());
 
-                    let stream_url = (base.is_some() && state.stream_ticket_secret.is_some())
-                        .then(|| format!("/api/cameras/{}/stream", encode_path_segment(&camera.name)));
+                    let reachable = base.is_some() && state.stream_ticket_secret.is_some();
+                    let route = |action: &str| {
+                        reachable.then(|| {
+                            format!(
+                                "/api/cameras/{}/{action}",
+                                encode_path_segment(&camera.name)
+                            )
+                        })
+                    };
 
                     CameraInfo {
-                        live_url: base.as_deref().map(|base| format!("{base}/live")),
-                        control_url: base.as_deref().map(|base| format!("{base}/control")),
-                        stream_url,
+                        control_url: route("control"),
+                        stream_url: route("stream"),
                         name: camera.name,
                     }
                 })
@@ -319,53 +325,138 @@ async fn cameras_handler(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
+/// Réponse des routes de tickets quand ils sont désactivés.
+fn tickets_disabled() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Tickets désactivés : `[stream] ticket_secret` n'est pas configuré",
+    )
+        .into_response()
+}
+
+/// URL de base d'une caméra CONNUE, telle qu'elle l'a elle-même déclarée.
+///
+/// Le manager ne signe pas pour un nom quelconque, et n'envoie pas le
+/// navigateur vers une adresse choisie par l'appelant.
+async fn known_camera_base(state: &AppState, name: &str) -> Result<String, Response> {
+    let cameras = state
+        .repository
+        .cameras()
+        .await
+        .map_err(|e| internal_error("Lecture des caméras", e))?;
+
+    cameras
+        .into_iter()
+        .find(|camera| camera.name == name)
+        .and_then(|camera| camera.base_url)
+        .map(|base| base.trim_end_matches('/').to_string())
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                "Caméra inconnue ou sans URL publique",
+            )
+                .into_response()
+        })
+}
+
+/// Ticket du manager, valable [`ticket::TICKET_TTL_SECS`].
+fn fresh_ticket(secret: &str, camera: &str, scope: Scope<'_>) -> String {
+    let expires_at = chrono::Utc::now().timestamp() + ticket::TICKET_TTL_SECS;
+    ticket::issue(secret.as_bytes(), camera, scope, expires_at)
+}
+
+/// Redirection vers une page de caméra munie d'un ticket.
+///
+/// `no-store` : un navigateur qui resservirait la redirection depuis son
+/// cache présenterait un ticket expiré.
+fn redirect_with_ticket(url: String) -> Response {
+    let mut response = Redirect::to(&url).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 /// Ticket de visionnage du direct d'une caméra
 /// (`GET /api/cameras/{name}/stream`).
 ///
-/// La seule route du manager qui signe quelque chose, et ce qu'elle signe ne
-/// permet que de REGARDER : le manager reste sans pouvoir d'écriture sur les
-/// caméras.
+/// Ce qu'il signe ne permet que de REGARDER : le manager reste sans pouvoir
+/// d'écriture sur les caméras.
 async fn stream_ticket_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Response {
     let Some(secret) = state.stream_ticket_secret.as_deref() else {
+        return tickets_disabled();
+    };
+
+    let Some(ws_base) = (match known_camera_base(&state, &name).await {
+        Ok(base) => websocket_base(&base),
+        Err(response) => return response,
+    }) else {
         return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Direct désactivé : `[stream] ticket_secret` n'est pas configuré",
+            StatusCode::NOT_FOUND,
+            "URL publique de la caméra inexploitable",
         )
             .into_response();
     };
 
-    let cameras = match state.repository.cameras().await {
-        Ok(cameras) => cameras,
-        Err(e) => return internal_error("Lecture des caméras", e),
-    };
-
-    // Seule une caméra CONNUE obtient un ticket, à l'adresse qu'elle a
-    // elle-même déclarée : le manager ne signe pas pour un nom quelconque, et
-    // n'envoie pas le navigateur vers une adresse choisie par l'appelant.
-    let Some(ws_base) = cameras
-        .into_iter()
-        .find(|camera| camera.name == name)
-        .and_then(|camera| camera.base_url)
-        .and_then(|base| websocket_base(&base))
-    else {
-        return (StatusCode::NOT_FOUND, "Caméra inconnue ou sans URL publique").into_response();
-    };
-
-    let expires_at = chrono::Utc::now().timestamp() + stream_ticket::TICKET_TTL_SECS;
-    let ticket = stream_ticket::issue(secret.as_bytes(), &name, expires_at);
+    let ticket = fresh_ticket(secret, &name, Scope::Stream);
 
     (
-        // Un ticket ne se met pas en cache : un navigateur qui resservirait
-        // une réponse vieille de cinq minutes présenterait un ticket expiré.
         [(header::CACHE_CONTROL, "no-store")],
         Json(StreamTicket {
             url: format!("{ws_base}/ws?ticket={ticket}"),
         }),
     )
         .into_response()
+}
+
+/// Page d'interrupteur d'une caméra (`GET /api/cameras/{name}/control`) :
+/// redirige vers `/control` sur la caméra, avec un ticket « surveillance ».
+async fn control_redirect_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Response {
+    let Some(secret) = state.stream_ticket_secret.as_deref() else {
+        return tickets_disabled();
+    };
+
+    match known_camera_base(&state, &name).await {
+        Ok(base) => {
+            let ticket = fresh_ticket(secret, &name, Scope::Monitoring);
+            redirect_with_ticket(format!("{base}/control?ticket={ticket}"))
+        }
+        Err(response) => response,
+    }
+}
+
+/// Clip d'une détection (`GET /api/events/{id}/clip`) : redirige vers la
+/// page de lecture de la caméra, avec un ticket qui n'ouvre que ce clip.
+///
+/// L'adresse est celle que la caméra avait déclarée DANS L'ÉVÉNEMENT : c'est
+/// là que le clip a été écrit, même si elle a changé d'adresse depuis.
+async fn clip_redirect_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Response {
+    let Some(secret) = state.stream_ticket_secret.as_deref() else {
+        return tickets_disabled();
+    };
+
+    let event = match state.repository.event(id).await {
+        Ok(Some(stored)) => stored.event,
+        Ok(None) => return (StatusCode::NOT_FOUND, "Événement introuvable").into_response(),
+        Err(e) => return internal_error("Lecture de l'événement", e),
+    };
+
+    let (Some(url), Some(clip)) = (event.clip_url(), event.clip.as_deref()) else {
+        return (StatusCode::NOT_FOUND, "Pas de clip pour cet événement").into_response();
+    };
+
+    let ticket = fresh_ticket(secret, &event.camera, Scope::Clip(clip));
+    redirect_with_ticket(format!("{url}?ticket={ticket}"))
 }
 
 /// URL de base WebSocket d'une caméra, déduite de son URL publique HTTP.
@@ -378,7 +469,8 @@ fn websocket_base(base_url: &str) -> Option<String> {
     if let Some(rest) = base.strip_prefix("https://") {
         Some(format!("wss://{rest}"))
     } else {
-        base.strip_prefix("http://").map(|rest| format!("ws://{rest}"))
+        base.strip_prefix("http://")
+            .map(|rest| format!("ws://{rest}"))
     }
 }
 
@@ -411,14 +503,29 @@ async fn health_handler() -> &'static str {
 /// dossier est simplement absent et `/` retourne 404 — le reste de l'API
 /// fonctionne normalement.
 pub fn create_router(state: Arc<AppState>, ui_dir: &str) -> Router {
+    let authenticator = state.authenticator.clone();
+
     Router::new()
         .route("/api/health", get(health_handler))
         .route("/api/events", get(events_handler))
         .route("/api/events/{id}/thumbnail", get(thumbnail_handler))
+        .route("/api/events/{id}/clip", get(clip_redirect_handler))
         .route("/api/cameras", get(cameras_handler))
         .route("/api/cameras/{name}/stream", get(stream_ticket_handler))
+        .route("/api/cameras/{name}/control", get(control_redirect_handler))
         .with_state(state)
         .fallback_service(ServeDir::new(ui_dir))
+        // Couches posées APRÈS le service de repli : elles couvrent aussi le
+        // bundle de l'interface. De l'intérieur vers l'extérieur :
+        // authentification, en-têtes de sécurité (posés même sur un 401),
+        // compression (qui ignore d'elle-même les JPEG des vignettes, déjà
+        // compressés).
+        .layer(middleware::from_fn_with_state(
+            authenticator,
+            auth::require_auth,
+        ))
+        .layer(middleware::from_fn(auth::security_headers))
+        .layer(CompressionLayer::new())
 }
 
 // Les tests de ces handlers demandent désormais une vraie base PostgreSQL :
@@ -432,8 +539,14 @@ mod tests {
 
     #[test]
     fn the_websocket_scheme_follows_the_http_one() {
-        assert_eq!(websocket_base("http://cam.local:8080/").as_deref(), Some("ws://cam.local:8080"));
-        assert_eq!(websocket_base("https://cam.example").as_deref(), Some("wss://cam.example"));
+        assert_eq!(
+            websocket_base("http://cam.local:8080/").as_deref(),
+            Some("ws://cam.local:8080")
+        );
+        assert_eq!(
+            websocket_base("https://cam.example").as_deref(),
+            Some("wss://cam.example")
+        );
         assert_eq!(websocket_base("ftp://cam"), None);
     }
 

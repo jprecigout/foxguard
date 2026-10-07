@@ -11,6 +11,30 @@ pub struct Config {
     pub database: DatabaseConfig,
     #[serde(default)]
     pub stream: StreamConfig,
+    /// OBLIGATOIRE, même pour la désactiver explicitement : voir
+    /// [`AuthConfig`].
+    pub auth: Option<AuthConfig>,
+}
+
+/// Authentification de l'interface et de l'API (voir `crate::auth`).
+///
+/// La section est OBLIGATOIRE : le manager refuse de démarrer sans elle. Un
+/// manager ouvert donne l'historique de toutes les caméras, leurs directs et
+/// leurs interrupteurs à quiconque atteint son port — cela ne doit pas
+/// pouvoir arriver par simple oubli. La désactiver reste possible, mais il
+/// faut l'ÉCRIRE (`disabled = true`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AuthConfig {
+    /// Désactive l'authentification. À réserver à un manager qui n'est
+    /// joignable que derrière un proxy qui authentifie lui-même.
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default)]
+    pub username: String,
+    /// Hachage Argon2id du mot de passe, produit par
+    /// `foxguard-manager hash-password`. Jamais le mot de passe en clair.
+    #[serde(default)]
+    pub password_hash: String,
 }
 
 /// Direct des caméras dans l'interface (section optionnelle).
@@ -145,8 +169,26 @@ impl Config {
             );
         }
 
-        foxguard_protocol::stream_ticket::validate_secret(&config.stream.ticket_secret)
+        foxguard_protocol::ticket::validate_secret(&config.stream.ticket_secret)
             .map_err(|e| anyhow::anyhow!("[stream] ticket_secret : {e}"))?;
+
+        match &config.auth {
+            None => anyhow::bail!(
+                "section `[auth]` absente : renseignez `username` et `password_hash` \
+                 (généré par `foxguard-manager hash-password`), ou écrivez \
+                 explicitement `disabled = true` pour laisser le manager ouvert"
+            ),
+            Some(auth)
+                if !auth.disabled
+                    && (auth.username.is_empty() || auth.password_hash.is_empty()) =>
+            {
+                anyhow::bail!(
+                    "`[auth]` incomplète : `username` et `password_hash` sont requis \
+                     (ou `disabled = true`)"
+                )
+            }
+            Some(_) => {}
+        }
 
         Ok(config)
     }
@@ -171,7 +213,12 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    // `[database]` en DERNIER : certains tests y ajoutent des clés à la
+    // fin du texte.
     const MINIMAL_TOML: &str = r#"
+        [auth]
+        disabled = true
+
         [mqtt]
         broker_host = "192.168.1.50"
 
@@ -262,6 +309,10 @@ mod tests {
             url = "postgres://u:p@db/foxguard"
             max_connections = 20
             retention_days = 30
+
+            [auth]
+            username = "admin"
+            password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c2VsZGVzZWxkZXNlbA$aGFjaGFnZWhhY2hhZ2VoYWNoYWdl"
         "#;
         let file = write_temp_toml(toml);
         let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
@@ -272,6 +323,23 @@ mod tests {
         assert_eq!(config.mqtt.topic, "maison/+/detections");
         assert_eq!(config.database.max_connections, 20);
         assert_eq!(config.database.retention_days, 30);
+    }
+
+    #[test]
+    fn a_missing_auth_section_is_rejected() {
+        // Un manager ouvert par simple OUBLI donnerait toutes les caméras à
+        // quiconque atteint son port.
+        let toml = MINIMAL_TOML.replace("[auth]\n        disabled = true", "");
+        let file = write_temp_toml(&toml);
+        let err = Config::load(file.path().to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("[auth]"), "{err}");
+    }
+
+    #[test]
+    fn an_incomplete_auth_section_is_rejected() {
+        let toml = MINIMAL_TOML.replace("disabled = true", "username = \"admin\"");
+        let file = write_temp_toml(&toml);
+        assert!(Config::load(file.path().to_str().unwrap()).is_err());
     }
 
     #[test]

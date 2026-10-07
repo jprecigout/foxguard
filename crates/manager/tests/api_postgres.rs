@@ -18,7 +18,7 @@ use axum::http::{Request, StatusCode, header};
 use chrono::Local;
 use foxguard_manager::api::{self, AppState};
 use foxguard_manager::db::EventRepository;
-use foxguard_protocol::stream_ticket;
+use foxguard_protocol::ticket::{self, Scope};
 use foxguard_protocol::{DetectionEvent, PersonStatus};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -90,6 +90,7 @@ fn router_with_secret(repository: EventRepository, secret: Option<&str>) -> axum
         Arc::new(AppState {
             repository: Arc::new(repository),
             stream_ticket_secret: secret.map(str::to_string),
+            authenticator: None,
         }),
         "dossier-inexistant-pour-les-tests",
     )
@@ -183,7 +184,9 @@ async fn an_identifier_is_a_json_number_and_not_a_string() {
     let body = get_json(repo, "/api/events").await;
 
     assert!(body["events"][0]["id"].is_i64(), "{}", body["events"][0]);
-    assert!(body["total"].is_i64(), "{body}");
+    // Plus de `total` : il coûtait un `count(*)` de toute la table à chaque
+    // rafraîchissement, pour un nombre que l'interface n'affichait pas.
+    assert!(body.get("total").is_none(), "{body}");
 }
 
 #[tokio::test]
@@ -238,7 +241,9 @@ async fn the_events_list_never_carries_thumbnail_bytes() {
 }
 
 #[tokio::test]
-async fn a_clip_url_points_at_the_camera_that_wrote_it() {
+async fn a_clip_url_goes_through_the_manager() {
+    // Le lien passe par le manager, qui signera le ticket AU MOMENT DU CLIC :
+    // un ticket posé dans la liste aurait expiré bien avant.
     let repo = repo_or_skip!();
 
     repo.record(
@@ -250,11 +255,80 @@ async fn a_clip_url_points_at_the_camera_that_wrote_it() {
     .expect("écriture");
 
     let body = get_json(repo, "/api/events").await;
+    let id = body["events"][0]["id"].as_i64().expect("identifiant");
 
     assert_eq!(
         body["events"][0]["clip_url"].as_str(),
-        Some("http://192.168.1.42:8080/play/evt_20260918_154207123.mp4")
+        Some(format!("/api/events/{id}/clip").as_str())
     );
+}
+
+#[tokio::test]
+async fn the_clip_route_redirects_to_the_camera_with_a_clip_ticket() {
+    let repo = repo_or_skip!();
+    let clip = "evt_20260918_154207123.mp4";
+
+    repo.record(
+        &event("salon", None)
+            .with_base_url("http://192.168.1.42:8080/")
+            .with_clip(clip),
+    )
+    .await
+    .expect("écriture");
+    let id = repo.recent(1).await.expect("lecture")[0].id;
+
+    let (status, headers, _) = get(repo, &format!("/api/events/{id}/clip")).await;
+
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+
+    let location = headers[header::LOCATION].to_str().expect("en-tête lisible");
+    let ticket = location
+        .strip_prefix(&format!("http://192.168.1.42:8080/play/{clip}?ticket="))
+        .expect("page de lecture de la caméra, avec un ticket");
+
+    // Le ticket n'ouvre que CE clip.
+    let now = chrono::Utc::now().timestamp();
+    let check = |scope| {
+        ticket::verify(
+            TEST_TICKET_SECRET.as_bytes(),
+            "salon",
+            scope,
+            ticket,
+            now,
+            ticket::MAX_TICKET_TTL_SECS,
+        )
+    };
+    assert_eq!(check(Scope::Clip(clip)), Ok(()));
+    assert!(check(Scope::Clip("autre.mp4")).is_err());
+    assert!(check(Scope::Stream).is_err());
+}
+
+#[tokio::test]
+async fn no_clip_link_is_offered_without_a_ticket_secret() {
+    // La caméra refuserait d'ouvrir le clip : le lien serait mort.
+    let repo = repo_or_skip!();
+    repo.record(
+        &event("salon", None)
+            .with_base_url("http://192.168.1.42:8080")
+            .with_clip("evt.mp4"),
+    )
+    .await
+    .expect("écriture");
+
+    let response = router_with_secret(repo, None)
+        .oneshot(
+            Request::builder()
+                .uri("/api/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("réponse HTTP");
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    assert!(body["events"][0]["clip_url"].is_null());
 }
 
 #[tokio::test]
@@ -373,26 +447,37 @@ async fn the_cameras_route_lists_the_emitters() {
 }
 
 #[tokio::test]
-async fn a_camera_exposes_the_url_of_its_live_view() {
-    // C'est par là que la timeline donne accès au direct : la page est
-    // servie par la CAMÉRA, dont le manager n'a pas le jeton.
+async fn the_control_route_redirects_with_a_monitoring_ticket() {
+    // Le manager n'écrit rien : il autorise l'ouverture de l'interrupteur de
+    // la caméra, qui bascule elle-même.
     let repo = repo_or_skip!();
     repo.record(&event("salon", None).with_base_url("http://192.168.1.42:8080"))
         .await
         .expect("écriture");
 
-    let body = get_json(repo, "/api/cameras").await;
+    let (status, headers, _) = get(repo, "/api/cameras/salon/control").await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    let location = headers[header::LOCATION].to_str().expect("en-tête lisible");
+    let ticket = location
+        .strip_prefix("http://192.168.1.42:8080/control?ticket=")
+        .expect("interrupteur de la caméra, avec un ticket");
 
     assert_eq!(
-        body[0]["live_url"].as_str(),
-        Some("http://192.168.1.42:8080/live")
+        ticket::verify(
+            TEST_TICKET_SECRET.as_bytes(),
+            "salon",
+            Scope::Monitoring,
+            ticket,
+            chrono::Utc::now().timestamp(),
+            ticket::MAX_TICKET_TTL_SECS,
+        ),
+        Ok(())
     );
 }
 
 #[tokio::test]
-async fn a_camera_exposes_the_url_of_its_monitoring_switch() {
-    // Le manager indique OÙ est l'interrupteur, il ne le bascule pas : il n'a
-    // aucune route d'écriture, et pas le jeton de la caméra.
+async fn a_camera_exposes_the_route_of_its_monitoring_switch() {
     let repo = repo_or_skip!();
     repo.record(&event("salon", None).with_base_url("http://192.168.1.42:8080"))
         .await
@@ -402,8 +487,10 @@ async fn a_camera_exposes_the_url_of_its_monitoring_switch() {
 
     assert_eq!(
         body[0]["control_url"].as_str(),
-        Some("http://192.168.1.42:8080/control")
+        Some("/api/cameras/salon/control")
     );
+    // Plus d'URL de direct « nue » : la caméra refuserait de la servir.
+    assert!(body[0].get("live_url").is_none());
 }
 
 #[tokio::test]
@@ -413,7 +500,7 @@ async fn a_camera_without_a_public_url_exposes_no_live_link() {
 
     let body = get_json(repo, "/api/cameras").await;
 
-    assert!(body[0]["live_url"].is_null());
+    assert!(body[0]["stream_url"].is_null());
     assert!(body[0]["control_url"].is_null());
 }
 
@@ -443,7 +530,12 @@ async fn no_stream_route_is_offered_without_a_ticket_secret() {
         .expect("écriture");
 
     let response = router_with_secret(repo, None)
-        .oneshot(Request::builder().uri("/api/cameras").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/cameras")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .expect("réponse HTTP");
     let body: serde_json::Value =
@@ -471,11 +563,13 @@ async fn the_stream_route_hands_out_a_ticket_the_camera_accepts() {
 
     // La vérification est exactement celle que fait la caméra.
     assert_eq!(
-        stream_ticket::verify(
+        ticket::verify(
             TEST_TICKET_SECRET.as_bytes(),
             "salon",
+            Scope::Stream,
             ticket,
-            chrono::Utc::now().timestamp()
+            chrono::Utc::now().timestamp(),
+            ticket::MAX_TICKET_TTL_SECS,
         ),
         Ok(())
     );
@@ -497,6 +591,137 @@ async fn no_ticket_is_signed_for_a_camera_without_a_public_url() {
     let (status, _, _) = get(repo, "/api/cameras/salon/stream").await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// --- Authentification, en-têtes, compression ---
+
+/// Routeur dont l'authentification est ACTIVE (`admin` / `correct horse`).
+fn authenticated_router(repository: EventRepository) -> axum::Router {
+    let hash = foxguard_manager::auth::hash_password("correct horse").expect("hachage");
+
+    api::create_router(
+        Arc::new(AppState {
+            repository: Arc::new(repository),
+            stream_ticket_secret: Some(TEST_TICKET_SECRET.to_string()),
+            authenticator: Some(Arc::new(
+                foxguard_manager::auth::Authenticator::new("admin", &hash).expect("auth"),
+            )),
+        }),
+        "dossier-inexistant-pour-les-tests",
+    )
+}
+
+fn basic(username: &str, password: &str) -> String {
+    use base64::Engine;
+    let encoded =
+        base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+    format!("Basic {encoded}")
+}
+
+#[tokio::test]
+async fn every_route_requires_credentials_when_auth_is_enabled() {
+    let repo = repo_or_skip!();
+    let app = authenticated_router(repo);
+
+    // Le bundle de l'interface aussi (`/`), pas seulement l'API.
+    for uri in [
+        "/api/events",
+        "/api/cameras",
+        "/api/cameras/salon/stream",
+        "/",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .expect("réponse HTTP");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        assert!(
+            response.headers().contains_key(header::WWW_AUTHENTICATE),
+            "{uri}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_right_credentials_open_the_api_and_wrong_ones_do_not() {
+    let repo = repo_or_skip!();
+    let app = authenticated_router(repo);
+
+    let with = |credentials: String| {
+        Request::builder()
+            .uri("/api/cameras")
+            .header(header::AUTHORIZATION, credentials)
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let ok = app
+        .clone()
+        .oneshot(with(basic("admin", "correct horse")))
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+
+    let wrong = app
+        .oneshot(with(basic("admin", "battery staple")))
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn the_health_probe_stays_public() {
+    // Un superviseur l'interroge sans identifiants.
+    let repo = repo_or_skip!();
+    let response = authenticated_router(repo)
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn responses_carry_security_headers() {
+    let repo = repo_or_skip!();
+    let (_, headers, _) = get(repo, "/api/health").await;
+
+    assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+    assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
+    assert!(
+        headers[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("frame-ancestors 'none'")
+    );
+}
+
+#[tokio::test]
+async fn a_day_of_events_is_compressed_for_a_client_that_accepts_it() {
+    let repo = repo_or_skip!();
+    for _ in 0..50 {
+        repo.record(&event("salon", None)).await.expect("écriture");
+    }
+
+    let response = router(repo)
+        .oneshot(
+            Request::builder()
+                .uri("/api/events?limit=50")
+                .header(header::ACCEPT_ENCODING, "gzip")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.headers()[header::CONTENT_ENCODING], "gzip");
 }
 
 #[tokio::test]

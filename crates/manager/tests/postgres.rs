@@ -451,7 +451,7 @@ async fn a_camera_that_declares_no_url_reports_none() {
 }
 
 #[tokio::test]
-async fn the_live_url_does_not_depend_on_a_clip() {
+async fn the_base_url_does_not_depend_on_a_clip() {
     // Une caméra dont aucune détection n'a produit de clip se regarde quand
     // même : c'est toute la raison d'avoir sorti l'URL de base du clip.
     let repo = repo_or_skip!();
@@ -464,8 +464,8 @@ async fn the_live_url_does_not_depend_on_a_clip() {
 
     assert_eq!(events[0].event.clip_url(), None);
     assert_eq!(
-        events[0].event.live_url().as_deref(),
-        Some("http://192.168.1.42:8080/live")
+        events[0].event.base_url.as_deref(),
+        Some("http://192.168.1.42:8080")
     );
 }
 

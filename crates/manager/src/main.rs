@@ -8,20 +8,26 @@
 //!
 //! ÉTAT : la chaîne caméra → MQTT → manager → PostgreSQL → HTTP → interface
 //! marche de bout en bout, vignettes et clips des détections compris, ainsi
-//! que l'accès au flux en DIRECT de chaque caméra. L'API reste en LECTURE
-//! SEULE, et le direct n'y transite pas : le manager ne publie que l'URL de
-//! la page que la caméra sert elle-même, dont le jeton ne lui est jamais
-//! confié. Le pilotage d'une caméra passe de même par son interface
+//! que le DIRECT de chaque caméra. L'API reste en LECTURE SEULE, et le direct
+//! n'y transite pas : le manager signe des tickets à portée limitée (voir
+//! `foxguard_protocol::ticket`), avec lesquels le navigateur s'adresse à la
+//! caméra elle-même. Le pilotage complet d'une caméra passe par son interface
 //! embarquée, qui doit rester le secours disponible quand ce serveur est en
 //! panne. Restent à construire : les notifications.
+//!
+//! # Sous-commande
+//!
+//! `foxguard-manager hash-password` lit un mot de passe sur l'entrée standard
+//! et affiche son hachage, à copier dans `[auth] password_hash`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use foxguard_manager::api::{self, AppState};
+use foxguard_manager::auth::{self, Authenticator};
 use foxguard_manager::config::Config;
 use foxguard_manager::db::EventRepository;
 use foxguard_manager::{ingest, retention};
@@ -32,6 +38,10 @@ const MANAGER_CONFIG_PATH: &str = "manager-config.toml";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("hash-password") {
+        return print_password_hash();
+    }
+
     init_tracing();
 
     info!(
@@ -54,8 +64,24 @@ async fn main() -> anyhow::Result<()> {
     // Purge des événements trop anciens.
     retention::spawn_cleanup_task(Arc::clone(&repository), config.database.retention_days);
 
+    // Section `[auth]` présente et complète : vérifié par `Config::load`.
+    let authenticator = match config.auth.as_ref() {
+        Some(auth) if !auth.disabled => Some(Arc::new(Authenticator::new(
+            &auth.username,
+            &auth.password_hash,
+        )?)),
+        _ => {
+            warn!(
+                "⚠️ Authentification DÉSACTIVÉE (`[auth] disabled = true`) : quiconque \
+                 atteint ce port voit l'historique, les directs et les interrupteurs des caméras."
+            );
+            None
+        }
+    };
+
     let state = Arc::new(AppState {
         repository: Arc::clone(&repository),
+        authenticator,
         stream_ticket_secret: Some(config.stream.ticket_secret.clone())
             .filter(|secret| !secret.is_empty()),
     });
@@ -70,8 +96,33 @@ async fn main() -> anyhow::Result<()> {
     info!("🚀 Manager démarré sur http://{bind_addr}");
     info!("   Interface servie depuis « {} »", config.server.ui_dir);
 
-    axum::serve(listener, app).await?;
+    // Avec l'adresse du client : c'est elle que compte la limitation des
+    // échecs d'authentification (voir `foxguard_protocol::auth`).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
+    Ok(())
+}
+
+/// `hash-password` : hache le mot de passe lu sur l'entrée standard.
+///
+/// Sur l'entrée standard et non en argument : un argument finirait dans
+/// l'historique du shell et dans la liste des processus.
+fn print_password_hash() -> anyhow::Result<()> {
+    eprintln!("Mot de passe (fin de saisie : Entrée) :");
+
+    let mut password = String::new();
+    std::io::stdin().read_line(&mut password)?;
+    let password = password.trim_end_matches(['\r', '\n']);
+
+    if password.is_empty() {
+        anyhow::bail!("mot de passe vide");
+    }
+
+    println!("{}", auth::hash_password(password)?);
     Ok(())
 }
 

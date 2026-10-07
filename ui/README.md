@@ -69,10 +69,14 @@ caméra. Les deux appartiennent à la caméra, donc à une autre origine, et c'e
 la caméra qui sert la page capable de les afficher. `CameraFrameDialog` ne
 fait que mettre cette page dans un cadre :
 
-| Média | Page servie par la caméra | D'où vient l'URL |
+| Média | Page servie par la caméra | Ouverte via (route du manager) |
 | --- | --- | --- |
-| Le clip d'une détection | `GET /play/<fichier>` | `clip_url` de l'`EventRecord` |
-| L'interrupteur de surveillance | `GET /control` | `control_url` du `CameraInfo` |
+| Le clip d'une détection | `GET /play/<fichier>` | `clip_url` de l'`EventRecord` (`/api/events/{id}/clip`) |
+| L'interrupteur de surveillance | `GET /control` | `control_url` du `CameraInfo` (`/api/cameras/{nom}/control`) |
+
+Ces URL pointent vers le **manager**, qui redirige vers la caméra en
+ajoutant un ticket signé au moment du clic, limité à ce clip ou à cet
+interrupteur : la caméra n'ouvre plus ces pages sans lui.
 
 Le **direct**, lui, est décodé ici même (`LiveStream.tsx`) : l'interface
 demande au manager un ticket de visionnage (`stream_url` du `CameraInfo`),
@@ -84,14 +88,12 @@ mauvaise façon de contourner la politique de même origine, d'autant que ces
 routes ne sont déjà pas authentifiées.
 
 **L'interrupteur suit exactement le même chemin, et c'est ce qui permet au
-manager de rester en lecture seule.** Le bouton « 🛡 Surveillance » n'appelle
-aucune route du manager : il ouvre la page `/control` de la caméra, qui porte
-le jeton injecté par la caméra et appelle `POST /api/monitoring?token=...` sur
-elle-même. Le manager se contente d'indiquer l'adresse (`control_url`). Lui
-confier le pilotage voudrait dire recopier le jeton de chaque caméra dans sa
-base, et faire du serveur annexe le point unique dont la compromission donne
-la main sur toutes les caméras — voir « Le pilotage depuis le manager » du
-README principal.
+manager de rester en lecture seule.** Le manager n'écrit rien : il autorise
+l'ouverture de la page `/control` de la caméra, et c'est elle qui appelle
+`POST /api/monitoring` sur elle-même. Lui confier le pilotage voudrait dire
+recopier le jeton de chaque caméra dans sa base, et faire du serveur annexe le
+point unique dont la compromission donne la main sur toutes les caméras — voir
+« Le pilotage depuis le manager » du README principal.
 
 Conséquence assumée : clip, direct et interrupteur demandent que la **caméra**
 soit joignable depuis le navigateur, et aucun des trois n'est proposé si elle
@@ -115,8 +117,11 @@ deux minutes, et qui n'ouvrent le flux qu'en **lecture seule**.
    `crates/camera/static/live.html`, avec lequel il doit rester aligné.
 
 Chaque flux ouvert fait tourner l'encodeur H.264 de sa caméra : le composant
-ferme la connexion quand l'onglet est masqué, et la mosaïque ferme toutes les
-siennes quand on la quitte.
+ferme la connexion quand l'onglet est masqué ou que la vignette sort de l'écran
+(`IntersectionObserver`), et la mosaïque ferme toutes les siennes quand on la
+quitte. Si le décodeur prend du retard (plus de six images en attente), les
+images sont jetées jusqu'à la prochaine image clé : l'affichage saute, mais
+reste en direct.
 
 `stream_url` vaut `null` — et la vignette le dit — si la caméra n'a pas
 déclaré son URL publique, ou si le manager n'a pas de `[stream]
@@ -142,6 +147,15 @@ Le manager sert le bundle statique à la racine, et son API sous `/api/*`
 | `GET /api/events/{id}/thumbnail` | vignette JPEG d'une détection   |
 | `GET /api/cameras`| caméras ayant émis au moins un événement, avec l'URL de leur direct |
 | `GET /api/cameras/{nom}/stream` | ticket de visionnage du direct d'une caméra (URL WebSocket, à usage immédiat) |
+| `GET /api/cameras/{nom}/control` | redirection vers l'interrupteur de la caméra, avec un ticket |
+| `GET /api/events/{id}/clip` | redirection vers le lecteur du clip sur la caméra, avec un ticket |
+
+Toutes ces routes, et le bundle lui-même, exigent l'authentification du
+manager (`[auth]`), sauf `GET /api/health`. Le navigateur la gère seul (HTTP
+Basic) : l'interface n'a pas une ligne de code pour ça. Les réponses sont
+compressées (gzip) et portent une politique de sécurité du contenu stricte —
+qui autorise toutefois `ws:`/`wss:` et les cadres `http:`/`https:`, les
+caméras n'étant connues qu'à l'exécution.
 
 Un seul conteneur, une seule origine : **pas de CORS à configurer**, pas de
 nginx supplémentaire.

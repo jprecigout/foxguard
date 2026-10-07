@@ -31,13 +31,14 @@ timestamp: string,
  */
 thumbnail_url: string | null, 
 /**
- * URL du clip vidéo sur la caméra, ou `null` si la caméra n'a pas
- * déclaré son URL publique (voir `[server] public_url` de sa
- * configuration) ou n'a pas écrit de clip.
+ * Route du manager qui ouvre le clip vidéo de cette détection, ou
+ * `null` s'il n'y en a pas : clip non écrit, caméra sans URL publique
+ * (`[server] public_url`), ou tickets désactivés.
  *
- * Elle pointe vers la CAMÉRA et non vers le manager : le clip pèse
- * plusieurs mégaoctets et reste là où il a été écrit. Un lien mort est
- * donc possible — la caméra peut être hors ligne, ou le clip purgé — ce
- * que l'interface signale plutôt que de le masquer.
+ * La route REDIRIGE vers la page de lecture de la CAMÉRA, munie d'un
+ * ticket signé au moment du clic et qui n'ouvre que ce clip : le clip
+ * pèse plusieurs mégaoctets et reste là où il a été écrit. Un lien mort
+ * reste donc possible — la caméra peut être hors ligne, ou le clip
+ * purgé — ce que la page de la caméra signale plutôt que de le masquer.
  */
 clip_url: string | null, } & ({ "status": "unknown" } | { "status": "known", name: string, });

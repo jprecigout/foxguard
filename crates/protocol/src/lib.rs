@@ -21,7 +21,8 @@
 //! C'est exactement la discipline déjà appliquée au fichier de configuration
 //! de la caméra, transposée au fil MQTT.
 
-pub mod stream_ticket;
+pub mod auth;
+pub mod ticket;
 
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
@@ -207,6 +208,10 @@ impl DetectionEvent {
 
     /// URL de la page de LECTURE du clip sur la caméra.
     ///
+    /// Sans ticket : la caméra exige, pour servir cette page, un ticket de
+    /// portée « clip » que le manager ajoute au moment du clic (voir
+    /// [`ticket`]).
+    ///
     /// Elle pointe vers `/play/<fichier>` et non vers le fichier lui-même :
     /// un enregistrement peut être dans le format maison de FoxGuard, qu'aucun
     /// navigateur ne sait jouer tel quel. C'est la caméra qui sert la page
@@ -218,23 +223,6 @@ impl DetectionEvent {
             self.camera_base()?,
             self.clip.as_ref()?
         ))
-    }
-
-    /// URL de la page de DIRECT de la caméra émettrice.
-    ///
-    /// Indépendante du clip : une caméra sans détection enregistrée se
-    /// regarde quand même.
-    pub fn live_url(&self) -> Option<String> {
-        Some(format!("{}/live", self.camera_base()?))
-    }
-
-    /// URL de la page de PILOTAGE de la surveillance de la caméra émettrice.
-    ///
-    /// Servie par la caméra, comme le direct et pour la même raison : c'est
-    /// elle qui détient le jeton d'API, et il n'a aucune raison de voyager
-    /// jusqu'au manager (voir `control_handler` côté caméra).
-    pub fn control_url(&self) -> Option<String> {
-        Some(format!("{}/control", self.camera_base()?))
     }
 
     /// URL de base, débarrassée d'une éventuelle barre oblique finale.
@@ -458,32 +446,6 @@ mod tests {
     }
 
     #[test]
-    fn a_live_url_does_not_depend_on_a_clip() {
-        // Une caméra sans détection enregistrée se regarde quand même : c'est
-        // la raison pour laquelle l'URL de base décrit la caméra et non le
-        // clip.
-        let event = event(PersonStatus::Unknown).with_base_url("http://192.168.1.42:8080");
-
-        assert_eq!(event.clip_url(), None);
-        assert_eq!(
-            event.live_url().as_deref(),
-            Some("http://192.168.1.42:8080/live")
-        );
-    }
-
-    #[test]
-    fn a_control_url_points_at_the_cameras_own_switch() {
-        // L'interrupteur est servi par la CAMÉRA, comme le direct : le
-        // manager donne l'adresse, il ne pilote rien.
-        let event = event(PersonStatus::Unknown).with_base_url("http://192.168.1.42:8080");
-
-        assert_eq!(
-            event.control_url().as_deref(),
-            Some("http://192.168.1.42:8080/control")
-        );
-    }
-
-    #[test]
     fn a_trailing_slash_in_the_public_url_does_not_double_up() {
         let event = event(PersonStatus::Unknown)
             .with_base_url("http://cam.local/")
@@ -492,11 +454,6 @@ mod tests {
         assert_eq!(
             event.clip_url().as_deref(),
             Some("http://cam.local/play/evt.mp4")
-        );
-        assert_eq!(event.live_url().as_deref(), Some("http://cam.local/live"));
-        assert_eq!(
-            event.control_url().as_deref(),
-            Some("http://cam.local/control")
         );
     }
 
@@ -507,7 +464,6 @@ mod tests {
         let event = event(PersonStatus::Unknown).with_clip("evt.mp4");
 
         assert_eq!(event.clip_url(), None);
-        assert_eq!(event.live_url(), None);
     }
 
     #[test]

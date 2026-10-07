@@ -54,17 +54,19 @@ async fn main() -> anyhow::Result<()> {
     let h264 = Arc::new(H264Stream::new());
 
     // Initialisation de l'état partagé
-    let state = Arc::new(SharedState {
-        detection_enabled: AtomicBool::new(config.detection.enabled),
-        recording_enabled: AtomicBool::new(false),
-        h264: Arc::clone(&h264),
-        api_token: config.server.api_token.clone(),
-        camera_name: config.camera.name.clone(),
-        stream_ticket_secret: Some(config.server.stream_ticket_secret.clone())
-            .filter(|secret| !secret.is_empty()),
-        pending_enrollment: Mutex::new(None),
-        recordings_dir: config.recording.dir.clone(),
-    });
+    let mut state = SharedState::new(
+        config.server.api_token.clone(),
+        config.camera.name.clone(),
+        Arc::clone(&h264),
+        config.recording.dir.clone(),
+    );
+    state.detection_enabled = AtomicBool::new(config.detection.enabled);
+    state.stream_ticket_secret =
+        Some(config.server.stream_ticket_secret.clone()).filter(|secret| !secret.is_empty());
+    state.manager_origin =
+        Some(config.server.manager_origin.clone()).filter(|origin| !origin.is_empty());
+    state.max_stream_clients = config.server.max_stream_clients;
+    let state = Arc::new(state);
 
     // Enregistreur de clips d'événement, partagé entre la boucle de capture
     // (qui l'alimente en frames) et le thread de reconnaissance (qui

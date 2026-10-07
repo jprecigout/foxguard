@@ -18,16 +18,27 @@ api_token = "secret123"
 # défaut), aucun de ces liens n'est proposé — la vignette, elle, voyage dans
 # l'événement et reste visible dans tous les cas.
 public_url = ""
-# Secret partagé avec le manager, pour la mosaïque des directs de son
-# interface. Le manager signe avec lui des TICKETS qui ouvrent le flux vidéo
-# (GET /ws) en LECTURE SEULE, pour cette caméra et pour deux minutes : il
-# n'a ainsi jamais besoin de `api_token`, qui donne tous les droits.
+# Secret partagé avec le manager. Il signe avec lui des TICKETS qui n'ouvrent
+# qu'UNE chose, pour cette caméra et pour deux minutes : le direct (en lecture
+# seule), l'interrupteur de surveillance, ou UN clip. Le manager n'a ainsi
+# jamais besoin de `api_token`, qui donne tous les droits.
 #
 # Doit être IDENTIQUE à `[stream] ticket_secret` du manager, et faire au moins
 # 32 caractères (`openssl rand -hex 32`). Exige `public_url` et des horloges
-# synchronisées (NTP). VIDE (le défaut) : tickets refusés, le direct n'apparaît
-# pas dans l'interface du manager.
+# synchronisées (NTP). VIDE (le défaut) : l'interface du manager ne propose ni
+# direct, ni clip, ni interrupteur — les pages /live, /control et /play de la
+# caméra exigent un ticket (ou le jeton) depuis que le jeton n'y est plus
+# injecté.
 stream_ticket_secret = ""
+# Origine de l'interface du manager (ex. "https://foxguard.maison"). Si elle
+# est renseignée, seules ses pages peuvent afficher celles de la caméra dans un
+# cadre. Vide : toute origine le peut, les pages restant protégées par leur
+# ticket.
+manager_origin = ""
+# Clients simultanés du flux vidéo au-delà desquels la caméra répond 503.
+# Chaque connexion force une image clé : sans plafond, quelques dizaines de
+# connexions saturent le Raspberry Pi.
+max_stream_clients = 8
 
 [camera]
 device_index = 0
