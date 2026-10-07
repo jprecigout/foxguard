@@ -56,6 +56,8 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState {
         repository: Arc::clone(&repository),
+        stream_ticket_secret: Some(config.stream.ticket_secret.clone())
+            .filter(|secret| !secret.is_empty()),
     });
     let app = api::create_router(state, &config.server.ui_dir);
 

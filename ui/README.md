@@ -7,6 +7,9 @@ caméra** : une bande de 24 heures qui situe les événements, une pellicule de
 vignettes qui montre ce qui s'est passé, un accès direct au clip de chaque
 détection, et un bouton par caméra vers son **flux en direct**.
 
+Un second onglet, **« ● Direct »**, affiche la **mosaïque des directs** de
+toutes les caméras, ou une seule en grand.
+
 ## Ce que ce n'est pas
 
 Ce n'est **pas** l'interface de la caméra. Chaque caméra embarque déjà la
@@ -39,10 +42,15 @@ SVG de 3 Ko, la duplication coûte moins cher que le couplage — mais si le log
 
 | Fichier | Rôle |
 | --- | --- |
-| `src/App.tsx` | composition : chargement d'une journée, état partagé entre la bande et la pellicule, ouverture du lecteur |
+| `src/App.tsx` | composition : onglets, vue courante, ouverture du cadre |
+| `src/route.ts` | navigation par fragment d'URL (`#/`, `#/direct`, `#/direct/<caméra>`) |
+| `src/components/TimelineView.tsx` | la vue timeline : chargement d'une journée, état partagé entre la bande et la pellicule |
+| `src/components/LiveWall.tsx` | la mosaïque des directs |
+| `src/components/LiveStream.tsx` | le direct d'une caméra : ticket, WebSocket, décodage WebCodecs vers un canevas |
+| `src/frames.ts` | les pages de caméra ouvertes dans le cadre (clip, interrupteur) |
 | `src/components/DayBar.tsx` | navigation entre les journées |
 | `src/components/CameraTimeline.tsx` | la timeline d'une caméra : bande de 24 h et pellicule de vignettes |
-| `src/components/CameraFrameDialog.tsx` | cadre affichant une page servie par la CAMÉRA : le clip d'une détection, ou son flux en direct |
+| `src/components/CameraFrameDialog.tsx` | cadre affichant une page servie par la CAMÉRA : le clip d'une détection, ou son interrupteur |
 | `src/timeline.ts` | géométrie temporelle de la bande (position d'un horodatage, graduations, repère « maintenant ») |
 | `src/grouping.ts` | regroupement des événements par caméra |
 | `src/dates.ts` | manipulation des journées, en heure locale |
@@ -55,28 +63,25 @@ l'interface qui méritent d'être relues attentivement.
 
 ## Les clips, le direct et l'interrupteur
 
-Cette interface donne accès à trois pages qu'elle ne produit **pas
-elle-même** : le clip d'une détection, le flux en direct d'une caméra, et
-l'interrupteur de sa surveillance. Les trois appartiennent à la caméra, donc à
-une autre origine, et c'est la caméra qui sert la page capable de les
-afficher. `CameraFrameDialog` ne fait que mettre cette page dans un cadre :
+Cette interface donne accès à deux pages qu'elle ne produit **pas
+elle-même** : le clip d'une détection et l'interrupteur de surveillance d'une
+caméra. Les deux appartiennent à la caméra, donc à une autre origine, et c'est
+la caméra qui sert la page capable de les afficher. `CameraFrameDialog` ne
+fait que mettre cette page dans un cadre :
 
 | Média | Page servie par la caméra | D'où vient l'URL |
 | --- | --- | --- |
 | Le clip d'une détection | `GET /play/<fichier>` | `clip_url` de l'`EventRecord` |
-| Le flux en direct | `GET /live` | `live_url` du `CameraInfo` |
 | L'interrupteur de surveillance | `GET /control` | `control_url` du `CameraInfo` |
+
+Le **direct**, lui, est décodé ici même (`LiveStream.tsx`) : l'interface
+demande au manager un ticket de visionnage (`stream_url` du `CameraInfo`),
+puis ouvre avec lui le WebSocket de la caméra. Voir « La mosaïque des
+directs » ci-dessous.
 
 Ouvrir les enregistrements de la caméra à toutes les origines serait une bien
 mauvaise façon de contourner la politique de même origine, d'autant que ces
 routes ne sont déjà pas authentifiées.
-
-Pour le direct, il y a une raison de plus, et elle pèse plus lourd : le
-WebSocket vidéo de la caméra **est** authentifié par un jeton. C'est la caméra
-qui injecte son propre jeton dans la page `/live` qu'elle sert, côté serveur.
-Ni cette interface, ni le manager, ni sa base ne le voient jamais passer — et
-c'est heureux, car le serveur annexe est la pièce la plus exposée du système.
-Voir la section « La timeline, les clips et le direct » du README principal.
 
 **L'interrupteur suit exactement le même chemin, et c'est ce qui permet au
 manager de rester en lecture seule.** Le bouton « 🛡 Surveillance » n'appelle
@@ -90,16 +95,33 @@ README principal.
 
 Conséquence assumée : clip, direct et interrupteur demandent que la **caméra**
 soit joignable depuis le navigateur, et aucun des trois n'est proposé si elle
-n'a pas déclaré son URL publique (`clip_url`, `live_url` et `control_url`
+n'a pas déclaré son URL publique (`clip_url`, `stream_url` et `control_url`
 valent `null` sinon). La vignette, elle, vient de la base du manager et reste
 visible dans tous les cas.
 
-C'est volontairement la caméra qui décide **comment** afficher son direct :
-elle sert aujourd'hui du H.264 décodé par WebCodecs, et elle a servi du MJPEG
-avant. Cette interface n'a jamais eu à le savoir, et c'est tout l'intérêt du
-découpage : la caméra peut changer de format vidéo sans qu'une ligne d'ici
-bouge. Le seul effet visible de ce changement est un prérequis de navigateur
-(WebCodecs), que la page de la caméra annonce elle-même quand il manque.
+## La mosaïque des directs
+
+Le WebSocket vidéo d'une caméra est authentifié par son jeton d'API, qui donne
+tous les droits sur elle : ni cette interface, ni le manager ne le
+connaissent. Le manager partage en revanche avec les caméras un secret qui lui
+permet de signer des **tickets de visionnage** : liés à une caméra, valables
+deux minutes, et qui n'ouvrent le flux qu'en **lecture seule**.
+
+`LiveStream` enchaîne donc, à chaque (re)connexion :
+
+1. `GET <stream_url>` sur le manager → `{ "url": "ws://<caméra>/ws?ticket=…" }` ;
+2. ouverture de ce WebSocket, directement auprès de la caméra ;
+3. décodage avec WebCodecs (`VideoDecoder`) vers un canevas — le protocole de
+   `crates/camera/static/live.html`, avec lequel il doit rester aligné.
+
+Chaque flux ouvert fait tourner l'encodeur H.264 de sa caméra : le composant
+ferme la connexion quand l'onglet est masqué, et la mosaïque ferme toutes les
+siennes quand on la quitte.
+
+`stream_url` vaut `null` — et la vignette le dit — si la caméra n'a pas
+déclaré son URL publique, ou si le manager n'a pas de `[stream]
+ticket_secret`. Configuration : voir « La mosaïque des directs » du README
+principal.
 
 ## Toolchain
 
@@ -119,6 +141,7 @@ Le manager sert le bundle statique à la racine, et son API sous `/api/*`
 | `GET /api/events` | événements récents (`?limit=`) ou d'une journée (`?date=`) |
 | `GET /api/events/{id}/thumbnail` | vignette JPEG d'une détection   |
 | `GET /api/cameras`| caméras ayant émis au moins un événement, avec l'URL de leur direct |
+| `GET /api/cameras/{nom}/stream` | ticket de visionnage du direct d'une caméra (URL WebSocket, à usage immédiat) |
 
 Un seul conteneur, une seule origine : **pas de CORS à configurer**, pas de
 nginx supplémentaire.

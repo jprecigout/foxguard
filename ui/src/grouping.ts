@@ -7,8 +7,8 @@ import type { CameraInfo, EventRecord } from "./api";
 
 export interface CameraDay {
   camera: string;
-  /** Vue en direct de cette caméra, si elle est joignable. */
-  liveUrl: string | null;
+  /** Route du ticket de direct de cette caméra, si elle est joignable. */
+  streamUrl: string | null;
   /** Interrupteur de surveillance de cette caméra, s'il est joignable. */
   controlUrl: string | null;
   /** Du plus récent au plus ancien. */
@@ -33,7 +33,7 @@ export interface CameraDay {
  */
 export function groupByCamera(events: EventRecord[], knownCameras: CameraInfo[]): CameraDay[] {
   const byCamera = new Map<string, EventRecord[]>();
-  const liveUrls = new Map(knownCameras.map((camera) => [camera.name, camera.live_url]));
+  const streamUrls = new Map(knownCameras.map((camera) => [camera.name, camera.stream_url]));
   const controlUrls = new Map(knownCameras.map((camera) => [camera.name, camera.control_url]));
 
   for (const camera of knownCameras) {
@@ -52,7 +52,7 @@ export function groupByCamera(events: EventRecord[], knownCameras: CameraInfo[])
   return [...byCamera.entries()]
     .map(([camera, cameraEvents]) => ({
       camera,
-      liveUrl: liveUrls.get(camera) ?? null,
+      streamUrl: streamUrls.get(camera) ?? null,
       controlUrl: controlUrls.get(camera) ?? null,
       events: cameraEvents,
       unknownCount: cameraEvents.filter((e) => e.status === "unknown").length,

@@ -26,6 +26,8 @@ use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{debug, error, info, warn};
 
+use foxguard_protocol::stream_ticket::{self, TicketError};
+
 use crate::capture::SharedState;
 use crate::h264::{H264Stream, NAL_SPS, nal_type};
 use crate::retention::is_recording_file;
@@ -59,10 +61,28 @@ pub struct VideoFile {
     pub size_mb: f64,
 }
 
-/// Paramètres de requête pour l'upgrade WebSocket (`?token=...`).
+/// Paramètres de requête d'authentification (`?token=...`, ou `?ticket=...`
+/// sur `GET /ws` uniquement).
 #[derive(Deserialize)]
 pub struct AuthQuery {
     pub token: Option<String>,
+    /// Ticket de visionnage signé par le manager (voir
+    /// `foxguard_protocol::stream_ticket`). N'est accepté QUE par
+    /// [`ws_handler`], et n'y ouvre qu'un flux en lecture seule.
+    pub ticket: Option<String>,
+}
+
+/// Ce qu'une connexion WebSocket a le droit de faire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WsAccess {
+    /// Ouverte avec le jeton d'API : vidéo ET commandes. C'est l'interface
+    /// complète de la caméra.
+    Full,
+    /// Ouverte avec un ticket du manager : vidéo seulement. Les commandes
+    /// reçues sont ignorées — le manager est en lecture seule, et un ticket
+    /// qui permettrait de couper la surveillance donnerait à l'interface du
+    /// manager exactement le pouvoir qu'on refuse de lui confier.
+    ViewOnly,
 }
 
 /// Commandes JSON reçues par WebSocket
@@ -347,21 +367,65 @@ pub async fn ws_handler(
     Query(auth): Query<AuthQuery>,
     State(state): State<Arc<SharedState>>,
 ) -> Response {
-    if auth.token.as_deref() != Some(state.api_token.as_str()) {
-        warn!("⚠️ Tentative de connexion WebSocket rejetée (Token invalide).");
+    let Some(access) = ws_access(&auth, &state) else {
         return (StatusCode::UNAUTHORIZED, "Accès refusé").into_response();
-    }
+    };
 
     let stream = Arc::clone(&state.h264);
 
     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     info!(
-        "✅ [WS] Nouveau client connecté #{} (IP: {})",
-        client_id, addr
+        "✅ [WS] Nouveau client connecté #{} (IP: {}, accès : {:?})",
+        client_id, addr, access
     );
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state, stream, client_id, addr))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, stream, client_id, addr, access))
         .into_response()
+}
+
+/// Droits d'une demande de connexion WebSocket, ou `None` si elle est refusée.
+///
+/// Le jeton d'API d'abord, exactement comme avant : l'interface complète de
+/// la caméra n'est pas concernée par les tickets. Un ticket ensuite, s'ils
+/// sont activés (`[server] stream_ticket_secret`).
+///
+/// Chaque refus est journalisé avec sa CAUSE : un ticket expiré est presque
+/// toujours une horloge déréglée sur la caméra ou le manager, et un 401 sans
+/// explication laisserait chercher longtemps.
+fn ws_access(auth: &AuthQuery, state: &SharedState) -> Option<WsAccess> {
+    if is_authorized(auth, state) {
+        return Some(WsAccess::Full);
+    }
+
+    let Some(ticket) = auth.ticket.as_deref() else {
+        warn!("⚠️ Tentative de connexion WebSocket rejetée (Token invalide).");
+        return None;
+    };
+
+    let Some(secret) = state.stream_ticket_secret.as_deref() else {
+        warn!(
+            "⚠️ Ticket de direct présenté mais refusé : `[server] stream_ticket_secret` \
+             n'est pas configuré sur cette caméra."
+        );
+        return None;
+    };
+
+    let now = chrono::Utc::now().timestamp();
+
+    match stream_ticket::verify(secret.as_bytes(), &state.camera_name, ticket, now) {
+        Ok(()) => Some(WsAccess::ViewOnly),
+        Err(TicketError::Expired) => {
+            warn!(
+                "⚠️ Ticket de direct expiré : vérifiez que les horloges de la caméra et du \
+                 manager sont synchronisées (NTP)."
+            );
+            None
+        }
+        Err(e) => {
+            warn!("⚠️ Ticket de direct refusé : {e:?}.");
+            None
+        }
+    }
 }
 
 /// Pousse le flux encodé à un navigateur, et traite ses commandes.
@@ -371,16 +435,17 @@ pub async fn ws_handler(
 /// lire le client laisserait les interrupteurs de l'interface sans effet —
 /// en silence, puisque rien côté page ne distingue un message ignoré d'un
 /// message traité.
-pub async fn handle_socket(
+async fn handle_socket(
     socket: WebSocket,
     state: Arc<SharedState>,
     stream: Arc<H264Stream>,
     client_id: u64,
     addr: SocketAddr,
+    access: WsAccess,
 ) {
     let (sender, receiver) = socket.split();
 
-    let commands = spawn_command_task(receiver, state, client_id);
+    let commands = spawn_command_task(receiver, state, client_id, access);
 
     tokio::select! {
         _ = commands => {},
@@ -634,12 +699,24 @@ fn spawn_command_task(
     mut receiver: SplitStream<WebSocket>,
     state_cmd: Arc<SharedState>,
     client_id: u64,
+    access: WsAccess,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // La lecture continue même en lecture seule : c'est elle qui détecte
+        // la fermeture de la connexion par le navigateur.
         while let Some(Ok(msg)) = receiver.next().await {
             if let Message::Text(text) = msg
                 && let Ok(cmd) = serde_json::from_str::<ClientCommand>(&text)
             {
+                if access != WsAccess::Full {
+                    warn!(
+                        "⚠️ [WS Client #{}] Commande ignorée : connexion ouverte par ticket, \
+                         en lecture seule.",
+                        client_id
+                    );
+                    continue;
+                }
+
                 match cmd {
                     ClientCommand::SetMonitoring { enabled } => {
                         state_cmd
@@ -715,6 +792,56 @@ pub fn create_router(state: Arc<SharedState>) -> Router {
 mod tests {
     use super::*;
     use crate::h264::AccessUnit;
+
+    const SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    fn state(stream_ticket_secret: Option<&str>) -> SharedState {
+        SharedState {
+            detection_enabled: Default::default(),
+            recording_enabled: Default::default(),
+            api_token: "jeton".to_string(),
+            camera_name: "jardin".to_string(),
+            stream_ticket_secret: stream_ticket_secret.map(str::to_string),
+            h264: Arc::new(H264Stream::new()),
+            pending_enrollment: Default::default(),
+            recordings_dir: String::new(),
+        }
+    }
+
+    fn auth(token: Option<&str>, ticket: Option<String>) -> AuthQuery {
+        AuthQuery {
+            token: token.map(str::to_string),
+            ticket,
+        }
+    }
+
+    fn ticket() -> String {
+        let expires_at = chrono::Utc::now().timestamp() + stream_ticket::TICKET_TTL_SECS;
+        stream_ticket::issue(SECRET.as_bytes(), "jardin", expires_at)
+    }
+
+    #[test]
+    fn the_api_token_grants_full_access() {
+        assert_eq!(
+            ws_access(&auth(Some("jeton"), None), &state(Some(SECRET))),
+            Some(WsAccess::Full)
+        );
+    }
+
+    #[test]
+    fn a_ticket_grants_view_only_access() {
+        // C'est ce qui fait ignorer ses commandes (voir `spawn_command_task`) :
+        // un ticket ne doit jamais permettre de couper la surveillance.
+        assert_eq!(
+            ws_access(&auth(None, Some(ticket())), &state(Some(SECRET))),
+            Some(WsAccess::ViewOnly)
+        );
+    }
+
+    #[test]
+    fn tickets_are_refused_when_no_secret_is_configured() {
+        assert_eq!(ws_access(&auth(None, Some(ticket())), &state(None)), None);
+    }
 
     /// SPS plausible : en-tête 0x67, profil 0x42 (Baseline), contraintes
     /// 0xC0, niveau 0x1E (3.0).

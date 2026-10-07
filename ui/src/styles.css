@@ -32,6 +32,12 @@ body {
   padding: 24px 16px 64px;
 }
 
+/* La mosaïque des directs prend toute la largeur : c'est une vue qu'on
+   affiche sur un grand écran, et 1100 px y laisseraient des marges vides. */
+.app.wide {
+  max-width: 1800px;
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -60,6 +66,33 @@ header h1 .fox {
   margin: 6px 0 20px;
 }
 
+/* --- Onglets ---------------------------------------------------------- */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tabs a {
+  padding: 8px 16px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.9rem;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.tabs a:hover {
+  color: var(--text);
+}
+
+.tabs a[aria-current="page"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
 .daybar {
   display: flex;
   align-items: center;
@@ -70,6 +103,13 @@ header h1 .fox {
   border-radius: 10px;
   padding: 12px 16px;
   margin-bottom: 20px;
+}
+
+/* Le nom d'une caméra s'affiche tel qu'elle le déclare : pas de
+   `capitalize` comme pour la date. */
+.daybar .camera-name {
+  flex: 1;
+  font-weight: 600;
 }
 
 .daybar .label {
@@ -180,16 +220,20 @@ input[type="date"] {
   color: var(--danger);
 }
 
-/* Bouton d'accès au direct d'une caméra. Le point rouge est la convention
-   universelle de l'enregistrement en cours ; ici, du flux en cours. */
-button.live {
-  border-color: var(--accent-red);
+/* Lien vers le direct d'une caméra, habillé en bouton. Le point rouge est la
+   convention universelle de l'enregistrement en cours ; ici, du flux en
+   cours. */
+a.live {
+  border: 1px solid var(--accent-red);
+  border-radius: 6px;
   color: var(--accent-red);
   font-size: 0.78rem;
   padding: 3px 10px;
+  text-decoration: none;
+  transition: background 0.2s;
 }
 
-button.live:hover:not(:disabled) {
+a.live:hover {
   background: rgba(229, 57, 53, 0.14);
 }
 
@@ -397,6 +441,134 @@ button.control:hover:not(:disabled) {
 
 .shot.unknown .shot-who {
   color: var(--danger);
+}
+
+/* --- Mosaïque des directs ------------------------------------------- */
+
+/* Autant de colonnes que la largeur en permet, une vignette ne descendant pas
+   sous 420 px : en dessous, l'image ne dit plus grand-chose. */
+.live-wall {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr));
+  gap: 16px;
+}
+
+.live-wall.focused {
+  grid-template-columns: 1fr;
+}
+
+.live-tile {
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.live-tile > header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.live-tile h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 1rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-tile > header button {
+  font-size: 0.78rem;
+  padding: 3px 10px;
+}
+
+/* Le cadre du flux. Son rapport est réservé AVANT la première image, pour
+   que la mosaïque ne sursaute pas à mesure que les caméras répondent ; le
+   canevas s'y inscrit ensuite sans déformation, quel que soit le rapport
+   réel de la caméra. */
+.stream {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.live-wall.focused .stream {
+  /* En grand, l'image tient dans la fenêtre sans faire défiler la page. */
+  max-height: calc(100vh - 260px);
+  aspect-ratio: auto;
+  height: calc(100vh - 260px);
+  min-height: 240px;
+}
+
+.stream canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.stream-status {
+  margin: 0;
+  padding: 0 24px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.stream-status.failed {
+  color: var(--danger);
+}
+
+/* Pastille d'état, reprise de la vue en direct de la caméra. */
+.stream-badge {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--text);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+.stream-badge .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-red);
+}
+
+/* En plein écran, la vignette n'est plus qu'une image : l'en-tête reste
+   (pour en sortir à la souris), le flux prend tout le reste. */
+.live-tile:fullscreen {
+  border: none;
+  border-radius: 0;
+}
+
+.live-tile:fullscreen .stream {
+  flex: 1;
+  height: auto;
+  max-height: none;
+  aspect-ratio: auto;
+}
+
+[hidden] {
+  display: none !important;
 }
 
 /* --- Lecteur de clip -------------------------------------------------- */

@@ -21,6 +21,8 @@
 //! C'est exactement la discipline déjà appliquée au fichier de configuration
 //! de la caméra, transposée au fil MQTT.
 
+pub mod stream_ticket;
+
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 

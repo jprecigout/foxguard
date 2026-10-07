@@ -19,7 +19,8 @@
 * **Enregistrement Vidéo** : Sauvegarde en **MP4 fragmenté** (H.264) — une vingtaine de fois plus léger que le format d'images JPEG qui l'a précédé, lisible par un `<video>` de navigateur comme par VLC, et *résistant à la troncature* : une coupure de courant n'y coûte que le dernier fragment, là où un MP4 ordinaire serait intégralement perdu. Activable dynamiquement depuis l'interface web, avec liste et relecture directement dans l'UI.
 * **Alertes par E-mail** : Notification HTML automatique (avec logo et photo de la détection en pièces jointes inline) en cas de détection, avec gestion de délai (*cooldown*) pour éviter le spam.
 * **Publication MQTT (optionnelle)** : Publie un message JSON sur un broker MQTT à chaque *changement* d'état de reconnaissance d'une personne suivie (nouvelle personne inconnue, ou identification/perte d'identification), avec le nom de la caméra, l'horodatage, le nom de la personne si elle est connue, une **vignette** de la détection et la référence du **clip** correspondant. Désactivée par défaut, activable via `[mqtt] enabled = true` (voir Configuration ci-dessous).
-* **Timeline des détections (interface du manager)** : Pour chaque caméra, une bande de 24 heures qui situe les détections dans la journée, et une pellicule de vignettes qui montre ce qui s'est passé. Un clic ouvre le clip correspondant — et un bouton donne accès au **direct** de la caméra, servi par elle et affiché dans un cadre.
+* **Timeline des détections (interface du manager)** : Pour chaque caméra, une bande de 24 heures qui situe les détections dans la journée, et une pellicule de vignettes qui montre ce qui s'est passé. Un clic ouvre le clip correspondant — et un bouton donne accès au **direct** de la caméra.
+* **Mosaïque des directs (interface du manager)** : Toutes les caméras en direct sur un seul écran, ou une seule en grand / en plein écran. Le H.264 est décodé par l'interface elle-même, qui ouvre le WebSocket de chaque caméra avec un **ticket signé par le manager** : court, lié à une caméra, en lecture seule — le manager ne connaît le jeton d'API d'aucune caméra.
 * **Overlay Graphique Natif** : Dessin de boîtes englobantes (*bounding boxes*) et de libellés textuels optimisés grâce à la police bitmap `font8x8`.
 
 ---
@@ -142,14 +143,14 @@ de travail.
 * **`crates/camera/src/util.rs`** : Petits utilitaires transverses (verrouillage de mutex tolérant à l'empoisonnement).
 * **`crates/camera/static/controller.html`** : Interface utilisateur web — flux vidéo H.264 décodé par WebCodecs, interrupteurs, capture de photo de référence, liste et lecture des enregistrements (un `<video>` natif, les enregistrements étant des MP4).
 * **`crates/camera/static/clip-player.html`** : Lecteur autonome d'un enregistrement, servi par `GET /play/{fichier}`. Un `<video>` natif suffit, les enregistrements étant des MP4 ordinaires.
-* **`crates/camera/static/live.html`** : Vue en direct SEULE, servie par `GET /live`. C'est par elle que l'interface du manager affiche le direct d'une caméra, sans jamais recevoir son jeton d'API (voir « La timeline, les clips et le direct » plus bas).
+* **`crates/camera/static/live.html`** : Vue en direct SEULE, servie par `GET /live`. Elle n'est plus utilisée par l'interface du manager, qui décode le direct elle-même avec un ticket (voir « La mosaïque des directs » plus bas), mais reste disponible pour afficher le direct d'une caméra seule.
 * **`crates/camera/static/control.html`** : Interrupteur de surveillance SEUL, servi par `GET /control`. Même mécanique que `live.html`, et pour la même raison : c'est par elle que l'interface du manager active ou coupe la surveillance d'une caméra, sans jamais recevoir son jeton (voir « Le pilotage depuis le manager » plus bas). Elle passe par `GET`/`POST /api/monitoring` et **n'ouvre pas le WebSocket** : s'y abonner démarrerait l'encodage H.264 pour une page qui n'affiche aucune image.
 * **`crates/camera/assets/logo.svg`** : Logo FoxGuard — affiché dans ce README et embarqué dans le binaire (`include_bytes!`) pour les e-mails d'alerte.
 * **`known_faces/`** : Photos de référence pour la reconnaissance faciale, nommées `<nom>_<horodatage>.jpg` (plusieurs fichiers possibles par personne).
 * **`output_record/`** : Enregistrements vidéo générés par l'application, en MP4 fragmenté (voir « Les enregistrements »).
 * **`crates/manager/`** : Le manager — `config.rs` (sa configuration `manager-config.toml`), `ingest.rs` (abonnement MQTT et décodage des événements), `db.rs` (persistance PostgreSQL), `retention.rs` (purge des événements trop anciens), `api.rs` (API HTTP de consultation et service du bundle de l'interface), `migrations/` (schéma, appliqué au démarrage).
 * **`crates/protocol/`** : `DetectionEvent` et `PersonStatus`, le contrat partagé entre la caméra et le manager.
-* **`ui/`** : Interface React du manager — `App.tsx` (composition), `components/` (barre de jour, timeline d'une caméra, cadre de lecture d'un clip ou du direct), `timeline.ts` (géométrie temporelle de la bande de 24 h), `grouping.ts` (regroupement par caméra), `generated/` (types d'API générés depuis le Rust). Voir `ui/README.md`.
+* **`ui/`** : Interface React du manager — `App.tsx` (composition), `components/` (barre de jour, timeline d'une caméra, mosaïque et flux des directs, cadre de lecture d'un clip ou de l'interrupteur), `route.ts` (navigation par fragment d'URL), `timeline.ts` (géométrie temporelle de la bande de 24 h), `grouping.ts` (regroupement par caméra), `generated/` (types d'API générés depuis le Rust). Voir `ui/README.md`.
 * **`deploy/camera/`** : `Dockerfile` de l'image Raspberry Pi.
 * **`deploy/server/`** : `Dockerfile` du manager, `compose.yml` (manager + broker MQTT) et `mosquitto.conf`.
 
@@ -396,6 +397,7 @@ chaîne de requête :
 | Route | Jeton | Pourquoi |
 | --- | --- | --- |
 | `GET /ws` | **oui** | le direct |
+| `GET /ws?ticket=…` | ticket du manager, si `[server] stream_ticket_secret` | le direct, en **lecture seule** (voir « La mosaïque des directs ») |
 | `GET /api/recordings` | **oui** | la liste des archives |
 | `GET /recordings/{fichier}` | **oui** | les octets des archives |
 | `DELETE /api/recordings/{fichier}` | **oui** | seule route destructive |
@@ -507,15 +509,12 @@ les archives sont authentifiées (voir « Ce qui est authentifié »).
 cadre. La politique de même origine est respectée sans rien assouplir, et le
 format d'enregistrement reste connu du seul composant qui l'écrit.
 
-**Le direct passe par le même chemin, pour une raison de plus.** La timeline
-propose aussi, par caméra, un bouton qui ouvre son flux en direct — et ce flux
-est servi par la page `GET /live` de la caméra, affichée dans le même genre de
-cadre. Au-delà de la même origine, il y a ici un jeton en jeu : le WebSocket
-vidéo de la caméra est authentifié, et c'est la caméra qui injecte son propre
-jeton dans la page qu'elle sert. **Le manager ne le reçoit jamais**, ni son
-interface, ni sa base. Lui confier le jeton de chaque caméra ferait du serveur
-annexe — la pièce la plus exposée du système — le point unique dont la
-compromission donne la main sur toutes les caméras.
+**Le direct, lui, ne passe plus par un cadre** : l'interface le décode
+elle-même (voir « La mosaïque des directs » ci-dessous). Le jeton d'API de la
+caméra n'en reste pas moins hors de portée du manager : lui confier le jeton
+de chaque caméra ferait du serveur annexe — la pièce la plus exposée du
+système — le point unique dont la compromission donne la main sur toutes les
+caméras.
 
 Pour que ces liens existent, la caméra doit déclarer par quelle URL elle est
 joignable depuis un navigateur — elle ne peut pas la deviner :
@@ -524,6 +523,66 @@ joignable depuis un navigateur — elle ne peut pas la deviner :
 [server]
 public_url = "http://192.168.1.42:8080"
 ```
+
+### La mosaïque des directs
+
+L'onglet **« ● Direct »** de l'interface affiche toutes les caméras en direct
+(`#/direct`), ou une seule en grand (`#/direct/<caméra>`, aussi atteint par le
+bouton « ● Direct » de la timeline). Chaque vignette est un vrai composant
+(`ui/src/components/LiveStream.tsx`) qui ouvre le WebSocket de SA caméra et
+décode le H.264 avec WebCodecs — le même protocole que la page de la caméra,
+sans cadre.
+
+Le problème à résoudre : `GET /ws` exige le jeton d'API de la caméra, qui
+donne **tous** les droits (couper la surveillance, supprimer les archives) et
+n'a rien à faire dans le navigateur ni sur le serveur annexe. D'où des
+**tickets de visionnage** (`crates/protocol/src/stream_ticket.rs`) :
+
+1. le manager et les caméras partagent un **secret**, distinct du jeton et qui
+   ne sert qu'à ça ;
+2. l'interface demande un ticket au manager
+   (`GET /api/cameras/{nom}/stream`), qui le signe en HMAC-SHA256 pour **cette
+   caméra** et **deux minutes**, et renvoie l'URL du WebSocket de la caméra ;
+3. le navigateur ouvre ce WebSocket **directement** — la vidéo ne transite pas
+   par le manager ;
+4. la caméra vérifie la signature elle-même, sans rien demander au manager,
+   et ouvre le flux en **lecture seule** : les commandes reçues sur une
+   connexion par ticket sont ignorées.
+
+Un ticket ne vaut que pour `GET /ws` : les archives, la suppression et
+l'interrupteur exigent toujours le jeton. Il ne sert qu'à OUVRIR la
+connexion ; l'interface en redemande un à chaque reconnexion.
+
+Pour l'activer, le même secret des deux côtés (32 caractères au moins) :
+
+```bash
+openssl rand -hex 32
+```
+
+```toml
+# camera-config.toml, sur CHAQUE caméra
+[server]
+public_url = "http://192.168.1.42:8080"   # requis : c'est là que le navigateur se connecte
+stream_ticket_secret = "<le secret>"
+
+# manager-config.toml
+[stream]
+ticket_secret = "<le secret>"
+```
+
+Ce que cela suppose :
+
+* **des horloges synchronisées** (NTP) : un écart de plus de deux minutes fait
+  refuser les tickets, ce que la caméra journalise explicitement ;
+* **la caméra joignable depuis le navigateur**, comme pour les clips ;
+* **pas de contenu mixte** : une interface servie en HTTPS ne peut pas ouvrir
+  le `ws://` d'une caméra en HTTP — la vignette le dit plutôt que de rester
+  noire ;
+* **un secret commun à toutes les caméras** : il permet de signer un ticket
+  pour n'importe laquelle, mais un ticket ne permet que de regarder.
+
+Une vignette ouverte fait encoder sa caméra : l'interface ferme les flux dès
+que l'onglet est masqué ou que l'on quitte la mosaïque.
 
 ### Le pilotage depuis le manager
 

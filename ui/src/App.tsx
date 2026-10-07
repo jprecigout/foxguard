@@ -1,89 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 
-import { ApiError, fetchCameras, fetchEventsForDay } from "./api";
-import type { CameraInfo, EventsResponse } from "./api";
 import { CameraFrameDialog } from "./components/CameraFrameDialog";
-import { CameraTimeline } from "./components/CameraTimeline";
-import { DayBar } from "./components/DayBar";
-import { today } from "./dates";
-import { groupByCamera } from "./grouping";
-
-/** La page de caméra actuellement affichée dans le cadre. */
-interface OpenFrame {
-  url: string;
-  title: string;
-  hint: string;
-}
+import { LiveWall } from "./components/LiveWall";
+import { TimelineView } from "./components/TimelineView";
+import type { OpenFrame } from "./frames";
+import { routeHref, useRoute } from "./route";
 
 export default function App() {
-  const [day, setDay] = useState(today);
-  const [cameras, setCameras] = useState<CameraInfo[]>([]);
-  const [response, setResponse] = useState<EventsResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  // L'événement mis en évidence, partagé entre la bande de 24 h et la
-  // pellicule de vignettes : cliquer une marque désigne une vignette, et
-  // réciproquement.
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const route = useRoute();
   const [openFrame, setOpenFrame] = useState<OpenFrame | null>(null);
 
-  const load = useCallback(
-    async (signal: AbortSignal) => {
-      setBusy(true);
-      setError(null);
-
-      try {
-        // Les deux requêtes sont indépendantes : les lancer en parallèle
-        // évite d'attendre deux allers-retours.
-        const [knownCameras, events] = await Promise.all([
-          fetchCameras(signal),
-          fetchEventsForDay(day, signal),
-        ]);
-
-        setCameras(knownCameras);
-        setResponse(events);
-      } catch (cause) {
-        // Une requête annulée (changement de jour rapide) n'est pas une
-        // erreur : la suivante est déjà partie.
-        if (cause instanceof DOMException && cause.name === "AbortError") return;
-        setError(cause instanceof ApiError ? cause.message : "Erreur inattendue");
-        setResponse(null);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [day],
-  );
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void load(controller.signal);
-
-    // Rafraîchissement périodique, uniquement sur la journée EN COURS : une
-    // journée passée ne bouge plus, l'interroger en boucle ne ferait que
-    // charger la base pour rien.
-    if (day !== today()) return () => controller.abort();
-
-    const timer = window.setInterval(() => void load(controller.signal), 15000);
-    return () => {
-      window.clearInterval(timer);
-      controller.abort();
-    };
-  }, [load, day]);
-
-  // Changer de journée invalide la sélection : l'événement désigné n'est plus
-  // affiché, et un identifiant résiduel mettrait en évidence une marque au
-  // hasard dès qu'un autre événement réutiliserait ce numéro.
-  const changeDay = useCallback((next: string) => {
-    setSelectedId(null);
-    setDay(next);
-  }, []);
-
-  const grouped = response ? groupByCamera(response.events, cameras) : [];
-
   return (
-    <div className="app">
+    <div className={`app${route.view === "live" ? " wide" : ""}`}>
       <header>
         <div className="brand">
           {/* Servi depuis `public/` : le fichier est copié tel quel à la
@@ -93,65 +21,30 @@ export default function App() {
             Fox<span className="fox">Guard</span>
           </h1>
         </div>
-        <p className="subtitle">Timeline des détections, par caméra</p>
+        <p className="subtitle">
+          {route.view === "live" ? "Direct de toutes les caméras" : "Timeline des détections, par caméra"}
+        </p>
       </header>
 
-      <DayBar day={day} onChange={changeDay} busy={busy} />
+      {/* Des liens et non des boutons : chaque vue a son adresse, que le
+          bouton Précédent et les favoris retrouvent (voir `route.ts`). */}
+      <nav className="tabs">
+        <a href={routeHref({ view: "timeline" })} aria-current={route.view === "timeline" ? "page" : undefined}>
+          Timeline
+        </a>
+        <a href={routeHref({ view: "live", camera: null })} aria-current={route.view === "live" ? "page" : undefined}>
+          ● Direct
+        </a>
+      </nav>
 
-      {error && (
-        <div className="banner error">
-          {error}. Vérifiez que le manager tourne et que la base est joignable.
-        </div>
+      {/* Une seule vue montée à la fois : quitter la mosaïque ferme ses
+          flux (et soulage les encodeurs des caméras), quitter la timeline
+          arrête son rafraîchissement périodique. */}
+      {route.view === "live" ? (
+        <LiveWall focusedCamera={route.camera} onOpenFrame={setOpenFrame} />
+      ) : (
+        <TimelineView onOpenFrame={setOpenFrame} />
       )}
-
-      {response?.truncated && (
-        <div className="banner warn">
-          Cette journée comporte plus de détections que le serveur n'en renvoie :
-          la timeline ci-dessous est incomplète.
-        </div>
-      )}
-
-      {!error && response === null && <p className="placeholder">Chargement…</p>}
-
-      {!error && response !== null && grouped.length === 0 && (
-        <p className="placeholder">
-          Aucune caméra connue. Les caméras apparaissent ici dès leur première
-          détection publiée sur MQTT.
-        </p>
-      )}
-
-      <div className="cameras">
-        {grouped.map((cameraDay) => (
-          <CameraTimeline
-            key={cameraDay.camera}
-            day={day}
-            cameraDay={cameraDay}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            onPlay={(url, title) =>
-              setOpenFrame({
-                url,
-                title,
-                hint: "Le clip est lu depuis la caméra elle-même : elle doit être joignable depuis ce navigateur.",
-              })
-            }
-            onWatchLive={(url, camera) =>
-              setOpenFrame({
-                url,
-                title: `${camera} — direct`,
-                hint: "Le direct vient de la caméra elle-même, qui l'encode en H.264 quand le navigateur sait le décoder.",
-              })
-            }
-            onControl={(url, camera) =>
-              setOpenFrame({
-                url,
-                title: `${camera} — surveillance`,
-                hint: "L'interrupteur est servi par la caméra, qui l'applique elle-même : le manager n'écrit rien et n'a pas son jeton.",
-              })
-            }
-          />
-        ))}
-      </div>
 
       {openFrame && (
         <CameraFrameDialog

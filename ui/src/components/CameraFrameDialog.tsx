@@ -1,7 +1,11 @@
 import { useEffect, useRef } from "react";
 
-// Affiche une page servie par une CAMÉRA : le clip d'une détection, ou sa
-// vue en direct.
+// Affiche une page servie par une CAMÉRA : le clip d'une détection, ou son
+// interrupteur de surveillance.
+//
+// Le DIRECT, lui, n'y passe plus : l'interface le décode elle-même, avec un
+// ticket signé par le manager (voir `LiveStream.tsx`). Ce qui suit explique
+// pourquoi le reste demeure dans un cadre.
 //
 // # Pourquoi un cadre, et pas un lecteur écrit ici
 //

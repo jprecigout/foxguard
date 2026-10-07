@@ -28,4 +28,11 @@ live_url: string | null,
  * dégraderait le modèle de sécurité de tout le système pour un bouton
  * (voir `control_handler` côté caméra).
  */
-control_url: string | null, };
+control_url: string | null, 
+/**
+ * Route du manager qui délivre un ticket de visionnage pour cette
+ * caméra (voir [`StreamTicket`]), ou `null` si le direct n'est pas
+ * disponible : caméra sans URL publique, ou tickets non configurés
+ * (`[stream] ticket_secret`).
+ */
+stream_url: string | null, };

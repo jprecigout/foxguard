@@ -1,6 +1,7 @@
 import type { EventRecord } from "../api";
 import { formatTime } from "../dates";
 import type { CameraDay } from "../grouping";
+import { routeHref } from "../route";
 import { HOUR_TICKS, dayFraction, formatHourTick, nowFraction, percent } from "../timeline";
 
 // Timeline d'une caméra sur une journée.
@@ -151,7 +152,6 @@ export function CameraTimeline({
   selectedId,
   onSelect,
   onPlay,
-  onWatchLive,
   onControl,
 }: {
   day: string;
@@ -159,7 +159,6 @@ export function CameraTimeline({
   selectedId: number | null;
   onSelect: (id: number) => void;
   onPlay: (url: string, title: string) => void;
-  onWatchLive: (url: string, camera: string) => void;
   onControl: (url: string, camera: string) => void;
 }) {
   // La pellicule se lit dans le sens du temps, alors que l'API renvoie du plus
@@ -173,17 +172,17 @@ export function CameraTimeline({
         <h2>{cameraDay.camera}</h2>
 
         {/* Le direct ne dépend pas de la journée affichée ni des détections :
-            une caméra sans rien à signaler se regarde quand même. Il
-            n'apparaît que si la caméra a déclaré son URL publique — le
-            manager ne peut pas la deviner (voir `[server] public_url`). */}
-        {cameraDay.liveUrl && (
-          <button
+            une caméra sans rien à signaler se regarde quand même. Il ouvre la
+            mosaïque des directs, centrée sur cette caméra — un lien, pour
+            que le bouton Précédent ramène à la timeline. */}
+        {cameraDay.streamUrl && (
+          <a
             className="live"
-            onClick={() => onWatchLive(cameraDay.liveUrl!, cameraDay.camera)}
+            href={routeHref({ view: "live", camera: cameraDay.camera })}
             title={`Voir le direct de ${cameraDay.camera}`}
           >
             ● Direct
-          </button>
+          </a>
         )}
 
         {/* L'interrupteur de surveillance, lui aussi servi par la caméra

@@ -382,6 +382,19 @@ pub struct ServerConfig {
     /// l'événement et reste visible dans tous les cas.
     #[serde(default)]
     pub public_url: String,
+
+    /// Secret partagé avec le manager, avec lequel il signe des tickets de
+    /// visionnage du direct (voir `foxguard_protocol::stream_ticket`).
+    ///
+    /// Un ticket ouvre `GET /ws` en LECTURE SEULE, pour cette caméra et pour
+    /// quelques minutes : c'est ce qui permet à l'interface du manager
+    /// d'afficher le direct sans jamais connaître [`Self::api_token`], qui
+    /// donne tous les droits.
+    ///
+    /// Vide (le défaut), les tickets sont refusés et seul le jeton ouvre le
+    /// flux. Il doit être IDENTIQUE à `[stream] ticket_secret` du manager.
+    #[serde(default)]
+    pub stream_ticket_secret: String,
 }
 
 /// Paramètres de la caméra V4L2.
@@ -496,6 +509,10 @@ impl Config {
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
+
+        foxguard_protocol::stream_ticket::validate_secret(&config.server.stream_ticket_secret)
+            .map_err(|e| anyhow::anyhow!("[server] stream_ticket_secret : {e}"))?;
+
         Ok(config)
     }
 }

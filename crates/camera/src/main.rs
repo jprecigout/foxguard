@@ -59,6 +59,9 @@ async fn main() -> anyhow::Result<()> {
         recording_enabled: AtomicBool::new(false),
         h264: Arc::clone(&h264),
         api_token: config.server.api_token.clone(),
+        camera_name: config.camera.name.clone(),
+        stream_ticket_secret: Some(config.server.stream_ticket_secret.clone())
+            .filter(|secret| !secret.is_empty()),
         pending_enrollment: Mutex::new(None),
         recordings_dir: config.recording.dir.clone(),
     });

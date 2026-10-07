@@ -18,6 +18,16 @@ api_token = "secret123"
 # défaut), aucun de ces liens n'est proposé — la vignette, elle, voyage dans
 # l'événement et reste visible dans tous les cas.
 public_url = ""
+# Secret partagé avec le manager, pour la mosaïque des directs de son
+# interface. Le manager signe avec lui des TICKETS qui ouvrent le flux vidéo
+# (GET /ws) en LECTURE SEULE, pour cette caméra et pour deux minutes : il
+# n'a ainsi jamais besoin de `api_token`, qui donne tous les droits.
+#
+# Doit être IDENTIQUE à `[stream] ticket_secret` du manager, et faire au moins
+# 32 caractères (`openssl rand -hex 32`). Exige `public_url` et des horloges
+# synchronisées (NTP). VIDE (le défaut) : tickets refusés, le direct n'apparaît
+# pas dans l'interface du manager.
+stream_ticket_secret = ""
 
 [camera]
 device_index = 0

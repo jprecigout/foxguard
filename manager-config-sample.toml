@@ -11,6 +11,17 @@ port = 8090
 # les routes /api/* répondent.
 ui_dir = "ui/dist"
 
+# Mosaïque des directs de l'interface (section optionnelle).
+[stream]
+# Secret partagé avec les caméras : le manager signe avec lui des tickets de
+# visionnage, qui ouvrent le flux vidéo d'UNE caméra, en LECTURE SEULE, pour
+# deux minutes. Il ne connaît ainsi le jeton d'API d'aucune caméra.
+#
+# Doit être IDENTIQUE à `[server] stream_ticket_secret` de chaque caméra, et
+# faire au moins 32 caractères (`openssl rand -hex 32`). VIDE (le défaut) :
+# l'interface ne propose pas de direct.
+ticket_secret = ""
+
 # SEULE SECTION OBLIGATOIRE : sans broker, le manager n'a rien à agréger.
 [mqtt]
 broker_host = "mosquitto"

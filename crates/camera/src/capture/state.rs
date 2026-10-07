@@ -16,6 +16,15 @@ pub struct SharedState {
     // Jeton attendu en paramètre ?token= pour se connecter au WebSocket
     pub api_token: String,
 
+    /// Nom de la caméra (`[camera] name`) : il entre dans la signature des
+    /// tickets de visionnage, qui ne valent que pour la caméra pour laquelle
+    /// ils ont été émis.
+    pub camera_name: String,
+
+    /// Secret des tickets de visionnage (`[server] stream_ticket_secret`),
+    /// ou `None` s'ils sont désactivés (voir `crate::api::ws_handler`).
+    pub stream_ticket_secret: Option<String>,
+
     /// Flux H.264 encodé — le SEUL flux vidéo de la caméra.
     ///
     /// Porté par l'état parce que le serveur HTTP en est un consommateur :

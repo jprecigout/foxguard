@@ -19,9 +19,11 @@ export type { CameraInfo } from "./generated/CameraInfo";
 export type { EventRecord } from "./generated/EventRecord";
 export type { EventsResponse } from "./generated/EventsResponse";
 export type { PersonStatus } from "./generated/PersonStatus";
+export type { StreamTicket } from "./generated/StreamTicket";
 
 import type { CameraInfo } from "./generated/CameraInfo";
 import type { EventsResponse } from "./generated/EventsResponse";
+import type { StreamTicket } from "./generated/StreamTicket";
 
 /** Erreur portant le code HTTP, pour distinguer « serveur injoignable » de « 500 ». */
 export class ApiError extends Error {
@@ -33,11 +35,11 @@ export class ApiError extends Error {
   }
 }
 
-async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+async function getJson<T>(path: string, signal?: AbortSignal, init?: RequestInit): Promise<T> {
   let response: Response;
 
   try {
-    response = await fetch(path, { signal });
+    response = await fetch(path, { ...init, signal });
   } catch (cause) {
     // `fetch` ne rejette que sur une panne réseau : le manager est arrêté, ou
     // le proxy de développement ne l'atteint pas.
@@ -69,4 +71,16 @@ export function fetchCameras(signal?: AbortSignal): Promise<CameraInfo[]> {
  */
 export function fetchEventsForDay(day: string, signal?: AbortSignal): Promise<EventsResponse> {
   return getJson<EventsResponse>(`/api/events?date=${encodeURIComponent(day)}`, signal);
+}
+
+/**
+ * URL du WebSocket d'une caméra, munie d'un ticket de visionnage tout frais.
+ *
+ * `streamUrl` est le `stream_url` de la caméra (voir `CameraInfo`). Le ticket
+ * expire en quelques minutes : il se demande juste avant d'ouvrir la
+ * connexion, et se redemande à chaque reconnexion.
+ */
+export function fetchStreamTicket(streamUrl: string, signal?: AbortSignal): Promise<StreamTicket> {
+  // `no-store` : un ticket resservi depuis le cache serait déjà périmé.
+  return getJson<StreamTicket>(streamUrl, signal, { cache: "no-store" });
 }

@@ -14,10 +14,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use chrono::Local;
 use foxguard_manager::api::{self, AppState};
 use foxguard_manager::db::EventRepository;
+use foxguard_protocol::stream_ticket;
 use foxguard_protocol::{DetectionEvent, PersonStatus};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -77,9 +78,18 @@ macro_rules! repo_or_skip {
 /// `ui_dir` pointe vers un dossier inexistant : les tests ne portent que sur
 /// les routes `/api/*`, et un bundle d'interface n'a rien à faire ici.
 fn router(repository: EventRepository) -> axum::Router {
+    router_with_secret(repository, Some(TEST_TICKET_SECRET))
+}
+
+/// Secret des tickets de direct des tests (32 caractères, le minimum admis).
+const TEST_TICKET_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+/// Comme [`router`], avec ou sans secret de tickets.
+fn router_with_secret(repository: EventRepository, secret: Option<&str>) -> axum::Router {
     api::create_router(
         Arc::new(AppState {
             repository: Arc::new(repository),
+            stream_ticket_secret: secret.map(str::to_string),
         }),
         "dossier-inexistant-pour-les-tests",
     )
@@ -405,6 +415,88 @@ async fn a_camera_without_a_public_url_exposes_no_live_link() {
 
     assert!(body[0]["live_url"].is_null());
     assert!(body[0]["control_url"].is_null());
+}
+
+// --- Tickets de visionnage du direct ---
+
+#[tokio::test]
+async fn a_reachable_camera_offers_a_stream_route() {
+    let repo = repo_or_skip!();
+    repo.record(&event("allée nord", None).with_base_url("http://192.168.1.42:8080"))
+        .await
+        .expect("écriture");
+
+    let body = get_json(repo, "/api/cameras").await;
+
+    // Le nom est encodé : il est libre, et la route doit rester valide.
+    assert_eq!(
+        body[0]["stream_url"].as_str(),
+        Some("/api/cameras/all%C3%A9e%20nord/stream")
+    );
+}
+
+#[tokio::test]
+async fn no_stream_route_is_offered_without_a_ticket_secret() {
+    let repo = repo_or_skip!();
+    repo.record(&event("salon", None).with_base_url("http://192.168.1.42:8080"))
+        .await
+        .expect("écriture");
+
+    let response = router_with_secret(repo, None)
+        .oneshot(Request::builder().uri("/api/cameras").body(Body::empty()).unwrap())
+        .await
+        .expect("réponse HTTP");
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    assert!(body[0]["stream_url"].is_null());
+}
+
+#[tokio::test]
+async fn the_stream_route_hands_out_a_ticket_the_camera_accepts() {
+    let repo = repo_or_skip!();
+    repo.record(&event("salon", None).with_base_url("http://192.168.1.42:8080/"))
+        .await
+        .expect("écriture");
+
+    let (status, headers, body) = get(repo, "/api/cameras/salon/stream").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+    let url = body["url"].as_str().expect("url");
+    let ticket = url
+        .strip_prefix("ws://192.168.1.42:8080/ws?ticket=")
+        .expect("WebSocket de la caméra, avec un ticket");
+
+    // La vérification est exactement celle que fait la caméra.
+    assert_eq!(
+        stream_ticket::verify(
+            TEST_TICKET_SECRET.as_bytes(),
+            "salon",
+            ticket,
+            chrono::Utc::now().timestamp()
+        ),
+        Ok(())
+    );
+}
+
+#[tokio::test]
+async fn no_ticket_is_signed_for_an_unknown_camera() {
+    let repo = repo_or_skip!();
+    let (status, _, _) = get(repo, "/api/cameras/inconnue/stream").await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn no_ticket_is_signed_for_a_camera_without_a_public_url() {
+    let repo = repo_or_skip!();
+    repo.record(&event("salon", None)).await.expect("écriture");
+
+    let (status, _, _) = get(repo, "/api/cameras/salon/stream").await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

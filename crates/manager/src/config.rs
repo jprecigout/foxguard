@@ -9,6 +9,24 @@ pub struct Config {
     pub server: ServerConfig,
     pub mqtt: MqttConfig,
     pub database: DatabaseConfig,
+    #[serde(default)]
+    pub stream: StreamConfig,
+}
+
+/// Direct des caméras dans l'interface (section optionnelle).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StreamConfig {
+    /// Secret partagé avec les caméras, avec lequel le manager signe des
+    /// tickets de visionnage (voir `foxguard_protocol::stream_ticket`).
+    ///
+    /// Il doit être IDENTIQUE à `[server] stream_ticket_secret` de chaque
+    /// caméra. Le manager ne connaît ainsi le jeton d'API d'aucune caméra :
+    /// un ticket n'ouvre que le flux vidéo, en lecture seule, pour une caméra
+    /// et quelques minutes.
+    ///
+    /// Vide (le défaut), l'interface ne propose pas de direct.
+    #[serde(default)]
+    pub ticket_secret: String,
 }
 
 /// Connexion PostgreSQL. Section OBLIGATOIRE : le manager n'a pas de mode
@@ -126,6 +144,9 @@ impl Config {
                  ou la variable d'environnement {DATABASE_URL_ENV}"
             );
         }
+
+        foxguard_protocol::stream_ticket::validate_secret(&config.stream.ticket_secret)
+            .map_err(|e| anyhow::anyhow!("[stream] ticket_secret : {e}"))?;
 
         Ok(config)
     }

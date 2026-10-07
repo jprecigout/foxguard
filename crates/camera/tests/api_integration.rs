@@ -18,6 +18,19 @@ use tower::ServiceExt;
 use foxguard_camera::api::create_router;
 use foxguard_camera::capture::SharedState;
 use foxguard_camera::h264::H264Stream;
+use foxguard_protocol::stream_ticket;
+
+/// Nom de la caméra des tests : il entre dans la signature des tickets.
+const TEST_CAMERA: &str = "jardin";
+
+/// Secret des tickets de direct des tests (32 caractères, le minimum admis).
+const TEST_TICKET_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+/// Ticket valable deux minutes pour `camera`, signé avec `secret`.
+fn fresh_ticket(secret: &str, camera: &str) -> String {
+    let expires_at = chrono::Utc::now().timestamp() + stream_ticket::TICKET_TTL_SECS;
+    stream_ticket::issue(secret.as_bytes(), camera, expires_at)
+}
 
 /// Construit un [`SharedState`] minimal pour les tests, avec le jeton API
 /// donné, aucune surveillance/enregistrement actifs, et un dossier
@@ -37,6 +50,8 @@ fn test_state_in(token: &str, dir: &std::path::Path) -> Arc<SharedState> {
         detection_enabled: AtomicBool::new(false),
         recording_enabled: AtomicBool::new(false),
         api_token: token.to_string(),
+        camera_name: TEST_CAMERA.to_string(),
+        stream_ticket_secret: Some(TEST_TICKET_SECRET.to_string()),
         h264: Arc::new(H264Stream::new()),
         pending_enrollment: Mutex::new(None),
         recordings_dir: dir.to_string_lossy().to_string(),
@@ -416,6 +431,54 @@ async fn websocket_upgrade_succeeds_with_the_correct_token() {
     let status = ws_upgrade_status(addr, "/ws?token=secret-correct").await;
     // 101 Switching Protocols : le jeton est valide, l'upgrade est acceptée.
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS.as_u16());
+}
+
+// --- Tickets de visionnage du manager ---
+
+#[tokio::test]
+async fn websocket_upgrade_succeeds_with_a_ticket_from_the_manager() {
+    let addr = spawn_test_server("secret-correct").await;
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA);
+
+    let status = ws_upgrade_status(addr, &format!("/ws?ticket={ticket}")).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS.as_u16());
+}
+
+#[tokio::test]
+async fn a_ticket_issued_for_another_camera_is_rejected() {
+    let addr = spawn_test_server("secret-correct").await;
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, "garage");
+
+    let status = ws_upgrade_status(addr, &format!("/ws?ticket={ticket}")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED.as_u16());
+}
+
+#[tokio::test]
+async fn an_expired_ticket_is_rejected() {
+    let addr = spawn_test_server("secret-correct").await;
+    let expired = stream_ticket::issue(
+        TEST_TICKET_SECRET.as_bytes(),
+        TEST_CAMERA,
+        chrono::Utc::now().timestamp() - 1,
+    );
+
+    let status = ws_upgrade_status(addr, &format!("/ws?ticket={expired}")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED.as_u16());
+}
+
+#[tokio::test]
+async fn a_ticket_does_not_open_the_authenticated_http_routes() {
+    // Un ticket ne vaut QUE pour le flux. Les archives, la suppression et
+    // l'interrupteur exigent toujours le jeton d'API.
+    let (state, _dir) = test_state("secret");
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA);
+
+    let response = create_router(state)
+        .oneshot(get(&format!("/api/recordings?ticket={ticket}")))
+        .await
+        .expect("réponse HTTP");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
