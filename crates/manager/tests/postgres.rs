@@ -23,8 +23,8 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use chrono::{Duration, Local, NaiveDate};
-use foxguard_manager::db::EventRepository;
+use chrono::{Duration, Local, NaiveDate, Utc};
+use foxguard_manager::db::{EventRepository, NewFace};
 use foxguard_protocol::{DetectionEvent, PersonStatus};
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -509,6 +509,116 @@ async fn identifiers_are_distinct_and_stable() {
     // Et ils ne bougent pas d'une lecture à l'autre.
     let second_read = repo.recent(10).await.expect("lecture");
     assert_eq!(ids, second_read.iter().map(|e| e.id).collect::<Vec<i64>>());
+}
+
+// --- Photos de référence ---
+
+fn face<'a>(file: &'a str, person_name: &'a str, photo: &'a [u8]) -> NewFace<'a> {
+    NewFace {
+        file,
+        person_name,
+        camera: "entree",
+        captured_at: Utc::now(),
+        photo,
+    }
+}
+
+#[tokio::test]
+async fn a_reference_photo_survives_the_round_trip() {
+    let repo = repo_or_skip!();
+
+    repo.upsert_face(&face("lou_1.jpg", "lou", b"jpeg"))
+        .await
+        .expect("écriture");
+
+    let faces = repo.faces().await.expect("lecture");
+    assert_eq!(faces.len(), 1);
+    assert_eq!(faces[0].file, "lou_1.jpg");
+    assert_eq!(faces[0].person_name, "lou");
+    assert_eq!(faces[0].camera, "entree");
+
+    assert_eq!(
+        repo.face_photo("lou_1.jpg")
+            .await
+            .expect("lecture")
+            .as_deref(),
+        Some(&b"jpeg"[..])
+    );
+}
+
+#[tokio::test]
+async fn a_redelivered_photo_does_not_duplicate_and_a_new_version_replaces_it() {
+    // Les photos sont des messages retenus : le broker les relivre à chaque
+    // reconnexion du manager.
+    let repo = repo_or_skip!();
+
+    let first = face("lou_1.jpg", "lou", b"v1");
+    repo.upsert_face(&first).await.expect("écriture");
+    repo.upsert_face(&first).await.expect("relivraison");
+    assert_eq!(repo.faces().await.expect("lecture").len(), 1);
+
+    repo.upsert_face(&face("lou_1.jpg", "lou", b"v2"))
+        .await
+        .expect("nouvelle version");
+    assert_eq!(
+        repo.face_photo("lou_1.jpg")
+            .await
+            .expect("lecture")
+            .as_deref(),
+        Some(&b"v2"[..])
+    );
+}
+
+#[tokio::test]
+async fn reference_photos_are_listed_by_person() {
+    let repo = repo_or_skip!();
+
+    for (file, name) in [
+        ("mael_1.jpg", "mael"),
+        ("lou_2.jpg", "lou"),
+        ("lou_1.jpg", "lou"),
+    ] {
+        repo.upsert_face(&face(file, name, b"x"))
+            .await
+            .expect("écriture");
+    }
+
+    let names: Vec<String> = repo
+        .faces()
+        .await
+        .expect("lecture")
+        .into_iter()
+        .map(|face| face.person_name)
+        .collect();
+
+    assert_eq!(names, ["lou", "lou", "mael"]);
+}
+
+#[tokio::test]
+async fn a_removed_photo_is_forgotten() {
+    let repo = repo_or_skip!();
+    repo.upsert_face(&face("lou_1.jpg", "lou", b"x"))
+        .await
+        .expect("écriture");
+
+    assert!(repo.delete_face("lou_1.jpg").await.expect("suppression"));
+    assert!(!repo.delete_face("lou_1.jpg").await.expect("déjà absente"));
+    assert!(repo.faces().await.expect("lecture").is_empty());
+    assert_eq!(repo.face_photo("lou_1.jpg").await.expect("lecture"), None);
+}
+
+#[tokio::test]
+async fn reference_photos_are_not_purged_with_old_events() {
+    // Une photo de référence ne vieillit pas : la purge des événements ne
+    // doit pas l'emporter.
+    let repo = repo_or_skip!();
+    repo.upsert_face(&face("lou_1.jpg", "lou", b"x"))
+        .await
+        .expect("écriture");
+
+    repo.delete_older_than_days(1).await.expect("purge");
+
+    assert_eq!(repo.faces().await.expect("lecture").len(), 1);
 }
 
 #[tokio::test]

@@ -1,4 +1,6 @@
-//! Persistance PostgreSQL des événements de détection.
+//! Persistance PostgreSQL des événements de détection, et de la copie des
+//! photos de référence partagées par les caméras (voir
+//! [`EventRepository::upsert_face`]).
 //!
 //! Remplace le stockage en mémoire de la première version : l'historique
 //! survit désormais au redémarrage du manager, et n'est plus borné par la
@@ -9,7 +11,7 @@
 //! étape manuelle à la première installation ni après une mise à jour.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local, NaiveDate, TimeZone};
+use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
 use foxguard_protocol::{DetectionEvent, PersonStatus};
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
@@ -54,6 +56,27 @@ pub struct StoredEvent {
 
     /// Vrai si une vignette est conservée pour cet événement.
     pub has_thumbnail: bool,
+}
+
+/// Une photo de référence conservée, sans ses octets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredFace {
+    /// Nom du fichier sur les caméras : l'identifiant de la photo.
+    pub file: String,
+    pub person_name: String,
+    /// Caméra qui l'a prise.
+    pub camera: String,
+    pub captured_at: DateTime<Utc>,
+}
+
+/// Une photo de référence à enregistrer, telle que reçue d'une caméra.
+#[derive(Debug, Clone)]
+pub struct NewFace<'a> {
+    pub file: &'a str,
+    pub person_name: &'a str,
+    pub camera: &'a str,
+    pub captured_at: DateTime<Utc>,
+    pub photo: &'a [u8],
 }
 
 /// Accès à la table des événements de détection.
@@ -252,6 +275,87 @@ impl EventRepository {
         .context("lecture de l'événement impossible")?;
 
         row.as_ref().map(row_to_stored_event).transpose()
+    }
+
+    /// Enregistre (ou met à jour) une photo de référence reçue d'une caméra.
+    ///
+    /// Les photos sont des messages RETENUS : le broker les relivre toutes à
+    /// chaque reconnexion du manager. Une photo identique n'est donc PAS
+    /// réécrite — chaque reconnexion laisserait sinon autant de versions
+    /// mortes de chaque ligne, photos comprises, à nettoyer par PostgreSQL.
+    pub async fn upsert_face(&self, face: &NewFace<'_>) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO known_faces (file, person_name, camera, captured_at, photo) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (file) DO UPDATE SET \
+                 person_name = EXCLUDED.person_name, \
+                 camera = EXCLUDED.camera, \
+                 captured_at = EXCLUDED.captured_at, \
+                 photo = EXCLUDED.photo, \
+                 received_at = now() \
+             WHERE known_faces.photo <> EXCLUDED.photo \
+                OR known_faces.camera <> EXCLUDED.camera \
+                OR known_faces.captured_at <> EXCLUDED.captured_at",
+        )
+        .bind(face.file)
+        .bind(face.person_name)
+        .bind(face.camera)
+        .bind(face.captured_at)
+        .bind(face.photo)
+        .execute(&self.pool)
+        .await
+        .context("enregistrement de la photo de référence impossible")?;
+
+        Ok(())
+    }
+
+    /// Oublie une photo de référence supprimée par une caméra. Vrai si elle
+    /// était connue.
+    pub async fn delete_face(&self, file: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM known_faces WHERE file = $1")
+            .bind(file)
+            .execute(&self.pool)
+            .await
+            .context("suppression de la photo de référence impossible")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Toutes les photos de référence, par personne puis de la plus ancienne
+    /// à la plus récente — sans leurs octets, demandés un par un (voir
+    /// [`Self::face_photo`]).
+    pub async fn faces(&self) -> Result<Vec<StoredFace>> {
+        let rows = sqlx::query(
+            "SELECT file, person_name, camera, captured_at FROM known_faces \
+             ORDER BY person_name, captured_at, file",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("lecture des photos de référence impossible")?;
+
+        rows.iter()
+            .map(|row| {
+                Ok(StoredFace {
+                    file: row.try_get("file")?,
+                    person_name: row.try_get("person_name")?,
+                    camera: row.try_get("camera")?,
+                    captured_at: row.try_get("captured_at")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Octets d'une photo de référence, ou `None` si elle est inconnue.
+    pub async fn face_photo(&self, file: &str) -> Result<Option<Vec<u8>>> {
+        let row = sqlx::query("SELECT photo FROM known_faces WHERE file = $1")
+            .bind(file)
+            .fetch_optional(&self.pool)
+            .await
+            .context("lecture de la photo de référence impossible")?;
+
+        row.map(|row| row.try_get("photo"))
+            .transpose()
+            .map_err(Into::into)
     }
 
     /// Supprime les événements antérieurs à `days` jours et retourne le

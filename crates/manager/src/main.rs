@@ -58,8 +58,17 @@ async fn main() -> anyhow::Result<()> {
         EventRepository::connect(&config.database.url, config.database.max_connections).await?,
     );
 
-    // Réception des événements des caméras, en tâche de fond.
-    ingest::spawn(config.mqtt.clone(), Arc::clone(&repository));
+    let ticket_secret =
+        Some(config.stream.ticket_secret.clone()).filter(|secret| !secret.is_empty());
+
+    // Réception des événements des caméras, en tâche de fond — et des photos
+    // de référence qu'elles se partagent, si le secret qui les signe est
+    // connu.
+    ingest::spawn(
+        config.mqtt.clone(),
+        Arc::clone(&repository),
+        ticket_secret.clone(),
+    );
 
     // Purge des événements trop anciens.
     retention::spawn_cleanup_task(Arc::clone(&repository), config.database.retention_days);
@@ -82,8 +91,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         repository: Arc::clone(&repository),
         authenticator,
-        stream_ticket_secret: Some(config.stream.ticket_secret.clone())
-            .filter(|secret| !secret.is_empty()),
+        stream_ticket_secret: ticket_secret,
     });
     let app = api::create_router(state, &config.server.ui_dir);
 

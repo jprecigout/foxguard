@@ -26,9 +26,13 @@ public_url = ""
 # Doit être IDENTIQUE à `[stream] ticket_secret` du manager, et faire au moins
 # 32 caractères (`openssl rand -hex 32`). Exige `public_url` et des horloges
 # synchronisées (NTP). VIDE (le défaut) : l'interface du manager ne propose ni
-# direct, ni clip, ni interrupteur — les pages /live, /control et /play de la
-# caméra exigent un ticket (ou le jeton) depuis que le jeton n'y est plus
-# injecté.
+# direct, ni clip, ni interrupteur, ni enregistrement de visages — les pages
+# /live, /control et /play de la caméra exigent un ticket (ou le jeton) depuis
+# que le jeton n'y est plus injecté.
+#
+# Il SIGNE AUSSI les photos de référence que les caméras se partagent par MQTT
+# (voir `faces_topic` dans [mqtt]) : sans lui, les photos de cette caméra
+# restent locales, et elle refuse celles des autres.
 stream_ticket_secret = ""
 # Origine de l'interface du manager (ex. "https://foxguard.maison"). Si elle
 # est renseignée, seules ses pages peuvent afficher celles de la caméra dans un
@@ -86,6 +90,12 @@ username = "XXXXXXXXXX"
 password = "XXXXXXXXXX"
 # Topic sur lequel publier chaque événement de détection.
 topic = "foxguard/detections"
+# Préfixe des topics des photos de référence partagées entre caméras : chaque
+# photo capturée ici (ou supprimée) est publiée, signée par
+# `[server] stream_ticket_secret`, en message retenu sur `<préfixe>/<fichier>`,
+# et chaque caméra applique celles des autres. Doit être le même sur toutes
+# les caméras et sur le manager.
+faces_topic = "foxguard/faces"
 
 # Section entièrement optionnelle : un camera-config.toml sans [recording] du tout
 # continue de fonctionner, avec 7 jours de conservation.

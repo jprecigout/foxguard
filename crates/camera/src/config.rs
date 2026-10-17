@@ -503,6 +503,15 @@ pub struct MqttConfig {
     // Topic sur lequel publier chaque événement de détection.
     #[serde(default = "default_mqtt_topic")]
     pub topic: String,
+    /// Préfixe des topics sur lesquels les caméras partagent leurs photos de
+    /// référence (`<préfixe>/<fichier>`, voir `foxguard_protocol::faces`).
+    ///
+    /// Le partage n'est actif que si `[server] stream_ticket_secret` est
+    /// renseigné : chaque photo est signée avec ce secret, et une photo non
+    /// signée est refusée (voir `crate::capture::face_library`). Doit être le
+    /// même sur toutes les caméras et sur le manager.
+    #[serde(default = "default_faces_topic")]
+    pub faces_topic: String,
 }
 
 impl Default for MqttConfig {
@@ -514,6 +523,7 @@ impl Default for MqttConfig {
             username: String::new(),
             password: String::new(),
             topic: default_mqtt_topic(),
+            faces_topic: default_faces_topic(),
         }
     }
 }
@@ -524,6 +534,10 @@ fn default_mqtt_port() -> u16 {
 
 fn default_mqtt_topic() -> String {
     "foxguard/detections".to_string()
+}
+
+fn default_faces_topic() -> String {
+    foxguard_protocol::faces::DEFAULT_TOPIC.to_string()
 }
 
 impl Config {
@@ -767,6 +781,7 @@ mod tests {
         assert!(!config.mqtt.enabled);
         assert_eq!(config.mqtt.broker_port, 1883);
         assert_eq!(config.mqtt.topic, "foxguard/detections");
+        assert_eq!(config.mqtt.faces_topic, "foxguard/faces");
         assert!(config.mqtt.broker_host.is_empty());
     }
 
@@ -783,6 +798,7 @@ mod tests {
                 username = "foxguard"
                 password = "hunter2"
                 topic = "maison/foxguard/detections"
+                faces_topic = "maison/foxguard/visages"
             "#
         );
         let file = write_temp_toml(&toml_with_mqtt);
@@ -794,6 +810,7 @@ mod tests {
         assert_eq!(config.mqtt.username, "foxguard");
         assert_eq!(config.mqtt.password, "hunter2");
         assert_eq!(config.mqtt.topic, "maison/foxguard/detections");
+        assert_eq!(config.mqtt.faces_topic, "maison/foxguard/visages");
     }
 
     // --- `[motion]` : pré-filtre de mouvement ---

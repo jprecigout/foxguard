@@ -5,9 +5,9 @@
 //!
 //! Il SIGNE en revanche des tickets (voir `foxguard_protocol::ticket`), chacun
 //! limité à une portée : regarder le direct d'une caméra ([`StreamTicket`]),
-//! ouvrir le clip d'une détection, ou ouvrir la page d'interrupteur d'une
-//! caméra — c'est cette page, servie par la caméra, qui bascule. Le manager ne
-//! connaît le jeton d'API d'aucune caméra.
+//! enregistrer des visages devant elle, ouvrir le clip d'une détection, ou
+//! ouvrir la page d'interrupteur d'une caméra — c'est la caméra qui agit,
+//! jamais le manager. Il ne connaît le jeton d'API d'aucune caméra.
 //!
 //! Toutes les routes, sauf la sonde de disponibilité, exigent une
 //! authentification (voir `crate::auth`).
@@ -29,13 +29,14 @@ use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 use ts_rs::TS;
 
-use chrono::{DateTime, Local, NaiveDate};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 use foxguard_protocol::PersonStatus;
+use foxguard_protocol::faces;
 use foxguard_protocol::ticket::{self, Scope};
 
 use crate::auth::{self, Authenticator};
 
-use crate::db::{EventRepository, StoredEvent};
+use crate::db::{EventRepository, StoredEvent, StoredFace};
 
 /// Nombre d'événements retournés par défaut par `GET /api/events`.
 const DEFAULT_LIMIT: usize = 100;
@@ -155,6 +156,45 @@ pub struct CameraInfo {
     /// disponible : caméra sans URL publique, ou tickets non configurés
     /// (`[stream] ticket_secret`).
     pub stream_url: Option<String>,
+
+    /// Route du manager qui délivre un ticket d'ENRÔLEMENT pour cette caméra
+    /// (même forme que [`StreamTicket`]), ou `null` dans les mêmes cas que
+    /// `stream_url`.
+    ///
+    /// Le WebSocket qu'il ouvre montre le direct, pour se placer devant la
+    /// caméra, et accepte en plus la capture et la suppression de photos de
+    /// référence — et rien d'autre : ni interrupteur, ni archives.
+    pub enrollment_url: Option<String>,
+}
+
+/// Une photo de référence de la reconnaissance faciale, telle que les
+/// caméras se la partagent (voir `foxguard_protocol::faces`).
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../../ui/src/generated/")]
+pub struct FaceRecord {
+    /// Nom du fichier sur les caméras : c'est lui qu'une suppression désigne.
+    pub file: String,
+    /// Personne, déduite du nom de fichier comme le font les caméras.
+    pub name: String,
+    /// Caméra qui a pris la photo.
+    pub camera: String,
+    /// Date de la capture, au format RFC 3339.
+    #[ts(type = "string")]
+    pub captured_at: DateTime<Utc>,
+    /// URL de la photo, servie par le manager.
+    pub photo_url: String,
+}
+
+impl From<StoredFace> for FaceRecord {
+    fn from(face: StoredFace) -> Self {
+        Self {
+            photo_url: format!("/api/faces/{}/photo", face.file),
+            file: face.file,
+            name: face.person_name,
+            camera: face.camera,
+            captured_at: face.captured_at,
+        }
+    }
 }
 
 /// Réponse de `GET /api/cameras/{name}/stream` : de quoi ouvrir le flux
@@ -315,6 +355,7 @@ async fn cameras_handler(State(state): State<Arc<AppState>>) -> Response {
                     CameraInfo {
                         control_url: route("control"),
                         stream_url: route("stream"),
+                        enrollment_url: route("enrollment"),
                         name: camera.name,
                     }
                 })
@@ -387,11 +428,30 @@ async fn stream_ticket_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Response {
+    websocket_ticket(&state, &name, Scope::Stream, "/ws").await
+}
+
+/// Ticket d'enrôlement de visages devant une caméra
+/// (`GET /api/cameras/{name}/enrollment`).
+///
+/// Le direct, plus la capture et la suppression de photos de référence : la
+/// caméra les exécute, et les partage elle-même avec les autres (voir
+/// `foxguard_protocol::faces`). Le manager signe l'autorisation, il ne touche
+/// à aucune photo.
+async fn enrollment_ticket_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Response {
+    websocket_ticket(&state, &name, Scope::Enrollment, "/ws/enrollment").await
+}
+
+/// URL du WebSocket `path` d'une caméra CONNUE, munie d'un ticket de `scope`.
+async fn websocket_ticket(state: &AppState, name: &str, scope: Scope<'_>, path: &str) -> Response {
     let Some(secret) = state.stream_ticket_secret.as_deref() else {
         return tickets_disabled();
     };
 
-    let Some(ws_base) = (match known_camera_base(&state, &name).await {
+    let Some(ws_base) = (match known_camera_base(state, name).await {
         Ok(base) => websocket_base(&base),
         Err(response) => return response,
     }) else {
@@ -402,13 +462,65 @@ async fn stream_ticket_handler(
             .into_response();
     };
 
-    let ticket = fresh_ticket(secret, &name, Scope::Stream);
+    let ticket = fresh_ticket(secret, name, scope);
 
     (
         [(header::CACHE_CONTROL, "no-store")],
         Json(StreamTicket {
-            url: format!("{ws_base}/ws?ticket={ticket}"),
+            url: format!("{ws_base}{path}?ticket={ticket}"),
         }),
+    )
+        .into_response()
+}
+
+/// Photos de référence partagées par les caméras (`GET /api/faces`), par
+/// personne.
+///
+/// Vide tant que le manager ne connaît pas le secret qui les signe (voir
+/// `crate::ingest`) : il ne les écoute pas.
+async fn faces_handler(State(state): State<Arc<AppState>>) -> Response {
+    match state.repository.faces().await {
+        Ok(faces) => (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(faces.into_iter().map(FaceRecord::from).collect::<Vec<_>>()),
+        )
+            .into_response(),
+        Err(e) => internal_error("Lecture des photos de référence", e),
+    }
+}
+
+/// Une photo de référence (`GET /api/faces/{file}/photo`).
+async fn face_photo_handler(
+    State(state): State<Arc<AppState>>,
+    Path(file): Path<String>,
+) -> Response {
+    // Le nom n'entre que dans une requête paramétrée, mais un nom qu'aucune
+    // caméra n'aurait pu partager n'a rien à chercher en base.
+    if !faces::is_valid_file_name(&file) {
+        return (StatusCode::BAD_REQUEST, "Nom de photo invalide").into_response();
+    }
+
+    let photo = match state.repository.face_photo(&file).await {
+        Ok(Some(photo)) => photo,
+        Ok(None) => return (StatusCode::NOT_FOUND, "Photo introuvable").into_response(),
+        Err(e) => return internal_error("Lecture de la photo de référence", e),
+    };
+
+    let content_type = if file.to_ascii_lowercase().ends_with(".png") {
+        "image/png"
+    } else {
+        "image/jpeg"
+    };
+
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            // `private` : c'est un visage, une donnée biométrique — aucun
+            // cache partagé (proxy) n'a à le garder. Pas `immutable` : une
+            // photo déposée à la main peut être remplacée sous le même nom.
+            (header::CACHE_CONTROL, "private, max-age=3600"),
+        ],
+        Body::from(photo),
     )
         .into_response()
 }
@@ -512,7 +624,13 @@ pub fn create_router(state: Arc<AppState>, ui_dir: &str) -> Router {
         .route("/api/events/{id}/clip", get(clip_redirect_handler))
         .route("/api/cameras", get(cameras_handler))
         .route("/api/cameras/{name}/stream", get(stream_ticket_handler))
+        .route(
+            "/api/cameras/{name}/enrollment",
+            get(enrollment_ticket_handler),
+        )
         .route("/api/cameras/{name}/control", get(control_redirect_handler))
+        .route("/api/faces", get(faces_handler))
+        .route("/api/faces/{file}/photo", get(face_photo_handler))
         .with_state(state)
         .fallback_service(ServeDir::new(ui_dir))
         // Couches posées APRÈS le service de repli : elles couvrent aussi le

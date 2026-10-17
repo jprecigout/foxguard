@@ -6,9 +6,25 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use foxguard_protocol::auth::FailureThrottle;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::auth::SessionKey;
 use crate::h264::H264Stream;
+use crate::util::MutexExt;
+
+use super::face_library::{FaceCommand, FaceReply};
+
+/// Capture d'une photo de référence demandée par une interface, en attente
+/// de la prochaine frame (voir `super::capture_loop`).
+pub struct EnrollmentRequest {
+    /// Nom de la personne, tel que saisi.
+    pub name: String,
+    /// Où répondre : le fichier écrit, ou pourquoi la photo a été refusée.
+    ///
+    /// L'interface n'avait auparavant aucun retour (« regardez la console du
+    /// serveur ») : depuis le manager, la console n'est même pas à portée.
+    pub reply: oneshot::Sender<FaceReply>,
+}
 
 /// Nombre de clients du flux vidéo admis par défaut (`[server]
 /// max_stream_clients`).
@@ -63,11 +79,21 @@ pub struct SharedState {
     /// historique a été retiré, et avec lui la double diffusion.
     pub h264: Arc<H264Stream>,
 
-    // Nom en attente de capture pour une nouvelle photo de référence
-    // (voir ClientCommand::CaptureReference dans api.rs). La boucle caméra
-    // consomme (take()) cette valeur dès qu'une frame est disponible (voir
+    // Capture en attente d'une nouvelle photo de référence (voir
+    // ClientCommand::CaptureReference dans api.rs). La boucle caméra
+    // consomme (take()) cette valeur dès qu'une frame est disponible et la
+    // confie à la bibliothèque de visages (voir
     // `super::known_faces::try_capture_reference`).
-    pub pending_enrollment: Mutex<Option<String>>,
+    pub pending_enrollment: Mutex<Option<EnrollmentRequest>>,
+
+    /// Commandes de la bibliothèque de visages (voir
+    /// `super::face_library`) : captures, suppressions.
+    ///
+    /// Le canal existe dès la création de l'état, avant que la bibliothèque
+    /// ne démarre avec les modèles : une commande reçue entre-temps attend
+    /// dans le canal au lieu d'être perdue.
+    pub faces: mpsc::UnboundedSender<FaceCommand>,
+    face_commands: Mutex<Option<mpsc::UnboundedReceiver<FaceCommand>>>,
 
     // Dossier des enregistrements, issu de `[recording] dir` (voir
     // `crate::config`). Porté par l'état plutôt que par une constante
@@ -90,6 +116,8 @@ impl SharedState {
         h264: Arc<H264Stream>,
         recordings_dir: impl Into<String>,
     ) -> Self {
+        let (faces, face_commands) = mpsc::unbounded_channel();
+
         Self {
             detection_enabled: AtomicBool::new(false),
             recording_enabled: AtomicBool::new(false),
@@ -104,7 +132,15 @@ impl SharedState {
             max_stream_clients: DEFAULT_MAX_STREAM_CLIENTS,
             h264,
             pending_enrollment: Mutex::new(None),
+            faces,
+            face_commands: Mutex::new(Some(face_commands)),
             recordings_dir: recordings_dir.into(),
         }
+    }
+
+    /// Réception des commandes de la bibliothèque de visages, remise UNE
+    /// fois, à celle-ci.
+    pub fn take_face_commands(&self) -> Option<mpsc::UnboundedReceiver<FaceCommand>> {
+        self.face_commands.lock_or_recover().take()
     }
 }

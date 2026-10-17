@@ -1,18 +1,25 @@
 //! Chargement et rechargement à chaud de la base de visages connus
 //! (`known_faces/`), utilisée par la reconnaissance faciale (voir
 //! `super::tracking`).
+//!
+//! Le dossier lui-même est tenu par la bibliothèque de visages (voir
+//! `super::face_library`) : captures, suppressions et photos reçues des
+//! autres caméras passent toutes par elle.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::Result;
-use chrono::Local;
-use image::{ImageFormat, RgbImage};
+use foxguard_protocol::faces::person_name_from_stem;
+use image::RgbImage;
 use rayon::prelude::*;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 use crate::util::MutexExt;
 use crate::vision::{FaceDetectorYuNet, FaceEmbedder, KnownPerson};
 use tracing::{debug, error, info, warn};
 
+use super::face_library::FaceCommand;
 use super::state::SharedState;
 
 /// Détecte un visage dans une image potentiellement bien plus grande que
@@ -35,10 +42,10 @@ use super::state::SharedState;
 /// qu'une fenêtre où le visage est bien centré). Un arrêt anticipé
 /// (`EARLY_EXIT_SCORE`) limite le nombre de fenêtres testées une fois une
 /// bonne détection trouvée. Cette fonction n'est utilisée que par
-/// [`load_known_faces`] : au démarrage, et à chaque capture de référence
-/// depuis l'UI web (rechargement à chaud, voir [`try_capture_reference`]) —
-/// dans les deux cas en dehors du chemin critique du flux caméra live.
-fn detect_face_native_res(
+/// [`load_known_faces`] (au démarrage, et à chaque rechargement à chaud) et
+/// par la vérification d'une capture (voir `super::face_library`) — en
+/// dehors du chemin critique du flux caméra live dans tous les cas.
+pub(super) fn detect_face_native_res(
     face_detector: &FaceDetectorYuNet,
     img: &RgbImage,
 ) -> Result<Option<RgbImage>> {
@@ -119,12 +126,93 @@ fn detect_face_native_res(
     Ok(best.map(|(_, face)| face))
 }
 
-/// Charge les photos du dossier `known_faces/` et pré-calcule leurs
-/// empreintes faciales. Plusieurs fichiers `<nom>_<horodatage>.jpg` sont
+/// Empreintes faciales déjà calculées, par photo de `known_faces/`.
+///
+/// Recharger la base ne recalcule que les photos NOUVELLES ou MODIFIÉES. Le
+/// rechargement complet était acceptable tant qu'il ne suivait qu'une capture
+/// faite devant la caméra ; depuis que les photos sont partagées, chaque
+/// capture, sur n'importe quelle caméra, fait recharger TOUTES les caméras —
+/// et une photo coûte une détection YuNet par fenêtres plus une inférence
+/// ArcFace, plusieurs centaines de millisecondes sur un Raspberry Pi.
+#[derive(Default)]
+pub(super) struct EmbeddingCache {
+    entries: HashMap<PathBuf, CachedFace>,
+}
+
+struct CachedFace {
+    stamp: FileStamp,
+    /// `None` : aucun visage exploitable dans la photo. Mémorisé aussi, pour
+    /// ne pas refaire à chaque rechargement une analyse qui échouera encore.
+    person: Option<KnownPerson>,
+}
+
+/// Ce qui distingue deux versions d'un même fichier : un fichier réécrit
+/// (photo remplacée par une caméra) change de date ou de taille.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl FileStamp {
+    fn of(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
+    }
+}
+
+impl EmbeddingCache {
+    fn is_fresh(&self, path: &Path, stamp: Option<FileStamp>) -> bool {
+        matches!(
+            (self.entries.get(path), stamp),
+            (Some(cached), Some(stamp)) if cached.stamp == stamp
+        )
+    }
+}
+
+/// Liste les photos de `known_faces/` (fichiers d'image supportés), en
+/// créant le dossier s'il n'existe pas encore.
+pub(super) fn list_photos(folder: &Path) -> Vec<PathBuf> {
+    if !folder.exists() {
+        if let Err(e) = std::fs::create_dir_all(folder) {
+            error!(
+                "❌ Impossible de créer le dossier {} : {:?}",
+                folder.display(),
+                e
+            );
+        }
+
+        return Vec::new();
+    }
+
+    match std::fs::read_dir(folder) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|entry_path| entry_path.is_file())
+            .filter(|entry_path| is_supported_image(entry_path))
+            .collect(),
+        Err(e) => {
+            error!(
+                "❌ Impossible de lire le dossier {} : {:?}",
+                folder.display(),
+                e
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Charge les photos du dossier `known_faces/` et en calcule les empreintes
+/// faciales — seulement celles que `cache` ne connaît pas encore (voir
+/// [`EmbeddingCache`]). Plusieurs fichiers `<nom>_<horodatage>.jpg` sont
 /// regroupés sous une seule identité `<nom>` (plusieurs gabarits pour une
-/// même personne, voir la capture depuis l'UI web dans
-/// [`try_capture_reference`]) ; `identify_person` retient ensuite le
-/// meilleur score parmi tous les gabarits.
+/// même personne, voir `foxguard_protocol::faces::person_name_from_stem`) ;
+/// `identify_person` retient ensuite le meilleur score parmi tous les
+/// gabarits.
 ///
 /// Chaque photo est indépendante des autres (chargement disque + YuNet +
 /// ArcFace) : le traitement par fichier ([`load_known_face`]) est donc
@@ -133,43 +221,60 @@ fn detect_face_native_res(
 pub(super) fn load_known_faces(
     face_detector: &FaceDetectorYuNet,
     embedder: &FaceEmbedder,
-    folder: &str,
+    folder: &Path,
+    cache: &mut EmbeddingCache,
 ) -> Vec<KnownPerson> {
-    let path = Path::new(folder);
-
-    // Création du dossier s'il n'existe pas
-    if !path.exists() {
-        if let Err(e) = std::fs::create_dir_all(path) {
-            error!("❌ Impossible de créer le dossier {} : {:?}", folder, e);
-        }
-
-        return Vec::new();
-    }
-
-    // Lecture du dossier
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(e) => {
-            error!("❌ Impossible de lire le dossier {} : {:?}", folder, e);
-            return Vec::new();
-        }
-    };
-
-    // On ne garde que les fichiers image : la liste des chemins est
-    // constituée séquentiellement (lecture du dossier), puis chaque photo
-    // est traitée en parallèle ci-dessous.
-    let image_paths: Vec<PathBuf> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|entry_path| entry_path.is_file())
-        .filter(|entry_path| is_supported_image(entry_path))
+    let photos: Vec<(PathBuf, Option<FileStamp>)> = list_photos(folder)
+        .into_iter()
+        .map(|path| {
+            let stamp = FileStamp::of(&path);
+            (path, stamp)
+        })
         .collect();
 
+    let (cached, missing): (Vec<_>, Vec<_>) = photos
+        .into_iter()
+        .partition(|(path, stamp)| cache.is_fresh(path, *stamp));
+
     // PARALLÉLISATION RAYON : chargement + YuNet + ArcFace pour chaque
-    // photo de référence, indépendamment des autres.
-    let known: Vec<KnownPerson> = image_paths
-        .par_iter()
-        .filter_map(|entry_path| load_known_face(face_detector, embedder, entry_path))
+    // photo à analyser, indépendamment des autres.
+    let analysed = missing.len();
+    let computed: Vec<(PathBuf, Option<FileStamp>, Option<KnownPerson>)> = missing
+        .into_par_iter()
+        .map(|(path, stamp)| {
+            let person = load_known_face(face_detector, embedder, &path);
+            (path, stamp, person)
+        })
+        .collect();
+
+    // Le cache est RECONSTRUIT à partir des photos présentes : une photo
+    // supprimée en sort d'elle-même.
+    let mut entries = HashMap::with_capacity(cached.len() + computed.len());
+    for (path, _) in cached {
+        if let Some(entry) = cache.entries.remove(&path) {
+            entries.insert(path, entry);
+        }
+    }
+
+    // Une photo dont les métadonnées sont illisibles ne peut pas être
+    // reconnue au prochain passage : elle compte, mais n'est pas mémorisée.
+    let mut uncacheable = Vec::new();
+    for (path, stamp, person) in computed {
+        match stamp {
+            Some(stamp) => {
+                entries.insert(path, CachedFace { stamp, person });
+            }
+            None => uncacheable.extend(person),
+        }
+    }
+
+    cache.entries = entries;
+
+    let known: Vec<KnownPerson> = cache
+        .entries
+        .values()
+        .filter_map(|entry| entry.person.clone())
+        .chain(uncacheable)
         .collect();
 
     let distinct_people = known
@@ -178,9 +283,10 @@ pub(super) fn load_known_faces(
         .collect::<std::collections::HashSet<_>>()
         .len();
     info!(
-        "👥 Base de reconnaissance : {} personne(s) ({} gabarit(s) au total)",
+        "👥 Base de reconnaissance : {} personne(s) ({} gabarit(s) au total, {} photo(s) analysée(s))",
         distinct_people,
-        known.len()
+        known.len(),
+        analysed
     );
 
     known
@@ -188,33 +294,13 @@ pub(super) fn load_known_faces(
 
 /// Ne garde que les fichiers dont l'extension correspond à un format image
 /// supporté (`jpg`, `jpeg`, `png`, insensible à la casse). Extrait de
-/// [`load_known_faces`] pour être testable indépendamment du système de
-/// fichiers réel et des modèles ONNX.
+/// [`list_photos`] pour être testable indépendamment du système de fichiers
+/// réel et des modèles ONNX.
 fn is_supported_image(path: &Path) -> bool {
     path.extension()
         .and_then(|s| s.to_str())
         .map(|ext| matches!(ext.to_lowercase().as_str(), "jpg" | "jpeg" | "png"))
         .unwrap_or(false)
-}
-
-/// Déduit le nom d'une personne à partir du "stem" (nom de fichier sans
-/// extension) de sa photo de référence, en ignorant un éventuel suffixe
-/// numérique qui distingue plusieurs captures d'une même personne (angles /
-/// poses différents, voir la capture depuis l'UI web) :
-///
-/// `"jerome"`               → `"jerome"`
-/// `"jerome_20260918093604"` → `"jerome"`
-///
-/// Extrait de [`load_known_face`] pour être testable sans I/O ni modèle ONNX.
-fn person_name_from_stem(stem: &str) -> String {
-    match stem.rsplit_once('_') {
-        Some((base, suffix))
-            if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) =>
-        {
-            base.to_string()
-        }
-        _ => stem.to_string(),
-    }
 }
 
 /// Charge et encode une seule photo de référence de `known_faces/` : nom,
@@ -315,144 +401,47 @@ fn load_known_face(
 
 /// Capture de photo de référence (enrôlement à chaud).
 ///
-/// Déclenché depuis l'UI web (commande WS "capture_reference", voir
-/// `crate::api::ClientCommand::CaptureReference`). On sauvegarde la frame
-/// BRUTE (avant dessin des boîtes) telle que vue par la webcam, dans
-/// `known_faces/<nom>_<horodatage>.jpg` (chaque capture s'ajoute aux
-/// précédentes, voir [`load_known_faces`]), puis on recharge la base de
-/// reconnaissance en tâche de fond.
+/// Déclenché depuis une interface (commande WS "capture_reference", voir
+/// `crate::api::ClientCommand::CaptureReference`), celle de la caméra ou
+/// celle du manager. On confie la frame BRUTE (avant dessin des boîtes),
+/// telle que vue par la caméra, à la bibliothèque de visages (voir
+/// `super::face_library`) : c'est elle qui vérifie qu'un visage y figure,
+/// l'écrit dans `known_faces/`, la partage avec les autres caméras et
+/// recharge la base — sur ses propres threads, pas sur celui de la capture.
 ///
 /// Intérêt : la photo de référence est ainsi capturée dans le même
 /// "domaine" (même caméra, même distance, même qualité) que les visages vus
 /// en direct, ce qui donne une similarité ArcFace bien plus fiable qu'avec
 /// une photo (ex : selfie téléphone) prise dans des conditions très
 /// différentes.
-pub(super) fn try_capture_reference(
-    state: &SharedState,
-    img: &RgbImage,
-    face_detector: &Arc<Option<FaceDetectorYuNet>>,
-    face_embedder: &Arc<Option<FaceEmbedder>>,
-    known_people: &Arc<Mutex<Vec<KnownPerson>>>,
-    known_faces_dir: &str,
-) {
-    let Some(name) = state.pending_enrollment.lock_or_recover().take() else {
+pub(super) fn try_capture_reference(state: &SharedState, img: &RgbImage) {
+    let Some(request) = state.pending_enrollment.lock_or_recover().take() else {
         return;
     };
 
-    let safe_name: String = name
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-        .collect();
-
-    if safe_name.is_empty() {
-        warn!(
-            "⚠️ Nom de référence invalide reçu pour la capture : {:?}",
-            name
+    // L'interface a cessé d'attendre (délai dépassé, onglet fermé) :
+    // capturer maintenant prendrait une photo que personne n'a demandée À
+    // CET INSTANT — peut-être sans personne devant la caméra.
+    if request.reply.is_closed() {
+        debug!(
+            "📸 Capture pour '{}' abandonnée : plus personne n'attend la réponse.",
+            request.name
         );
-
         return;
     }
 
-    let _ = std::fs::create_dir_all(known_faces_dir);
-
-    // Suffixe temporel : chaque capture s'ajoute comme un nouveau
-    // "gabarit" pour cette personne au lieu d'écraser les
-    // précédentes. Plusieurs captures sous des angles / poses
-    // différents rendent la reconnaissance bien plus robuste
-    // qu'une seule photo (voir load_known_faces, qui regroupe
-    // tous les fichiers "<nom>_<horodatage>.jpg" sous <nom>).
-    let timestamp = Local::now().format("%Y%m%d%H%M%S%3f");
-    let path = Path::new(known_faces_dir).join(format!("{}_{}.jpg", safe_name, timestamp));
-
-    let mut encoded = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut encoded);
-    if img.write_to(&mut cursor, ImageFormat::Jpeg).is_ok()
-        && std::fs::write(&path, &encoded).is_ok()
-    {
-        info!(
-            "📸 Photo de référence capturée depuis la webcam pour '{}' → {}",
-            safe_name,
-            path.display()
-        );
-
-        // Rechargement en arrière-plan pour ne pas bloquer le flux caméra
-        // (le scan par fenêtres 640x640, et désormais le traitement Rayon
-        // des différents gabarits, peuvent prendre plusieurs centaines de
-        // ms). `tokio::task::spawn_blocking` (plutôt qu'un `std::thread::spawn`
-        // brut) confie ce travail bloquant/CPU-bound au pool de threads
-        // dédié de Tokio, cohérent avec le reste du pipeline (voir
-        // `super::worker::spawn_recognition_worker`).
-        let dir_reload = known_faces_dir.to_string();
-        let detector_reload = Arc::clone(face_detector);
-        let embedder_reload = Arc::clone(face_embedder);
-        let known_people_reload = Arc::clone(known_people);
-        tokio::task::spawn_blocking(move || {
-            if let (Some(det), Some(emb)) = (&*detector_reload, &*embedder_reload) {
-                let fresh = load_known_faces(det, emb, &dir_reload);
-                let distinct = fresh
-                    .iter()
-                    .map(|p| p.name.as_str())
-                    .collect::<std::collections::HashSet<_>>()
-                    .len();
-                let total = fresh.len();
-                *known_people_reload.lock_or_recover() = fresh;
-                info!(
-                    "🔄 Base de reconnaissance rechargée : {} personne(s) ({} gabarit(s) au total).",
-                    distinct, total
-                );
-            }
-        });
-    } else {
-        error!(
-            "❌ Échec de sauvegarde de la photo de référence pour '{}'",
-            safe_name
-        );
-    }
+    // Si la bibliothèque ne tourne pas, la commande (et sa réponse) est
+    // perdue : l'interface l'apprend par la fermeture de la réponse.
+    let _ = state.faces.send(FaceCommand::Capture {
+        name: request.name,
+        image: img.clone(),
+        reply: request.reply,
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- person_name_from_stem ---
-
-    #[test]
-    fn name_without_timestamp_suffix_is_kept_as_is() {
-        assert_eq!(person_name_from_stem("jerome"), "jerome");
-    }
-
-    #[test]
-    fn numeric_suffix_after_underscore_is_stripped() {
-        assert_eq!(person_name_from_stem("jerome_20260918093604"), "jerome");
-    }
-
-    #[test]
-    fn only_the_last_underscore_group_is_treated_as_a_suffix() {
-        // "jean_paul_20260918093604" -> le nom peut lui-même contenir un
-        // underscore ; seul le dernier groupe (purement numérique) est
-        // retiré.
-        assert_eq!(
-            person_name_from_stem("jean_paul_20260918093604"),
-            "jean_paul"
-        );
-    }
-
-    #[test]
-    fn non_numeric_suffix_is_not_stripped() {
-        // Le suffixe après le dernier "_" n'est pas purement numérique : on
-        // garde le nom de fichier complet.
-        assert_eq!(person_name_from_stem("photo_finale"), "photo_finale");
-    }
-
-    #[test]
-    fn trailing_underscore_with_empty_suffix_is_kept_as_is() {
-        assert_eq!(person_name_from_stem("jerome_"), "jerome_");
-    }
-
-    #[test]
-    fn name_without_any_underscore_is_kept_as_is() {
-        assert_eq!(person_name_from_stem("photo123"), "photo123");
-    }
 
     // --- is_supported_image ---
 
@@ -472,10 +461,51 @@ mod tests {
         assert!(!is_supported_image(Path::new("a")));
     }
 
+    #[test]
+    fn listing_creates_a_missing_folder_and_keeps_only_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("known_faces");
+
+        assert!(list_photos(&folder).is_empty());
+        assert!(folder.is_dir(), "le dossier est créé au premier passage");
+
+        std::fs::write(folder.join("lou_1.jpg"), b"x").unwrap();
+        std::fs::write(folder.join(".lou_2.jpg.tmp"), b"x").unwrap();
+        std::fs::write(folder.join("notes.txt"), b"x").unwrap();
+
+        assert_eq!(list_photos(&folder), vec![folder.join("lou_1.jpg")]);
+    }
+
+    #[test]
+    fn a_cached_photo_is_fresh_until_it_is_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lou_1.jpg");
+        std::fs::write(&path, b"premiere version").unwrap();
+
+        let mut cache = EmbeddingCache::default();
+        let stamp = FileStamp::of(&path);
+        assert!(!cache.is_fresh(&path, stamp));
+
+        cache.entries.insert(
+            path.clone(),
+            CachedFace {
+                stamp: stamp.unwrap(),
+                person: None,
+            },
+        );
+        assert!(cache.is_fresh(&path, stamp));
+
+        // Réécrite par une photo reçue d'une autre caméra : taille
+        // différente, donc à réanalyser.
+        std::fs::write(&path, b"une seconde version, plus longue").unwrap();
+        assert!(!cache.is_fresh(&path, FileStamp::of(&path)));
+    }
+
     // NOTE : `load_known_faces` et `load_known_face` ne sont volontairement
     // pas testées directement ici : elles nécessitent une instance réelle
     // de `FaceDetectorYuNet` / `FaceEmbedder`, donc de charger les modèles
     // ONNX (fichiers volumineux, absents de l'environnement de `cargo
-    // test`). Leur logique pure (nommage, filtrage des extensions) est
-    // couverte ci-dessus via `person_name_from_stem` et `is_supported_image`.
+    // test`). Leur logique pure (filtrage des extensions, fraîcheur du
+    // cache) est couverte ci-dessus ; le nommage l'est dans
+    // `foxguard_protocol::faces`.
 }

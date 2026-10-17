@@ -48,7 +48,7 @@ use crate::h264::H264Encoder;
 use crate::h264::H264Stream;
 use crate::mail::Mailer;
 use crate::util::MutexExt;
-use crate::vision::{BoundingBox, FaceDetectorYuNet, FaceEmbedder, KnownPerson};
+use crate::vision::BoundingBox;
 
 use super::clips::ClipRecorder;
 use super::codec::decode_yuyv_to_rgb;
@@ -109,10 +109,6 @@ pub(super) struct Pipeline {
     /// ferait copier des frames pour les voir refusées par un canal plein.
     pub(super) detect_idle: Arc<AtomicBool>,
     pub(super) last_boxes: Arc<Mutex<Vec<BoundingBox>>>,
-    pub(super) face_detector: Arc<Option<FaceDetectorYuNet>>,
-    pub(super) face_embedder: Arc<Option<FaceEmbedder>>,
-    pub(super) known_people: Arc<Mutex<Vec<KnownPerson>>>,
-    pub(super) known_faces_dir: String,
     /// Enregistreur de clips, partagé avec le thread de reconnaissance qui
     /// les déclenche.
     pub(super) clips: Arc<Mutex<ClipRecorder>>,
@@ -197,11 +193,16 @@ pub(super) fn run(
         // l'alerte e-mail, et à décider s'il faut décoder.
         let boxes = read_last_boxes(&pipeline.last_boxes, is_detection_active);
 
-        // Enrôlement à chaud demandé depuis l'interface ? Il lui faut la
+        // Enrôlement à chaud demandé depuis une interface ? Il lui faut la
         // frame en pixels, et il est rare — d'où ce coup d'œil avant de
         // décoder plutôt qu'un décodage systématique.
-        let wants_enrollment =
-            is_detection_active && state.pending_enrollment.lock_or_recover().is_some();
+        //
+        // Indépendant de la surveillance : il en dépendait, et une demande
+        // faite caméra au repos restait en attente jusqu'à la prochaine
+        // activation — qui capturait alors une frame au hasard, sans
+        // personne devant l'objectif. Enregistrer un visage ne demande pas
+        // de détecter quoi que ce soit.
+        let wants_enrollment = state.pending_enrollment.lock_or_recover().is_some();
 
         // DÉCODAGE, au plus une fois par frame, et seulement si quelqu'un en
         // a besoin :
@@ -232,14 +233,7 @@ pub(super) fn run(
         if let Some(img) = &decoded
             && wants_enrollment
         {
-            try_capture_reference(
-                &state,
-                img,
-                &pipeline.face_detector,
-                &pipeline.face_embedder,
-                &pipeline.known_people,
-                &pipeline.known_faces_dir,
-            );
+            try_capture_reference(&state, img);
         }
 
         // SOUMISSION À LA RECONNAISSANCE, également sur la frame brute : le

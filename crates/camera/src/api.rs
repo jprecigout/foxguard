@@ -22,7 +22,8 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use tokio::sync::broadcast;
+use std::time::Duration;
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{debug, error, info, warn};
@@ -30,9 +31,10 @@ use tracing::{debug, error, info, warn};
 use foxguard_protocol::ticket::Scope;
 
 use crate::auth::{self, Access, has_token};
-use crate::capture::SharedState;
+use crate::capture::{EnrollmentRequest, FaceCommand, FaceReply, SharedState};
 use crate::h264::{H264Stream, NAL_SPS, nal_type};
 use crate::retention::is_recording_file;
+use crate::util::MutexExt;
 
 /// Marqueur de début d'une NAL au format Annex-B.
 ///
@@ -51,6 +53,19 @@ const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
 /// (`key` ou `delta`) décide s'il peut commencer à décoder là, et
 /// l'horodatage doit croître.
 const H264_FRAME_HEADER: usize = 1 + 8;
+
+/// Délai au-delà duquel une capture de référence est déclarée échouée.
+///
+/// Large : la capture attend la prochaine frame, puis la recherche d'un
+/// visage par fenêtres, qui peut prendre plusieurs secondes sur un Raspberry
+/// Pi pour une image haute résolution. Mais borné : une caméra qui ne fournit
+/// plus d'images ne doit pas laisser l'interface attendre indéfiniment — ni
+/// capturer plus tard une photo que plus personne n'attend (voir
+/// `crate::capture::known_faces::try_capture_reference`).
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Délai au-delà duquel une suppression de référence est déclarée échouée.
+const DELETE_TIMEOUT: Duration = Duration::from_secs(10);
 
 // Compteur global pour attribuer un ID unique séquentiel à chaque client
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
@@ -71,11 +86,31 @@ enum WsAccess {
     /// Ouverte avec le jeton d'API : vidéo ET commandes. C'est l'interface
     /// complète de la caméra.
     Full,
-    /// Ouverte avec un ticket du manager : vidéo seulement. Les commandes
-    /// reçues sont ignorées — le manager est en lecture seule, et un ticket
-    /// qui permettrait de couper la surveillance donnerait à l'interface du
-    /// manager exactement le pouvoir qu'on refuse de lui confier.
+    /// Ouverte avec un ticket d'ENRÔLEMENT du manager (`GET /ws/enrollment`) :
+    /// vidéo, plus la capture et la suppression de photos de référence. Les
+    /// interrupteurs restent ignorés : enregistrer un visage ne donne pas le
+    /// droit de couper la surveillance.
+    Enrollment,
+    /// Ouverte avec un ticket de direct du manager : vidéo seulement. Les
+    /// commandes reçues sont ignorées — le manager est en lecture seule, et
+    /// un ticket qui permettrait de couper la surveillance donnerait à
+    /// l'interface du manager exactement le pouvoir qu'on refuse de lui
+    /// confier.
     ViewOnly,
+}
+
+impl WsAccess {
+    /// Vrai si cette connexion a le droit d'exécuter `command`.
+    fn allows(self, command: &ClientCommand) -> bool {
+        match self {
+            Self::Full => true,
+            Self::Enrollment => matches!(
+                command,
+                ClientCommand::CaptureReference { .. } | ClientCommand::DeleteReference { .. }
+            ),
+            Self::ViewOnly => false,
+        }
+    }
 }
 
 /// Commandes JSON reçues par WebSocket
@@ -90,9 +125,54 @@ pub enum ClientCommand {
     SetRecording { enabled: bool },
     /// Capture la prochaine frame caméra comme nouveau gabarit de référence
     /// pour la reconnaissance faciale (s'ajoute aux gabarits existants pour
-    /// ce nom, voir `capture::start_camera_loop`).
+    /// ce nom, voir `crate::capture::face_library`). Répond par un
+    /// [`CommandReply`] de type `capture`.
     #[serde(rename = "capture_reference")]
     CaptureReference { name: String },
+    /// Supprime une photo de référence, ici et — si le partage est actif —
+    /// sur toutes les caméras. Répond par un [`CommandReply`] de type
+    /// `delete`.
+    #[serde(rename = "delete_reference")]
+    DeleteReference { file: String },
+}
+
+/// Réponse à une commande de photo de référence, envoyée en message TEXTE sur
+/// le WebSocket qui l'a demandée :
+///
+/// `{"type":"capture","ok":true,"file":"lou_20261017093604123.jpg"}`
+/// `{"type":"capture","ok":false,"error":"Aucun visage détecté : …"}`
+///
+/// Le même canal que la vidéo : c'est la connexion que l'interface a déjà
+/// ouverte, et les lecteurs existants ignorent tout message texte qui n'est
+/// pas `config`.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct CommandReply {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl CommandReply {
+    fn new(kind: &'static str, result: FaceReply) -> Self {
+        match result {
+            Ok(file) => Self {
+                kind,
+                ok: true,
+                file: Some(file),
+                error: None,
+            },
+            Err(error) => Self {
+                kind,
+                ok: false,
+                file: None,
+                error: Some(error),
+            },
+        }
+    }
 }
 
 /// État de surveillance de la caméra, tel que renvoyé par
@@ -363,9 +443,45 @@ pub async fn ws_handler(
     Query(auth): Query<AuthQuery>,
     State(state): State<Arc<SharedState>>,
 ) -> Response {
-    let access = match auth::authorize(&auth, &state, Scope::Stream) {
+    open_ws(ws, addr, &auth, state, Scope::Stream, WsAccess::ViewOnly)
+}
+
+/// Upgrade WebSocket de l'ENRÔLEMENT (`GET /ws/enrollment?ticket=...`) : le
+/// même flux vidéo, plus la capture et la suppression de photos de
+/// référence (voir [`WsAccess::Enrollment`]).
+///
+/// Une route à part plutôt qu'un second essai de ticket sur `/ws` : c'est la
+/// route qui DIT la portée attendue (voir `foxguard_protocol::ticket`), et un
+/// ticket d'une portée n'est jamais essayé contre une autre.
+pub async fn enrollment_ws_handler(
+    ws: WebSocketUpgrade,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Query(auth): Query<AuthQuery>,
+    State(state): State<Arc<SharedState>>,
+) -> Response {
+    open_ws(
+        ws,
+        addr,
+        &auth,
+        state,
+        Scope::Enrollment,
+        WsAccess::Enrollment,
+    )
+}
+
+/// Authentifie et ouvre une connexion WebSocket : le jeton donne
+/// [`WsAccess::Full`], un ticket de `scope` donne `ticket_access`.
+fn open_ws(
+    ws: WebSocketUpgrade,
+    addr: SocketAddr,
+    auth: &AuthQuery,
+    state: Arc<SharedState>,
+    scope: Scope<'_>,
+    ticket_access: WsAccess,
+) -> Response {
+    let access = match auth::authorize(auth, &state, scope) {
         Some(Access::Token) => WsAccess::Full,
-        Some(Access::Ticket) => WsAccess::ViewOnly,
+        Some(Access::Ticket) => ticket_access,
         None => {
             warn!("⚠️ Tentative de connexion WebSocket rejetée (Token invalide).");
             return (StatusCode::UNAUTHORIZED, "Accès refusé").into_response();
@@ -443,21 +559,26 @@ async fn handle_socket(
 ) {
     let (sender, receiver) = socket.split();
 
-    let commands = spawn_command_task(receiver, state, client_id, access);
+    // Réponses aux commandes, remises au navigateur par la boucle d'émission :
+    // c'est elle qui détient l'émetteur de la connexion.
+    let (replies, pending_replies) = mpsc::channel(8);
+
+    let commands = spawn_command_task(receiver, state, client_id, access, replies);
 
     tokio::select! {
         _ = commands => {},
-        _ = push_h264_frames(sender, stream, addr) => {},
+        _ = push_h264_frames(sender, stream, addr, pending_replies) => {},
     }
 
     info!("❌ [WS] Client déconnecté #{} (IP: {})", client_id, addr);
 }
 
-/// Boucle d'émission du flux H.264.
+/// Boucle d'émission du flux H.264, et des réponses aux commandes.
 async fn push_h264_frames(
     mut sender: SplitSink<WebSocket, Message>,
     stream: Arc<H264Stream>,
     addr: SocketAddr,
+    mut replies: mpsc::Receiver<String>,
 ) {
     // L'abonnement AVANT la demande d'image clé : s'abonner est ce qui
     // déclenche l'encodage, et une image clé demandée à un encodeur à l'arrêt
@@ -472,7 +593,21 @@ async fn push_h264_frames(
     let mut started = false;
 
     loop {
-        let unit = match frames.recv().await {
+        let received = tokio::select! {
+            received = frames.recv() => received,
+
+            // Une réponse n'attend pas l'image clé : elle ne concerne pas le
+            // décodeur, et les lecteurs ignorent les messages texte qui ne
+            // sont pas `config`.
+            Some(reply) = replies.recv() => {
+                if sender.send(Message::Text(reply.into())).await.is_err() {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        let unit = match received {
             Ok(unit) => unit,
 
             // Le client n'a pas suivi la cadence. On repart d'une image clé :
@@ -720,6 +855,7 @@ fn spawn_command_task(
     state_cmd: Arc<SharedState>,
     client_id: u64,
     access: WsAccess,
+    replies: mpsc::Sender<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // La lecture continue même en lecture seule : c'est elle qui détecte
@@ -728,11 +864,11 @@ fn spawn_command_task(
             if let Message::Text(text) = msg
                 && let Ok(cmd) = serde_json::from_str::<ClientCommand>(&text)
             {
-                if access != WsAccess::Full {
+                if !access.allows(&cmd) {
                     warn!(
                         "⚠️ [WS Client #{}] Commande ignorée : connexion ouverte par ticket, \
-                         en lecture seule.",
-                        client_id
+                         sans le droit correspondant ({:?}).",
+                        client_id, access
                     );
                     continue;
                 }
@@ -769,18 +905,63 @@ fn spawn_command_task(
                         );
                     }
                     ClientCommand::CaptureReference { name } => {
-                        if let Ok(mut pending) = state_cmd.pending_enrollment.lock() {
-                            *pending = Some(name.clone());
-                        }
                         info!(
                             "📸 [WS Client #{}] Capture de photo de référence demandée pour : {}",
                             client_id, name
                         );
+
+                        let (reply, answer) = oneshot::channel();
+
+                        // Une demande encore en attente est REMPLACÉE : son
+                        // émetteur reçoit une erreur (réponse abandonnée)
+                        // plutôt qu'une photo prise pour quelqu'un d'autre.
+                        *state_cmd.pending_enrollment.lock_or_recover() =
+                            Some(EnrollmentRequest { name, reply });
+
+                        forward_reply("capture", answer, CAPTURE_TIMEOUT, replies.clone());
+                    }
+                    ClientCommand::DeleteReference { file } => {
+                        info!(
+                            "🗑️ [WS Client #{}] Suppression de photo de référence demandée : {}",
+                            client_id, file
+                        );
+
+                        let (reply, answer) = oneshot::channel();
+
+                        // Bibliothèque arrêtée : la commande est perdue, et
+                        // la réponse avec elle — ce que `forward_reply`
+                        // signale.
+                        let _ = state_cmd.faces.send(FaceCommand::Delete { file, reply });
+
+                        forward_reply("delete", answer, DELETE_TIMEOUT, replies.clone());
                     }
                 }
             }
         }
     })
+}
+
+/// Attend la réponse de la bibliothèque de visages et la remet au
+/// navigateur, sans bloquer la lecture des commandes suivantes.
+fn forward_reply(
+    kind: &'static str,
+    answer: oneshot::Receiver<FaceReply>,
+    timeout: Duration,
+    replies: mpsc::Sender<String>,
+) {
+    tokio::spawn(async move {
+        let result = match tokio::time::timeout(timeout, answer).await {
+            Ok(Ok(result)) => result,
+            // Réponse abandonnée : demande remplacée par une autre, ou
+            // bibliothèque indisponible.
+            Ok(Err(_)) => Err("Demande annulée par la caméra.".to_string()),
+            Err(_) => Err("La caméra n'a pas répondu à temps.".to_string()),
+        };
+
+        if let Ok(json) = serde_json::to_string(&CommandReply::new(kind, result)) {
+            let _ = replies.send(json).await;
+        }
+    });
 }
 
 /// Helper pour instancier le routeur Axum
@@ -794,6 +975,7 @@ pub fn create_router(state: Arc<SharedState>) -> Router {
         .route("/live", get(live_handler))
         .route("/control", get(control_handler))
         .route("/ws", get(ws_handler))
+        .route("/ws/enrollment", get(enrollment_ws_handler))
         .route(
             "/api/monitoring",
             get(monitoring_handler).post(set_monitoring_handler),
@@ -888,6 +1070,45 @@ mod tests {
         };
 
         assert_eq!(encode_h264_frame(&delta, 0)[0], 0);
+    }
+
+    #[test]
+    fn a_ticket_connection_may_only_do_what_its_scope_allows() {
+        let capture = ClientCommand::CaptureReference {
+            name: "lou".to_string(),
+        };
+        let delete = ClientCommand::DeleteReference {
+            file: "lou_1.jpg".to_string(),
+        };
+        let switch = ClientCommand::SetMonitoring { enabled: false };
+
+        assert!(WsAccess::Full.allows(&switch));
+        assert!(WsAccess::Full.allows(&capture));
+
+        // Enregistrer un visage ne donne pas le droit de couper la
+        // surveillance.
+        assert!(WsAccess::Enrollment.allows(&capture));
+        assert!(WsAccess::Enrollment.allows(&delete));
+        assert!(!WsAccess::Enrollment.allows(&switch));
+
+        // Regarder ne permet pas d'autoriser un visage.
+        assert!(!WsAccess::ViewOnly.allows(&capture));
+        assert!(!WsAccess::ViewOnly.allows(&delete));
+        assert!(!WsAccess::ViewOnly.allows(&switch));
+    }
+
+    #[test]
+    fn a_command_reply_carries_the_file_or_the_error_only() {
+        let ok =
+            serde_json::to_string(&CommandReply::new("capture", Ok("lou_1.jpg".into()))).unwrap();
+        assert_eq!(ok, r#"{"type":"capture","ok":true,"file":"lou_1.jpg"}"#);
+
+        let refused =
+            serde_json::to_string(&CommandReply::new("delete", Err("introuvable".into()))).unwrap();
+        assert_eq!(
+            refused,
+            r#"{"type":"delete","ok":false,"error":"introuvable"}"#
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 // Navigation entre les vues de l'interface, portée par le FRAGMENT de l'URL
-// (`#/direct`, `#/direct/<caméra>`).
+// (`#/direct`, `#/direct/<caméra>`, `#/visages`).
 //
 // Le fragment plutôt que le chemin : le manager sert le bundle avec un simple
 // `ServeDir`, sans repli vers `index.html`. Un chemin comme `/direct`
@@ -12,7 +12,9 @@ import { useEffect, useState } from "react";
 export type Route =
   | { view: "timeline" }
   /** `camera` : la caméra affichée seule, en grand. */
-  | { view: "live"; camera: string | null };
+  | { view: "live"; camera: string | null }
+  /** Enregistrement des visages de la reconnaissance faciale. */
+  | { view: "faces" };
 
 export function parseRoute(hash: string): Route {
   const [view, camera] = hash.replace(/^#\/?/, "").split("/", 2);
@@ -21,12 +23,20 @@ export function parseRoute(hash: string): Route {
     return { view: "live", camera: camera ? decodeURIComponent(camera) : null };
   }
 
+  if (view === "visages") return { view: "faces" };
+
   return { view: "timeline" };
 }
 
 export function routeHref(route: Route): string {
-  if (route.view === "timeline") return "#/";
-  return route.camera ? `#/direct/${encodeURIComponent(route.camera)}` : "#/direct";
+  switch (route.view) {
+    case "timeline":
+      return "#/";
+    case "faces":
+      return "#/visages";
+    case "live":
+      return route.camera ? `#/direct/${encodeURIComponent(route.camera)}` : "#/direct";
+  }
 }
 
 /** La vue courante, tenue à jour au fil de la navigation (boutons Précédent compris). */

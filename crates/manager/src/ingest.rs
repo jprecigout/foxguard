@@ -4,27 +4,43 @@
 //! caméra. Chaque message reçu est décodé avec
 //! [`foxguard_protocol::DetectionEvent`] — le même type que celui utilisé par
 //! la caméra pour l'écrire — puis rangé dans l'historique.
+//!
+//! Il écoute aussi les photos de référence que les caméras se partagent (voir
+//! `foxguard_protocol::faces`), pour en tenir la liste à l'interface. Il ne
+//! les accepte que SIGNÉES, exactement comme une caméra : montrer comme
+//! enregistrée une photo que toutes les caméras refusent serait mentir.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use foxguard_protocol::DetectionEvent;
+use foxguard_protocol::faces::{self, FaceMessage};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use tracing::{debug, error, info, warn};
 
 use crate::config::MqttConfig;
-use crate::db::EventRepository;
+use crate::db::{EventRepository, NewFace};
 
 /// Démarre la tâche de fond qui écoute le broker et alimente `store`.
+///
+/// `faces_secret` : secret qui signe les photos de référence (`[stream]
+/// ticket_secret`), ou `None` pour ne pas les écouter — sans lui, rien ne
+/// permet de distinguer une photo d'une caméra d'une photo forgée.
 ///
 /// Ne retourne pas de `Result` : la connexion est paresseuse et `rumqttc`
 /// reconnecte automatiquement. Un broker momentanément injoignable ne doit
 /// pas empêcher le manager de démarrer — son API HTTP reste utile pour
 /// consulter l'historique déjà reçu.
-pub fn spawn(config: MqttConfig, repository: Arc<EventRepository>) {
+pub fn spawn(config: MqttConfig, repository: Arc<EventRepository>, faces_secret: Option<String>) {
     let client_id = format!("foxguard-manager-{}", std::process::id());
     let mut options = MqttOptions::new(client_id, config.broker_host.clone(), config.broker_port);
     options.set_keep_alive(Duration::from_secs(30));
+
+    // Le client limite par défaut les paquets entrants à 10 Kio : une photo
+    // de référence n'y tient pas, et un paquet hors limite COUPE la
+    // connexion — que le broker relivrerait aussitôt (message retenu), en
+    // boucle (voir `faces::MAX_MESSAGE_BYTES`).
+    options.set_max_packet_size(faces::MAX_MESSAGE_BYTES, faces::MAX_MESSAGE_BYTES);
 
     if !config.username.is_empty() {
         options.set_credentials(config.username.clone(), config.password.clone());
@@ -50,10 +66,28 @@ pub fn spawn(config: MqttConfig, repository: Arc<EventRepository>) {
                     if let Err(e) = client.subscribe(&config.topic, QoS::AtLeastOnce).await {
                         error!("❌ Abonnement au topic \"{}\" échoué : {e}", config.topic);
                     }
+
+                    if faces_secret.is_some() {
+                        let pattern = faces::subscription(&config.faces_topic);
+                        if let Err(e) = client.subscribe(&pattern, QoS::AtLeastOnce).await {
+                            error!("❌ Abonnement au topic \"{pattern}\" échoué : {e}");
+                        }
+                    }
                 }
 
                 Ok(Event::Incoming(Packet::Publish(publish))) => {
-                    handle_payload(&publish.payload, &repository).await;
+                    // Aiguillage par TOPIC, photos d'abord : un motif
+                    // d'événements large (`foxguard/#`) couvre aussi les
+                    // photos, qui ne sont pas des événements.
+                    match faces::file_in_topic(&config.faces_topic, &publish.topic) {
+                        Some(file) => {
+                            if let Some(secret) = &faces_secret {
+                                handle_face(file, &publish.payload, secret.as_bytes(), &repository)
+                                    .await;
+                            }
+                        }
+                        None => handle_payload(&publish.payload, &repository).await,
+                    }
                 }
 
                 Ok(_) => {}
@@ -89,6 +123,64 @@ async fn handle_payload(payload: &[u8], repository: &EventRepository) {
     // disque serait la parade, si le besoin se confirme.
     if let Err(e) = repository.record(&event).await {
         error!("❌ Événement perdu ({}) : {e:#}", event.camera);
+    }
+}
+
+/// Vérifie un message de photo de référence et l'applique à la liste.
+async fn handle_face(file: &str, payload: &[u8], secret: &[u8], repository: &EventRepository) {
+    let Some(message) = parse_face(file, payload, secret) else {
+        return;
+    };
+
+    let result = match &message {
+        FaceMessage::Photo(photo) => {
+            // Décodable : `FaceMessage::parse` l'a vérifié.
+            let image = photo.decoded_image().unwrap_or_default();
+            let person_name = faces::person_name(&photo.file);
+
+            repository
+                .upsert_face(&NewFace {
+                    file: &photo.file,
+                    person_name: &person_name,
+                    camera: &photo.camera,
+                    captured_at: photo.captured_at,
+                    photo: &image,
+                })
+                .await
+        }
+        FaceMessage::Removed(removal) => repository.delete_face(&removal.file).await.map(|_| ()),
+    };
+
+    if let Err(e) = result {
+        error!("❌ Photo de référence {file} non prise en compte : {e:#}");
+    }
+}
+
+/// Décode et VÉRIFIE un message de photo de référence, ou `None` s'il doit
+/// être ignoré.
+///
+/// Extrait de [`handle_face`] pour être testable sans base de données.
+fn parse_face(file: &str, payload: &[u8], secret: &[u8]) -> Option<FaceMessage> {
+    // Message retenu effacé à la main : le broker ne sait plus rien de ce
+    // fichier, mais ce n'est pas une suppression (elle passe par une pierre
+    // tombale signée, voir `foxguard_protocol::faces`).
+    if payload.is_empty() {
+        return None;
+    }
+
+    match FaceMessage::parse(file, payload, secret) {
+        Ok(message) => {
+            debug!(
+                "🖼️ Photo de référence {} ({})",
+                message.file(),
+                message.camera()
+            );
+            Some(message)
+        }
+        Err(e) => {
+            warn!("⚠️ Photo de référence ignorée ({file}) : {e:?}");
+            None
+        }
     }
 }
 
@@ -155,6 +247,38 @@ mod tests {
         // JSON valide, mais qui ne décrit pas un événement de détection : un
         // autre producteur publie peut-être sur le même topic.
         assert!(parse_event(br#"{"temperature": 21.5}"#).is_none());
+    }
+
+    // --- Photos de référence ---
+
+    const SECRET: &[u8] = b"0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn a_signed_photo_is_accepted() {
+        let message =
+            FaceMessage::photo(SECRET, "lou_1.jpg", "entree", chrono::Utc::now(), b"jpeg");
+        let payload = serde_json::to_vec(&message).unwrap();
+
+        assert_eq!(parse_face("lou_1.jpg", &payload, SECRET), Some(message));
+    }
+
+    #[test]
+    fn a_photo_signed_with_another_secret_is_ignored() {
+        let message = FaceMessage::photo(
+            b"un tout autre secret, assez long",
+            "lou_1.jpg",
+            "entree",
+            chrono::Utc::now(),
+            b"jpeg",
+        );
+        let payload = serde_json::to_vec(&message).unwrap();
+
+        assert_eq!(parse_face("lou_1.jpg", &payload, SECRET), None);
+    }
+
+    #[test]
+    fn a_cleared_retained_message_is_not_a_removal() {
+        assert_eq!(parse_face("lou_1.jpg", b"", SECRET), None);
     }
 
     #[test]

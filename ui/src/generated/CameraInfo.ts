@@ -25,4 +25,14 @@ control_url: string | null,
  * disponible : caméra sans URL publique, ou tickets non configurés
  * (`[stream] ticket_secret`).
  */
-stream_url: string | null, };
+stream_url: string | null, 
+/**
+ * Route du manager qui délivre un ticket d'ENRÔLEMENT pour cette caméra
+ * (même forme que [`StreamTicket`]), ou `null` dans les mêmes cas que
+ * `stream_url`.
+ *
+ * Le WebSocket qu'il ouvre montre le direct, pour se placer devant la
+ * caméra, et accepte en plus la capture et la suppression de photos de
+ * référence — et rien d'autre : ni interrupteur, ni archives.
+ */
+enrollment_url: string | null, };

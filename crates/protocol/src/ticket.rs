@@ -14,8 +14,8 @@
 //! Un ticket est un droit signé, et il est :
 //!
 //! - **limité à une portée** ([`Scope`]) : regarder le direct, piloter la
-//!   surveillance, OU lire UN clip. Un ticket de direct ne coupe rien, un
-//!   ticket de clip n'ouvre que ce clip ;
+//!   surveillance, enregistrer des visages, OU lire UN clip. Un ticket de
+//!   direct ne coupe rien, un ticket de clip n'ouvre que ce clip ;
 //! - **lié à une caméra** : son nom entre dans la signature, un ticket émis
 //!   pour le garage n'ouvre pas le jardin ;
 //! - **daté** : il expire, et une caméra refuse un ticket qui prétend durer
@@ -100,6 +100,14 @@ pub enum Scope<'a> {
     Stream,
     /// Piloter la surveillance (`GET /control`, `POST /api/monitoring`).
     Monitoring,
+    /// Enregistrer des visages de référence (`GET /ws/enrollment`) : le
+    /// direct, pour se placer devant la caméra, plus la capture et la
+    /// suppression de photos de référence.
+    ///
+    /// Une portée à part, et non une extension du direct : une photo de
+    /// référence fait d'une personne quelqu'un de CONNU, dont la présence ne
+    /// déclenche plus d'alerte. Regarder ne doit pas permettre d'autoriser.
+    Enrollment,
     /// Lire UN enregistrement (`GET /play/{fichier}`,
     /// `GET /recordings/{fichier}`).
     Clip(&'a str),
@@ -113,6 +121,7 @@ impl Scope<'_> {
         match self {
             Scope::Stream => mac.update(b"stream"),
             Scope::Monitoring => mac.update(b"monitoring"),
+            Scope::Enrollment => mac.update(b"enrollment"),
             Scope::Clip(file) => {
                 mac.update(b"clip:");
                 mac.update(file.as_bytes());
@@ -226,11 +235,11 @@ fn sign(key: &[u8], camera: &str, scope: Scope<'_>, expires_at: i64) -> HmacSha2
     mac
 }
 
-fn to_hex(bytes: &[u8]) -> String {
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn from_hex(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn from_hex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) || !text.is_ascii() {
         return None;
     }
@@ -273,6 +282,24 @@ mod tests {
         let ticket = issue(SECRET, "jardin", Scope::Stream, NOW + 60);
         assert_eq!(
             check("jardin", Scope::Monitoring, &ticket),
+            Err(TicketError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn a_stream_ticket_does_not_grant_enrollment_and_vice_versa() {
+        // Regarder ne permet pas d'ajouter un visage autorisé, et un ticket
+        // d'enrôlement n'ouvre pas la page de surveillance.
+        let stream = issue(SECRET, "jardin", Scope::Stream, NOW + 60);
+        let enrollment = issue(SECRET, "jardin", Scope::Enrollment, NOW + 60);
+
+        assert_eq!(
+            check("jardin", Scope::Enrollment, &stream),
+            Err(TicketError::BadSignature)
+        );
+        assert_eq!(check("jardin", Scope::Enrollment, &enrollment), Ok(()));
+        assert_eq!(
+            check("jardin", Scope::Monitoring, &enrollment),
             Err(TicketError::BadSignature)
         );
     }

@@ -571,6 +571,223 @@ button.control:hover:not(:disabled) {
   display: none !important;
 }
 
+/* --- Visages ----------------------------------------------------------- */
+
+.faces-view {
+  display: grid;
+  gap: 20px;
+}
+
+.enroll,
+.person {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.enroll > header,
+.person > header,
+.people > header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.enroll > header,
+.person > header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.enroll h2,
+.people h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.people {
+  display: grid;
+  gap: 12px;
+}
+
+.camera-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+select,
+input[type="text"] {
+  background: var(--card-alt);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  font-family: inherit;
+}
+
+input[type="text"][aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+/* Le direct à gauche, le formulaire à droite ; empilés sur un écran
+   étroit, le direct en premier — c'est lui qu'on regarde pour se placer. */
+.enroll-body {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(260px, 2fr);
+}
+
+@media (max-width: 760px) {
+  .enroll-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+.enroll-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+}
+
+.enroll-form label {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.enroll-form .hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.enroll-form .hint.invalid {
+  color: var(--danger);
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-size: 0.95rem;
+  padding: 10px 16px;
+  margin-top: 4px;
+}
+
+button.primary:hover:not(:disabled) {
+  background: #1976d2;
+}
+
+.enroll-status {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  border: 1px solid var(--border);
+}
+
+.enroll-status.ok {
+  border-color: var(--ok);
+  background: rgba(67, 160, 71, 0.12);
+}
+
+.enroll-status.error {
+  border-color: var(--danger);
+  background: rgba(229, 57, 53, 0.12);
+}
+
+.enroll-tips {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.person h3 {
+  flex: 1;
+  margin: 0;
+  font-size: 1rem;
+}
+
+.person > header button {
+  font-size: 0.78rem;
+  padding: 3px 10px;
+}
+
+.face-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.face {
+  position: relative;
+  margin: 0;
+  background: var(--card-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* La photo est la frame entière de la caméra : recadrée au centre, là où
+   se tient la personne qu'on enregistre. */
+.face img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  background: #000;
+}
+
+.face figcaption {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 6px 8px;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.face figcaption span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.face-delete {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.65);
+  border-color: transparent;
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.face-delete:hover:not(:disabled) {
+  background: var(--danger);
+}
+
+code {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  background: var(--card-alt);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
 /* --- Lecteur de clip -------------------------------------------------- */
 
 .overlay {

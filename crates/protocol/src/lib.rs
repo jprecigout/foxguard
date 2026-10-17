@@ -22,6 +22,7 @@
 //! de la caméra, transposée au fil MQTT.
 
 pub mod auth;
+pub mod faces;
 pub mod ticket;
 
 use chrono::{DateTime, Local};

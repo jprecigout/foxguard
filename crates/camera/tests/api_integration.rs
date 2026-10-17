@@ -615,6 +615,146 @@ async fn an_expired_ticket_is_rejected() {
     assert_eq!(status, StatusCode::UNAUTHORIZED.as_u16());
 }
 
+// --- Enrôlement de visages depuis le manager ---
+
+#[tokio::test]
+async fn an_enrollment_ticket_opens_the_enrollment_websocket() {
+    let addr = spawn_test_server("secret-correct").await;
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA, Scope::Enrollment);
+
+    let status = ws_upgrade_status(addr, &format!("/ws/enrollment?ticket={ticket}")).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS.as_u16());
+}
+
+#[tokio::test]
+async fn a_stream_ticket_does_not_open_the_enrollment_websocket() {
+    // Regarder ne donne pas le droit d'ajouter un visage autorisé.
+    let addr = spawn_test_server("secret-correct").await;
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA, Scope::Stream);
+
+    let status = ws_upgrade_status(addr, &format!("/ws/enrollment?ticket={ticket}")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED.as_u16());
+}
+
+#[tokio::test]
+async fn an_enrollment_ticket_is_not_tried_on_the_view_only_websocket() {
+    let addr = spawn_test_server("secret-correct").await;
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA, Scope::Enrollment);
+
+    let status = ws_upgrade_status(addr, &format!("/ws?ticket={ticket}")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED.as_u16());
+}
+
+#[tokio::test]
+async fn the_token_opens_the_enrollment_websocket() {
+    let addr = spawn_test_server("secret-correct").await;
+
+    let status = ws_upgrade_status(addr, "/ws/enrollment?token=secret-correct").await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS.as_u16());
+}
+
+/// Envoie un message texte WebSocket, masqué comme l'exige le protocole pour
+/// un client (RFC 6455, §5.3). Charge utile de moins de 126 octets.
+async fn send_ws_text(stream: &mut tokio::net::TcpStream, text: &str) {
+    use tokio::io::AsyncWriteExt;
+
+    let mask = [0x12u8, 0x34, 0x56, 0x78];
+    let payload = text.as_bytes();
+    assert!(payload.len() < 126, "trame courte uniquement");
+
+    let mut frame = vec![0x81, 0x80 | payload.len() as u8];
+    frame.extend_from_slice(&mask);
+    frame.extend(
+        payload
+            .iter()
+            .enumerate()
+            .map(|(i, byte)| byte ^ mask[i % 4]),
+    );
+
+    stream.write_all(&frame).await.expect("envoi de la trame");
+}
+
+/// Lit un message texte WebSocket envoyé par le serveur (non masqué).
+async fn read_ws_text(stream: &mut tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt;
+
+    let mut header = [0u8; 2];
+    stream
+        .read_exact(&mut header)
+        .await
+        .expect("en-tête de trame");
+    assert_eq!(header[0], 0x81, "une trame texte complète");
+
+    let len = match header[1] & 0x7F {
+        126 => {
+            let mut extended = [0u8; 2];
+            stream.read_exact(&mut extended).await.expect("longueur");
+            u16::from_be_bytes(extended) as usize
+        }
+        len => len as usize,
+    };
+
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload).await.expect("charge utile");
+    String::from_utf8(payload).expect("texte UTF-8")
+}
+
+#[tokio::test]
+async fn an_enrollment_connection_relays_a_removal_and_its_answer() {
+    use foxguard_camera::capture::FaceCommand;
+
+    let dir = tempfile::tempdir().expect("dossier temporaire").keep();
+    let state = test_state_in("secret-correct", &dir);
+    // Le test tient le rôle de la bibliothèque de visages.
+    let mut library = state.take_face_commands().expect("commandes disponibles");
+    let addr = spawn_server_with(state).await;
+
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA, Scope::Enrollment);
+    let (status, mut socket) =
+        ws_upgrade_open(addr, &format!("/ws/enrollment?ticket={ticket}")).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS.as_u16());
+
+    send_ws_text(
+        &mut socket,
+        r#"{"command":"delete_reference","file":"lou_1.jpg"}"#,
+    )
+    .await;
+
+    let Some(FaceCommand::Delete { file, reply }) = library.recv().await else {
+        panic!("une suppression transmise à la bibliothèque");
+    };
+    assert_eq!(file, "lou_1.jpg");
+    reply.send(Ok(file)).expect("réponse");
+
+    assert_eq!(
+        read_ws_text(&mut socket).await,
+        r#"{"type":"delete","ok":true,"file":"lou_1.jpg"}"#
+    );
+}
+
+#[tokio::test]
+async fn a_view_only_connection_cannot_remove_a_reference_photo() {
+    let dir = tempfile::tempdir().expect("dossier temporaire").keep();
+    let state = test_state_in("secret-correct", &dir);
+    let mut library = state.take_face_commands().expect("commandes disponibles");
+    let addr = spawn_server_with(state).await;
+
+    let ticket = fresh_ticket(TEST_TICKET_SECRET, TEST_CAMERA, Scope::Stream);
+    let (status, mut socket) = ws_upgrade_open(addr, &format!("/ws?ticket={ticket}")).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS.as_u16());
+
+    send_ws_text(
+        &mut socket,
+        r#"{"command":"delete_reference","file":"lou_1.jpg"}"#,
+    )
+    .await;
+
+    // Ignorée : rien n'atteint la bibliothèque.
+    let received =
+        tokio::time::timeout(std::time::Duration::from_millis(300), library.recv()).await;
+    assert!(received.is_err(), "aucune commande ne doit passer");
+}
+
 #[tokio::test]
 async fn a_ticket_does_not_open_the_authenticated_http_routes() {
     // Un ticket ne vaut QUE pour le flux. Les archives, la suppression et

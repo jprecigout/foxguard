@@ -474,10 +474,11 @@
             </h2>
             <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 12px;">
                 Capture la frame actuelle de la webcam comme référence pour ce nom. Placez-vous
-                devant la caméra, surveillance activée, puis cliquez sur Capturer. Vous pouvez
-                cliquer plusieurs fois sous des angles / poses différents : chaque capture
-                s'ajoute aux précédentes pour ce nom (au lieu de les remplacer), ce qui rend
-                la reconnaissance plus fiable.
+                devant la caméra, puis cliquez sur Capturer. Vous pouvez cliquer plusieurs fois
+                sous des angles / poses différents : chaque capture s'ajoute aux précédentes
+                pour ce nom (au lieu de les remplacer), ce qui rend la reconnaissance plus
+                fiable. Si le partage est configuré, la photo est aussi envoyée à toutes les
+                autres caméras.
             </p>
             <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                 <input id="enrollName" type="text" value="jerome" placeholder="Nom (ex: jerome)"
@@ -644,6 +645,11 @@
                         return;
                     }
 
+                    if (announcement.type === 'capture') {
+                        showCaptureReply(announcement);
+                        return;
+                    }
+
                     if (announcement.type !== 'config') return;
 
                     h264Decoder = new VideoDecoder({
@@ -791,19 +797,32 @@
                 return;
             }
 
-            if (!isSystemActive) {
-                statusEl.style.color = 'var(--accent-red)';
-                statusEl.innerText = 'Activez la surveillance avant de capturer.';
-                return;
-            }
-
+            // Plus besoin d'activer la surveillance : la capture ne dépend
+            // plus que d'une frame (voir `capture_loop` côté serveur).
             ws.send(JSON.stringify({
                 command: 'capture_reference',
                 name: name
             }));
 
             statusEl.style.color = 'var(--text-muted)';
-            statusEl.innerText = `Capture demandée pour "${name}"... regardez la console du serveur.`;
+            statusEl.innerText = `Capture demandée pour "${name}"…`;
+        }
+
+        /**
+         * Réponse du serveur à une capture : `{"type":"capture","ok":…}`,
+         * avec le fichier écrit ou la raison du refus (aucun visage
+         * détecté, nom invalide…). Voir `CommandReply` côté Rust.
+         */
+        function showCaptureReply(reply) {
+            const statusEl = document.getElementById('enrollStatus');
+
+            if (reply.ok) {
+                statusEl.style.color = 'var(--accent-green)';
+                statusEl.innerText = `Photo enregistrée : ${reply.file}`;
+            } else {
+                statusEl.style.color = 'var(--accent-red)';
+                statusEl.innerText = reply.error || 'Capture refusée.';
+            }
         }
 
         async function loadRecordings() {

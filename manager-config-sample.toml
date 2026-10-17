@@ -31,16 +31,21 @@ password_hash = ""
 # par exemple), il faut l'écrire explicitement :
 # disabled = true
 
-# Accès aux caméras depuis l'interface : direct, clips, interrupteur.
+# Accès aux caméras depuis l'interface : direct, clips, interrupteur,
+# enregistrement des visages.
 [stream]
 # Secret partagé avec les caméras : le manager signe avec lui des tickets qui
 # n'ouvrent qu'UNE chose — le direct d'une caméra (lecture seule), son
-# interrupteur, ou un clip — pour deux minutes. Il ne connaît ainsi le jeton
-# d'API d'aucune caméra.
+# interrupteur, l'enregistrement de visages devant elle, ou un clip — pour
+# deux minutes. Il ne connaît ainsi le jeton d'API d'aucune caméra.
+#
+# C'est aussi avec lui que le manager vérifie les photos de référence que les
+# caméras se partagent (voir `faces_topic` dans [mqtt]).
 #
 # Doit être IDENTIQUE à `[server] stream_ticket_secret` de chaque caméra, et
 # faire au moins 32 caractères (`openssl rand -hex 32`). VIDE (le défaut) :
-# l'interface ne propose ni direct, ni clip, ni interrupteur.
+# l'interface ne propose ni direct, ni clip, ni interrupteur, ni
+# enregistrement de visages.
 ticket_secret = ""
 
 # SEULE SECTION OBLIGATOIRE : sans broker, le manager n'a rien à agréger.
@@ -54,6 +59,10 @@ password = ""
 # Doit correspondre au `topic` configuré sur les caméras. Un motif comme
 # "foxguard/+/detections" permet d'écouter plusieurs topics à la fois.
 topic = "foxguard/detections"
+# Préfixe des topics des photos de référence partagées par les caméras
+# (`faces_topic` de leur configuration). Le manager en tient la liste pour
+# l'onglet « Visages » de son interface.
+faces_topic = "foxguard/faces"
 
 # SECTION OBLIGATOIRE : sans base, le manager perdrait silencieusement tout ce
 # qu'il reçoit et refuse donc de démarrer.

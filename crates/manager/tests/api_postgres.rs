@@ -17,7 +17,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use chrono::Local;
 use foxguard_manager::api::{self, AppState};
-use foxguard_manager::db::EventRepository;
+use foxguard_manager::db::{EventRepository, NewFace};
 use foxguard_protocol::ticket::{self, Scope};
 use foxguard_protocol::{DetectionEvent, PersonStatus};
 use http_body_util::BodyExt;
@@ -593,6 +593,142 @@ async fn no_ticket_is_signed_for_a_camera_without_a_public_url() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+// --- Enrôlement de visages ---
+
+#[tokio::test]
+async fn a_reachable_camera_offers_an_enrollment_route() {
+    let repo = repo_or_skip!();
+    repo.record(&event("salon", None).with_base_url("http://192.168.1.42:8080"))
+        .await
+        .expect("écriture");
+
+    let body = get_json(repo, "/api/cameras").await;
+
+    assert_eq!(body[0]["enrollment_url"], "/api/cameras/salon/enrollment");
+}
+
+#[tokio::test]
+async fn no_enrollment_route_is_offered_without_a_ticket_secret() {
+    let repo = repo_or_skip!();
+    repo.record(&event("salon", None).with_base_url("http://192.168.1.42:8080"))
+        .await
+        .expect("écriture");
+
+    let response = router_with_secret(repo, None)
+        .oneshot(
+            Request::builder()
+                .uri("/api/cameras")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("réponse HTTP");
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    assert!(body[0]["enrollment_url"].is_null());
+}
+
+#[tokio::test]
+async fn the_enrollment_route_hands_out_an_enrollment_ticket_only() {
+    let repo = repo_or_skip!();
+    repo.record(&event("salon", None).with_base_url("https://cam.example/"))
+        .await
+        .expect("écriture");
+
+    let (status, headers, body) = get(repo, "/api/cameras/salon/enrollment").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+    let ticket = body["url"]
+        .as_str()
+        .expect("url")
+        .strip_prefix("wss://cam.example/ws/enrollment?ticket=")
+        .expect("WebSocket d'enrôlement de la caméra, avec un ticket")
+        .to_string();
+
+    let verify = |scope| {
+        ticket::verify(
+            TEST_TICKET_SECRET.as_bytes(),
+            "salon",
+            scope,
+            &ticket,
+            chrono::Utc::now().timestamp(),
+            ticket::MAX_TICKET_TTL_SECS,
+        )
+    };
+
+    assert_eq!(verify(Scope::Enrollment), Ok(()));
+    // Ni le direct seul, ni l'interrupteur : la portée est exactement
+    // celle de l'enrôlement.
+    assert!(verify(Scope::Stream).is_err());
+    assert!(verify(Scope::Monitoring).is_err());
+}
+
+#[tokio::test]
+async fn reference_photos_are_listed_with_their_photo_url() {
+    let repo = repo_or_skip!();
+    repo.upsert_face(&NewFace {
+        file: "lou_20261017093604123.jpg",
+        person_name: "lou",
+        camera: "entree",
+        captured_at: chrono::Utc::now(),
+        photo: &FAKE_JPEG,
+    })
+    .await
+    .expect("écriture");
+
+    let body = get_json(repo, "/api/faces").await;
+
+    assert_eq!(body[0]["file"], "lou_20261017093604123.jpg");
+    assert_eq!(body[0]["name"], "lou");
+    assert_eq!(body[0]["camera"], "entree");
+    assert_eq!(
+        body[0]["photo_url"],
+        "/api/faces/lou_20261017093604123.jpg/photo"
+    );
+    assert!(body[0]["captured_at"].is_string());
+}
+
+#[tokio::test]
+async fn a_reference_photo_is_served_privately() {
+    let repo = repo_or_skip!();
+    repo.upsert_face(&NewFace {
+        file: "lou_1.jpg",
+        person_name: "lou",
+        camera: "entree",
+        captured_at: chrono::Utc::now(),
+        photo: &FAKE_JPEG,
+    })
+    .await
+    .expect("écriture");
+
+    let (status, headers, body) = get(repo, "/api/faces/lou_1.jpg/photo").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_TYPE], "image/jpeg");
+    assert!(
+        headers[header::CACHE_CONTROL]
+            .to_str()
+            .unwrap()
+            .starts_with("private"),
+        "un visage ne va dans aucun cache partagé"
+    );
+    assert_eq!(body, FAKE_JPEG);
+}
+
+#[tokio::test]
+async fn an_unknown_or_unsafe_photo_name_is_refused() {
+    let repo = repo_or_skip!();
+
+    let (status, _, _) = get(repo.clone(), "/api/faces/inconnue_1.jpg/photo").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _, _) = get(repo, "/api/faces/..%2Fpasswd.jpg/photo").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 // --- Authentification, en-têtes, compression ---
 
 /// Routeur dont l'authentification est ACTIVE (`admin` / `correct horse`).
@@ -628,6 +764,9 @@ async fn every_route_requires_credentials_when_auth_is_enabled() {
         "/api/events",
         "/api/cameras",
         "/api/cameras/salon/stream",
+        "/api/cameras/salon/enrollment",
+        "/api/faces",
+        "/api/faces/lou_1.jpg/photo",
         "/",
     ] {
         let response = app

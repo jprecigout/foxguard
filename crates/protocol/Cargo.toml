@@ -29,6 +29,11 @@ sha2 = { workspace = true }
 # Comparaison des jetons en temps constant (voir `src/auth.rs`), déjà tiré
 # par `hmac`.
 subtle = { workspace = true }
+# Décodage des photos de référence partagées (voir `src/faces.rs`) : le
+# message n'est accepté qu'après vérification de sa signature, et cette
+# vérification doit vivre ICI pour être la même des deux côtés. C'est de la
+# sérialisation, et les deux composants le compilent déjà.
+serde_json = { workspace = true }
 
 [features]
 # Génère les définitions TypeScript de ces types (voir `ui/src/generated/`).
@@ -37,6 +42,3 @@ subtle = { workspace = true }
 # sans elle, et n'embarque donc ni `ts-rs` ni ses macros dans sa compilation
 # croisée ARM64 sous QEMU.
 ts = ["dep:ts-rs"]
-
-[dev-dependencies]
-serde_json = { workspace = true }

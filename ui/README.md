@@ -10,6 +10,11 @@ détection, et un bouton par caméra vers son **flux en direct**.
 Un second onglet, **« ● Direct »**, affiche la **mosaïque des directs** de
 toutes les caméras, ou une seule en grand.
 
+Un troisième, **« Visages »**, enregistre les **photos de référence** de la
+reconnaissance faciale devant la caméra de son choix — la caméra capture,
+vérifie et partage la photo avec toutes les autres — et liste les personnes
+enregistrées.
+
 ## Ce que ce n'est pas
 
 Ce n'est **pas** l'interface de la caméra. Chaque caméra embarque déjà la
@@ -43,10 +48,11 @@ SVG de 3 Ko, la duplication coûte moins cher que le couplage — mais si le log
 | Fichier | Rôle |
 | --- | --- |
 | `src/App.tsx` | composition : onglets, vue courante, ouverture du cadre |
-| `src/route.ts` | navigation par fragment d'URL (`#/`, `#/direct`, `#/direct/<caméra>`) |
+| `src/route.ts` | navigation par fragment d'URL (`#/`, `#/direct`, `#/direct/<caméra>`, `#/visages`) |
 | `src/components/TimelineView.tsx` | la vue timeline : chargement d'une journée, état partagé entre la bande et la pellicule |
 | `src/components/LiveWall.tsx` | la mosaïque des directs |
 | `src/components/LiveStream.tsx` | le direct d'une caméra : ticket, WebSocket, décodage WebCodecs vers un canevas |
+| `src/components/FacesView.tsx` | l'enregistrement des visages : direct de la caméra choisie, capture et suppression par son WebSocket d'enrôlement, liste des personnes |
 | `src/frames.ts` | les pages de caméra ouvertes dans le cadre (clip, interrupteur) |
 | `src/components/DayBar.tsx` | navigation entre les journées |
 | `src/components/CameraTimeline.tsx` | la timeline d'une caméra : bande de 24 h et pellicule de vignettes |

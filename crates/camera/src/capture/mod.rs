@@ -9,6 +9,8 @@
 //! - [`tracking`] : suivi des personnes (IoU) et reconnaissance faciale parallèle.
 //! - [`worker`] : thread d'arrière-plan qui exécute le pipeline YOLO -> tracking -> reconnaissance.
 //! - [`known_faces`] : chargement et rechargement à chaud de `known_faces/`.
+//! - [`face_library`] : gardien de `known_faces/` (captures, suppressions,
+//!   partage des photos entre caméras).
 //! - [`motion`] : pré-filtre de mouvement qui décide si YOLO doit tourner.
 //! - [`overlay`] : incrustation des bounding-box sur la frame vidéo.
 //! - [`thumbnail`] : vignette de détection embarquée dans les événements.
@@ -20,6 +22,7 @@
 mod capture_loop;
 mod clips;
 mod codec;
+mod face_library;
 mod known_faces;
 mod models;
 mod motion;
@@ -31,23 +34,27 @@ mod tracking;
 mod worker;
 
 pub use clips::ClipRecorder;
+pub use face_library::{FaceCommand, FaceReply};
 pub use recording::RecordingFormat;
-pub use state::{DEFAULT_MAX_STREAM_CLIENTS, SharedState};
+pub use state::{DEFAULT_MAX_STREAM_CLIENTS, EnrollmentRequest, SharedState};
 
 use anyhow::{Context, Result};
 use image::RgbImage;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, atomic::AtomicBool, mpsc};
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 use v4l::buffer::Type;
 use v4l::prelude::*;
 use v4l::video::Capture;
 
 use crate::config::Config;
 use crate::h264::{H264Encoder, H264Stream};
+use crate::mqtt::FaceTopic;
 use crate::vision::BoundingBox;
 
 use capture_loop::{DETECTION_INTERVAL, H264Output, Pipeline};
+use face_library::{FaceLibrary, Sharing};
 use models::Models;
 use worker::EventPublishing;
 
@@ -81,9 +88,40 @@ pub fn start_camera_loop(
     // Allocation de 2 buffers MMAP
     let stream = MmapStream::with_buffers(&dev, Type::VideoCapture, 2)?;
 
+    // Partage des photos de référence entre caméras : il faut le broker pour
+    // les transporter, et le secret des tickets pour les signer (voir
+    // `face_library`).
+    let sharing_secret = sharing_secret(&config);
+    let (face_topic, face_events) = match &sharing_secret {
+        Some(_) => {
+            let (events, received) = tokio::sync::mpsc::unbounded_channel();
+            (Some(FaceTopic { events }), Some(received))
+        }
+        None => (None, None),
+    };
+
     // Chargement des modèles IA (YOLO, YuNet, ArcFace) et de la base de
     // visages connus.
-    let models = Models::load(&config)?;
+    let models = Models::load(&config, face_topic)?;
+
+    // Bibliothèque de visages : seule à écrire dans `known_faces/`. Elle
+    // reçoit les captures et suppressions des interfaces par l'état partagé,
+    // et les photos des autres caméras par le broker.
+    match state.take_face_commands() {
+        Some(commands) => FaceLibrary {
+            dir: PathBuf::from(&config.detection.known_faces_dir),
+            camera: config.camera.name.clone(),
+            face_detector: Arc::clone(&models.face_detector),
+            face_embedder: Arc::clone(&models.face_embedder),
+            known_people: Arc::clone(&models.known_people),
+            cache: models.face_cache,
+            sharing: sharing_secret
+                .zip(models.mqtt.clone())
+                .map(|(secret, mqtt)| Sharing { mqtt, secret }),
+        }
+        .spawn(commands, face_events),
+        None => warn!("⚠️ Bibliothèque de visages déjà démarrée : captures indisponibles."),
+    }
 
     // Canal non-bloquant pour la détection IA en arrière-plan
     let (detect_tx, detect_rx) = mpsc::sync_channel::<RgbImage>(1);
@@ -136,14 +174,34 @@ pub fn start_camera_loop(
             detect_interval: DETECTION_INTERVAL,
             detect_idle,
             last_boxes,
-            face_detector: models.face_detector,
-            face_embedder: models.face_embedder,
-            known_people: models.known_people,
-            known_faces_dir: config.detection.known_faces_dir.clone(),
             clips,
             h264,
         },
     )
+}
+
+/// Secret qui signe les photos partagées, ou `None` si le partage est
+/// inactif — ce qui est dit au démarrage, plutôt que découvert en cherchant
+/// pourquoi une caméra ne reconnaît personne.
+fn sharing_secret(config: &Config) -> Option<Vec<u8>> {
+    if !config.mqtt.enabled {
+        info!("👥 Photos de référence locales à cette caméra (`[mqtt] enabled = false`).");
+        return None;
+    }
+
+    if config.server.stream_ticket_secret.is_empty() {
+        warn!(
+            "⚠️ Photos de référence NON partagées avec les autres caméras : \
+             `[server] stream_ticket_secret` est vide, et c'est lui qui les signe."
+        );
+        return None;
+    }
+
+    info!(
+        "👥 Photos de référence partagées entre caméras (topic \"{}/…\").",
+        config.mqtt.faces_topic
+    );
+    Some(config.server.stream_ticket_secret.as_bytes().to_vec())
 }
 
 /// Construit l'encodeur H.264 du flux de la caméra.

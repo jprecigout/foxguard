@@ -5,7 +5,7 @@
 //! | Présenté | Droits | Par qui |
 //! | --- | --- | --- |
 //! | le jeton d'API (`?token=`, ou mot de passe HTTP Basic sur `GET /`) | TOUS | le propriétaire de la caméra |
-//! | un ticket du MANAGER (`?ticket=`, secret partagé) | une portée, deux minutes | l'interface du manager |
+//! | un ticket du MANAGER (`?ticket=`, secret partagé) | une portée (direct, surveillance, enrôlement, clip), deux minutes | l'interface du manager |
 //! | un ticket de SESSION (`?ticket=`, clé de la caméra) | une portée, quelques heures | une page servie par la caméra |
 //!
 //! Le jeton n'est plus jamais injecté dans une page servie sans
@@ -336,7 +336,12 @@ mod tests {
     fn the_api_token_grants_everything() {
         let state = state(Some(SECRET));
 
-        for scope in [Scope::Stream, Scope::Monitoring, Scope::Clip("a.mp4")] {
+        for scope in [
+            Scope::Stream,
+            Scope::Monitoring,
+            Scope::Enrollment,
+            Scope::Clip("a.mp4"),
+        ] {
             assert_eq!(
                 authorize(&auth(Some("jeton"), None), &state, scope),
                 Some(Access::Token)

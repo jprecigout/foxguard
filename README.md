@@ -9,7 +9,8 @@
 * **Détection d'objets par IA** : Analyse des flux vidéo en temps réel à l'aide d'un modèle YOLO26 (via `tract-onnx`), restreint aux classes personne / chat / chien.
 * **Tracking des personnes** : Suivi de chaque personne détectée d'une frame à l'autre (association par IoU), pour ne relancer la reconnaissance faciale que lorsque c'est nécessaire (nouvelle personne, déplacement significatif, ou périodiquement).
 * **Reconnaissance faciale** : Détection et alignement du visage (YuNet, recadré en 112x112) puis extraction d'une empreinte faciale (ArcFace / MobileFaceNet), comparée par similarité cosinus à une base de visages connus.
-* **Capture de photo de référence depuis l'interface web** : Un bouton « Capturer » enregistre la frame webcam courante comme nouveau gabarit de référence pour un nom donné. Plusieurs captures (angles/poses différents) s'accumulent pour la même personne au lieu de se remplacer, ce qui rend la reconnaissance plus fiable (voir `known_faces/`).
+* **Capture de photo de référence depuis l'interface web** : Un bouton « Capturer » enregistre la frame webcam courante comme nouveau gabarit de référence pour un nom donné — depuis l'interface de la caméra, ou depuis l'onglet **« Visages »** du manager, en choisissant la caméra devant laquelle se placer. Plusieurs captures (angles/poses différents) s'accumulent pour la même personne au lieu de se remplacer, ce qui rend la reconnaissance plus fiable (voir `known_faces/`). La caméra vérifie qu'un visage figure sur la photo avant de l'accepter.
+* **Photos de référence partagées entre caméras** : chaque photo capturée (ou supprimée) sur une caméra est publiée, **signée**, sur le broker MQTT et appliquée par toutes les autres — y compris celles qui étaient éteintes ou qui rejoignent l'installation plus tard (voir « L'enregistrement des visages »).
 * **Interface Web de Contrôle** : Panneau de contrôle moderne intégré et servi via le framework web Axum (`crates/camera/static/controller.html`).
 * **Streaming Vidéo en Direct** : Diffusion par WebSocket (`/ws`) en **H.264 décodé par le navigateur** (WebCodecs) et dessiné dans un `<canvas>`. C'est le SEUL format vidéo de la caméra : **1651 kb/s en MJPEG contre 76 kb/s en H.264** sur la même scène, 21 fois moins. Encodage logiciel (openh264), et **aucune frame n'est encodée tant que personne ne regarde, qu'aucun enregistrement n'est en cours et que la surveillance est éteinte**.
 * **Flux RTSP (optionnel)** : Le même flux, servi en RTSP (`rtsp://<caméra>:8554/stream?token=...`), lisible par n'importe quel lecteur ou enregistreur vidéo (VLC, ffmpeg, Home Assistant, Frigate, un NVR). Seul le SERVEUR est optionnel : l'encodage, lui, a lieu de toute façon pour les interfaces web et les enregistrements (voir `[rtsp]`).
@@ -19,7 +20,7 @@
 * **Enregistrement Vidéo** : Sauvegarde en **MP4 fragmenté** (H.264) — une vingtaine de fois plus léger que le format d'images JPEG qui l'a précédé, lisible par un `<video>` de navigateur comme par VLC, et *résistant à la troncature* : une coupure de courant n'y coûte que le dernier fragment, là où un MP4 ordinaire serait intégralement perdu. Activable dynamiquement depuis l'interface web, avec liste et relecture directement dans l'UI.
 * **Alertes par E-mail** : Notification HTML automatique (avec logo et photo de la détection en pièces jointes inline) en cas de détection, avec gestion de délai (*cooldown*) pour éviter le spam.
 * **Publication MQTT (optionnelle)** : Publie un message JSON sur un broker MQTT à chaque *changement* d'état de reconnaissance d'une personne suivie (nouvelle personne inconnue, ou identification/perte d'identification), avec le nom de la caméra, l'horodatage, le nom de la personne si elle est connue, une **vignette** de la détection et la référence du **clip** correspondant. Désactivée par défaut, activable via `[mqtt] enabled = true` (voir Configuration ci-dessous).
-* **Sécurité** : l'interface du manager exige un mot de passe (Argon2id) ; elle ouvre les caméras avec des **tickets signés** à portée limitée (direct en lecture seule, un clip, l'interrupteur), sans jamais connaître leur jeton ; tentatives d'authentification limitées par adresse, comparaisons en temps constant, TLS par reverse-proxy Caddy en option.
+* **Sécurité** : l'interface du manager exige un mot de passe (Argon2id) ; elle ouvre les caméras avec des **tickets signés** à portée limitée (direct en lecture seule, un clip, l'interrupteur, l'enregistrement de visages), sans jamais connaître leur jeton ; tentatives d'authentification limitées par adresse, comparaisons en temps constant, TLS par reverse-proxy Caddy en option.
 * **Timeline des détections (interface du manager)** : Pour chaque caméra, une bande de 24 heures qui situe les détections dans la journée, et une pellicule de vignettes qui montre ce qui s'est passé. Un clic ouvre le clip correspondant — et un bouton donne accès au **direct** de la caméra.
 * **Mosaïque des directs (interface du manager)** : Toutes les caméras en direct sur un seul écran, ou une seule en grand / en plein écran. Le H.264 est décodé par l'interface elle-même, qui ouvre le WebSocket de chaque caméra avec un **ticket signé par le manager** : court, lié à une caméra, en lecture seule — le manager ne connaît le jeton d'API d'aucune caméra.
 * **Overlay Graphique Natif** : Dessin de boîtes englobantes (*bounding boxes*) et de libellés textuels optimisés grâce à la police bitmap `font8x8`.
@@ -103,10 +104,11 @@ de travail.
 * **`crates/camera/src/main.rs`** : Point d'entrée de l'application — bannière de démarrage, chargement de `camera-config.toml`, initialisation de l'état partagé, lancement de la boucle caméra (tâche bloquante) et du serveur Axum.
 * **`crates/camera/src/capture/`** : Capture caméra (V4L2) et pipeline de traitement, découpé par responsabilité (chaque étape a son propre fichier ; c'est `mod.rs` qui les enchaîne).
   * **`mod.rs`** : `start_camera_loop` — ouverture du périphérique V4L2, chargement des modèles et de la base de visages connus, démarrage du worker de reconnaissance, puis boucle de capture.
-  * **`state.rs`** : `SharedState`, état partagé avec le serveur HTTP/WebSocket (surveillance/enregistrement actifs, jeton API, canal de diffusion, capture de référence en attente).
+  * **`state.rs`** : `SharedState`, état partagé avec le serveur HTTP/WebSocket (surveillance/enregistrement actifs, jeton API, canal de diffusion, capture de référence en attente, commandes de la bibliothèque de visages).
   * **`models.rs`** : Chargement des modèles IA (YOLO, YuNet, ArcFace) et de la base de visages connus au démarrage (`Models`).
   * **`tracking.rs`** : Suivi des personnes d'une frame à l'autre par IoU (`PersonTracker`) et reconnaissance faciale parallèle (YuNet + ArcFace, parallélisée avec Rayon). Détecte aussi, sans effet de bord, les *changements* d'état de reconnaissance de chaque personne suivie (inconnue ↔ identifiée), pour piloter la publication MQTT (voir `worker.rs` et `../mqtt.rs`).
-  * **`known_faces.rs`** : Chargement (parallélisé avec Rayon) et rechargement à chaud du dossier `known_faces/`, et capture de photo de référence depuis l'UI web (rechargement en tâche de fond via `tokio::task::spawn_blocking`).
+  * **`known_faces.rs`** : Chargement (parallélisé avec Rayon) et rechargement à chaud du dossier `known_faces/`, avec un cache d'empreintes qui ne réanalyse que les photos nouvelles ; transmission de la frame d'une capture de référence à la bibliothèque de visages.
+  * **`face_library.rs`** : Bibliothèque de visages — seul composant à écrire dans `known_faces/` : captures (avec vérification qu'un visage est présent), suppressions, photos reçues des autres caméras, et partage signé sur MQTT avec réconciliation à chaque connexion au broker (voir « L'enregistrement des visages »).
   * **`worker.rs`** : Thread d'arrière-plan (`tokio::task::spawn_blocking`) qui exécute le pipeline YOLO → tracking → reconnaissance, et publie sur MQTT (si activé) les changements d'état retournés par `tracking.rs`.
   * **`overlay.rs`** : Incrustation des bounding-box et de leur légende sur la frame vidéo.
   * **`motion.rs`** : Pré-filtre de mouvement — décide, en comparant deux miniatures de l'image, si l'inférence YOLO vaut la peine d'être lancée. Porte les deux garde-fous (rémanence après mouvement, passage périodique de sécurité) qui évitent que cette économie coûte des détections.
@@ -115,7 +117,7 @@ de travail.
   * **`codec.rs`** : Décodage YUYV → RGB, parallélisé avec Rayon.
   * **`recording.rs`** : Écriture des enregistrements et des clips en MP4 fragmenté, avec une durée réelle par image.
   * **`capture_loop.rs`** : Boucle principale de lecture V4L2 — incrustation des boîtes, alerte e-mail, alimentation des clips, encodage H.264, enregistrement disque et diffusion WebSocket. Rien n'y est encodé tant que personne n'en a l'usage, et la frame n'y est décodée **qu'une fois et que si quelqu'un en a besoin** — sur un Raspberry Pi, qui fournit du YUYV, le chemin nominal ne la décode donc pas du tout. C'est aussi là que la **cadence de la reconnaissance** est décidée (250 ms), avant la copie de la frame : le worker ne reçoit que les frames qu'il va réellement analyser.
-* **`crates/camera/src/api.rs`** : Routage Axum, page de contrôle (`GET /`, HTTP Basic), vue en direct seule (`GET /live`), interrupteur de surveillance seul (`GET /control`) et lecteur d'un enregistrement (`GET /play/{filename}`) — ces trois pages exigeant un ticket de leur portée —, WebSocket vidéo H.264 authentifié par jeton ou ticket (`GET /ws`, plafonné par `[server] max_stream_clients`), qui porte la vidéo dans un sens et les commandes JSON dans l'autre (`set_monitoring`, `set_detection`, `set_recording`, `capture_reference`), état et pilotage de la surveillance en HTTP (`GET /api/monitoring`, `POST /api/monitoring`, voir « Le pilotage depuis le manager »), liste (`GET /api/recordings`), téléchargement (`GET /recordings/{filename}`, délégué à `ServeFile` donc servi par plages d'octets, ce dont un `<video>` a besoin pour se déplacer dans un MP4) et suppression (`DELETE /api/recordings/{filename}?token=...`, authentifiée par le même jeton que le WebSocket) des enregistrements.
+* **`crates/camera/src/api.rs`** : Routage Axum, page de contrôle (`GET /`, HTTP Basic), vue en direct seule (`GET /live`), interrupteur de surveillance seul (`GET /control`) et lecteur d'un enregistrement (`GET /play/{filename}`) — ces trois pages exigeant un ticket de leur portée —, WebSocket vidéo H.264 authentifié par jeton ou ticket (`GET /ws`, et `GET /ws/enrollment` pour l'enregistrement de visages, plafonnés par `[server] max_stream_clients`), qui porte la vidéo dans un sens et les commandes JSON dans l'autre (`set_monitoring`, `set_detection`, `set_recording`, `capture_reference`, `delete_reference` — les deux dernières répondant sur le même WebSocket), état et pilotage de la surveillance en HTTP (`GET /api/monitoring`, `POST /api/monitoring`, voir « Le pilotage depuis le manager »), liste (`GET /api/recordings`), téléchargement (`GET /recordings/{filename}`, délégué à `ServeFile` donc servi par plages d'octets, ce dont un `<video>` a besoin pour se déplacer dans un MP4) et suppression (`DELETE /api/recordings/{filename}?token=...`, authentifiée par le même jeton que le WebSocket) des enregistrements.
 * **`crates/camera/src/auth.rs`** : Authentification du serveur HTTP — jeton, tickets du manager et tickets de session (voir « Ce qui est authentifié »), HTTP Basic de l'interface complète, limitation des échecs par adresse, en-têtes de sécurité.
 * **`crates/camera/src/h264/`** : Encodage H.264 du flux (openh264), sans aucune connaissance du réseau.
   * **`i420.rs`** : Conversion vers le format d'entrée de l'encodeur, depuis le YUYV brut de la caméra (chemin le moins coûteux) ou depuis une image RGB déjà incrustée des boîtes de détection.
@@ -141,7 +143,7 @@ de travail.
 * **`crates/camera/src/config.rs`** : Chargement et structures de `camera-config.toml` (serveur, caméra, détection, e-mail, MQTT, enregistrements et clips, mouvement, réglages de l'encodage H.264, serveur RTSP).
 * **`crates/camera/src/mail.rs`** : Construction et envoi des alertes e-mail (HTML multipart avec logo et photo de la détection).
 * **`crates/camera/src/retention.rs`** : Tâche de fond qui supprime les enregistrements dépassant la durée de conservation configurée (`[recording] retention_days`), et prédicat partagé `is_recording_file` qui définit ce qui est un enregistrement pour la liste, le téléchargement, la suppression et la purge.
-* **`crates/camera/src/mqtt.rs`** : Connexion à un broker MQTT et publication des événements de détection (nom de caméra, horodatage, statut connu/inconnu) à chaque changement d'état ; fonctionnalité optionnelle (voir `[mqtt]` dans `camera-config.toml`).
+* **`crates/camera/src/mqtt.rs`** : Connexion à un broker MQTT et publication des événements de détection (nom de caméra, horodatage, statut connu/inconnu) à chaque changement d'état ; abonnement au topic des photos de référence partagées et publication de celles de la caméra ; fonctionnalité optionnelle (voir `[mqtt]` dans `camera-config.toml`).
 * **`crates/camera/src/util.rs`** : Petits utilitaires transverses (verrouillage de mutex tolérant à l'empoisonnement).
 * **`crates/camera/static/controller.html`** : Interface utilisateur web — flux vidéo H.264 décodé par WebCodecs, interrupteurs, capture de photo de référence, liste et lecture des enregistrements (un `<video>` natif, les enregistrements étant des MP4).
 * **`crates/camera/static/clip-player.html`** : Lecteur autonome d'un enregistrement, servi par `GET /play/{fichier}`. Un `<video>` natif suffit, les enregistrements étant des MP4 ordinaires.
@@ -150,9 +152,9 @@ de travail.
 * **`crates/camera/assets/logo.svg`** : Logo FoxGuard — affiché dans ce README et embarqué dans le binaire (`include_bytes!`) pour les e-mails d'alerte.
 * **`known_faces/`** : Photos de référence pour la reconnaissance faciale, nommées `<nom>_<horodatage>.jpg` (plusieurs fichiers possibles par personne).
 * **`output_record/`** : Enregistrements vidéo générés par l'application, en MP4 fragmenté (voir « Les enregistrements »).
-* **`crates/manager/`** : Le manager — `config.rs` (sa configuration `manager-config.toml`), `ingest.rs` (abonnement MQTT et décodage des événements), `db.rs` (persistance PostgreSQL), `retention.rs` (purge des événements trop anciens), `auth.rs` (authentification HTTP Basic / Argon2id, limitation des échecs, en-têtes de sécurité), `api.rs` (API HTTP de consultation, signature des tickets, redirections vers les caméras, service du bundle de l'interface), `migrations/` (schéma, appliqué au démarrage).
-* **`crates/protocol/`** : `DetectionEvent` et `PersonStatus`, le contrat partagé entre la caméra et le manager ; `ticket.rs` (tickets signés à portée limitée) et `auth.rs` (comparaison en temps constant, limitation des échecs), les règles de sécurité que les deux appliquent à l'identique.
-* **`ui/`** : Interface React du manager — `App.tsx` (composition), `components/` (barre de jour, timeline d'une caméra, mosaïque et flux des directs, cadre de lecture d'un clip ou de l'interrupteur), `route.ts` (navigation par fragment d'URL), `timeline.ts` (géométrie temporelle de la bande de 24 h), `grouping.ts` (regroupement par caméra), `generated/` (types d'API générés depuis le Rust). Voir `ui/README.md`.
+* **`crates/manager/`** : Le manager — `config.rs` (sa configuration `manager-config.toml`), `ingest.rs` (abonnement MQTT, décodage des événements et vérification des photos de référence partagées), `db.rs` (persistance PostgreSQL, événements et photos de référence), `retention.rs` (purge des événements trop anciens), `auth.rs` (authentification HTTP Basic / Argon2id, limitation des échecs, en-têtes de sécurité), `api.rs` (API HTTP de consultation, signature des tickets, redirections vers les caméras, service du bundle de l'interface), `migrations/` (schéma, appliqué au démarrage).
+* **`crates/protocol/`** : `DetectionEvent` et `PersonStatus`, le contrat partagé entre la caméra et le manager ; `faces.rs` (messages signés des photos de référence partagées, noms de fichiers et de personnes) ; `ticket.rs` (tickets signés à portée limitée) et `auth.rs` (comparaison en temps constant, limitation des échecs), les règles de sécurité que les deux appliquent à l'identique.
+* **`ui/`** : Interface React du manager — `App.tsx` (composition), `components/` (barre de jour, timeline d'une caméra, mosaïque et flux des directs, enregistrement des visages, cadre de lecture d'un clip ou de l'interrupteur), `route.ts` (navigation par fragment d'URL), `timeline.ts` (géométrie temporelle de la bande de 24 h), `grouping.ts` (regroupement par caméra), `generated/` (types d'API générés depuis le Rust). Voir `ui/README.md`.
 * **`deploy/camera/`** : `Dockerfile` de l'image Raspberry Pi.
 * **`deploy/server/`** : `Dockerfile` du manager, `compose.yml` (manager + broker MQTT) et `mosquitto.conf`.
 
@@ -402,13 +404,15 @@ Trois façons d'entrer sur une caméra, trois niveaux de droits
 | un ticket du **manager** (`?ticket=`, secret partagé) | **une** portée, deux minutes | l'interface du manager |
 | un ticket de **session** (`?ticket=`, clé de la caméra) | la même portée, douze heures | une page servie par la caméra |
 
-Une portée, c'est **regarder le direct**, **piloter la surveillance**, ou
-**lire UN clip** — jamais plus (voir `crates/protocol/src/ticket.rs`).
+Une portée, c'est **regarder le direct**, **piloter la surveillance**,
+**enregistrer des visages**, ou **lire UN clip** — jamais plus (voir
+`crates/protocol/src/ticket.rs`).
 
 | Route | Exige | Pourquoi |
 | --- | --- | --- |
 | `GET /` | le jeton, en **HTTP Basic** | l'interface complète, qui reçoit le jeton pour tout piloter |
 | `GET /ws` | jeton, ou ticket « direct » (**lecture seule** : commandes ignorées) | le direct |
+| `GET /ws/enrollment` | jeton, ou ticket « enrôlement » (direct + `capture_reference`/`delete_reference` seulement) | enregistrer des visages |
 | `GET /live` | jeton, ou ticket « direct » | la page de direct seule |
 | `GET /control` | jeton, ou ticket « surveillance » | la page d'interrupteur |
 | `POST /api/monitoring` | jeton, ou ticket « surveillance » | coupe la surveillance |
@@ -455,7 +459,10 @@ Et autour :
    s'il est utilisé ainsi.
 3. **Un secret de tickets commun à toutes les caméras.** Qui le vole signe pour
    n'importe laquelle — mais seulement des portées limitées, jamais la
-   suppression des archives.
+   suppression des archives. Il signe aussi les photos de référence
+   partagées : avec lui et un accès au broker, on peut ajouter un visage
+   « connu » — donc qui ne déclenche plus d'alerte — sur toutes les caméras.
+   Traitez-le comme un mot de passe.
 
 ---
 
@@ -473,7 +480,10 @@ caméras publient et expose leur historique :
 | `GET /api/events/{id}/clip` | redirection vers le clip, sur la caméra, avec un ticket |
 | `GET /api/cameras` | caméras ayant émis au moins un événement encore en mémoire |
 | `GET /api/cameras/{nom}/stream` | ticket de direct (URL du WebSocket de la caméra) |
+| `GET /api/cameras/{nom}/enrollment` | ticket d'enregistrement de visages (URL du WebSocket d'enrôlement de la caméra) |
 | `GET /api/cameras/{nom}/control` | redirection vers l'interrupteur de la caméra, avec un ticket |
+| `GET /api/faces` | photos de référence partagées par les caméras, par personne |
+| `GET /api/faces/{fichier}/photo` | une photo de référence |
 | `GET /` | interface React (`[server] ui_dir`) |
 
 Toutes exigent l'authentification du manager, sauf `GET /api/health` (voir
@@ -481,8 +491,8 @@ Toutes exigent l'authentification du manager, sauf `GET /api/health` (voir
 
 Le manager n'a **aucune route d'écriture** : il agrège, expose, et signe des
 tickets à portée limitée. Les caméras renvoyées par `GET /api/cameras` portent
-la route de leur direct (`stream_url`) et de leur interrupteur de surveillance
-(`control_url`) — ce dernier étant une page servie par la caméra elle-même
+la route de leur direct (`stream_url`), de leur enregistrement de visages
+(`enrollment_url`) et de leur interrupteur de surveillance (`control_url`) — ce dernier étant une page servie par la caméra elle-même
 (voir « Le pilotage depuis le manager »).
 
 Les événements renvoyés portent un identifiant et des URL de média prêtes à
@@ -652,6 +662,62 @@ Sans URL publique déclarée par la caméra, ou sans secret de tickets, ni clip,
 ni direct, ni interrupteur ne sont proposés : mieux vaut pas de lien qu'un lien
 mort. La vignette, elle, reste visible dans tous les cas.
 
+### L'enregistrement des visages
+
+L'onglet **« Visages »** de l'interface (`#/visages`) enregistre les photos de
+référence de la reconnaissance faciale, et montre qui est enregistré sur
+l'ensemble des caméras.
+
+1. **On choisit la caméra devant laquelle se placer.** L'interface demande au
+   manager un ticket de portée « enrôlement » (`GET
+   /api/cameras/{nom}/enrollment`) et ouvre avec lui le WebSocket
+   `/ws/enrollment` de la caméra : le direct, pour se cadrer, plus deux
+   commandes — capturer et supprimer une photo — et rien d'autre. Une portée
+   à part et non une extension du direct : une photo de référence fait d'une
+   personne quelqu'un de **connu**, dont la présence ne déclenche plus
+   d'alerte. Regarder ne doit pas permettre d'autoriser.
+2. **« Capturer »** fonctionne exactement comme depuis l'interface de la
+   caméra : elle prend la frame suivante, vérifie qu'un visage y figure
+   (sinon elle refuse, en le disant), l'écrit dans `known_faces/<nom>_<horodatage>.jpg`
+   et recharge sa base. Chaque capture s'ajoute aux précédentes ; un nom déjà
+   enregistré ajoute une photo à cette personne.
+3. **La caméra publie la photo** sur le broker, en message **retenu** sur
+   `<faces_topic>/<fichier>` et **signé** avec le secret des tickets. Toutes
+   les autres caméras la reçoivent, la vérifient, l'écrivent dans leur propre
+   `known_faces/` et rechargent leur base ; le manager l'ajoute à la liste.
+
+Le manager ne touche à aucune photo : il signe l'autorisation, et affiche ce
+que les caméras se sont partagé. La croix d'une photo la supprime **sur toutes
+les caméras** : la caméra connectée publie une « pierre tombale » retenue.
+
+Ce qui rend le partage robuste :
+
+* **Messages retenus.** Le broker garde la dernière version de chaque photo
+  et la remet à toute caméra qui s'abonne : une caméra redémarrée, ou ajoutée
+  à l'installation, reçoit toutes les photos sans que personne n'ait à les lui
+  renvoyer. Une suppression est une pierre tombale et non un message vide —
+  sans quoi une caméra éteinte au moment de la suppression ne l'apprendrait
+  jamais, et republierait la photo à son retour.
+* **Réconciliation.** À chaque connexion au broker, une fois les messages
+  retenus reçus, une caméra publie les photos locales que le broker ignore :
+  celles capturées pendant une coupure, et celles qui précèdent le partage
+  (déposées à la main, ou capturées avant cette version). Seuls les noms
+  partageables sont concernés (lettres sans accents, chiffres, `-`, `_`).
+* **Signature.** Une photo non signée, ou signée avec un autre secret, est
+  refusée par les caméras comme par le manager : sans cela, quiconque atteint
+  le broker pourrait ajouter son visage aux personnes autorisées, sur toutes
+  les caméras d'un coup.
+* **Rechargement incrémental.** Une caméra ne réanalyse que les photos
+  nouvelles : chaque capture, sur n'importe quelle caméra, fait recharger
+  toutes les autres.
+
+Prérequis : MQTT activé sur les caméras, et le secret des tickets renseigné
+partout (`[server] stream_ticket_secret` sur les caméras, `[stream]
+ticket_secret` sur le manager) — c'est lui qui signe les photos. Sans secret,
+une caméra garde ses photos pour elle, comme avant, et le journal le dit au
+démarrage. Une caméra n'apparaît dans la liste qu'après sa première détection
+publiée, comme dans la mosaïque.
+
 ### Déploiement
 
 Copier `manager-config-sample.toml` en `manager-config.toml` (gitignoré, il
@@ -663,9 +729,9 @@ peut contenir des identifiants). Trois choses y sont obligatoires :
 * la section `[auth]`, sans laquelle le manager **refuse de démarrer** (voir
   « Authentification » plus bas).
 
-Pour le direct, les clips et l'interrupteur, renseignez aussi `[stream]
-ticket_secret` (le même que sur les caméras, voir « La mosaïque des
-directs »).
+Pour le direct, les clips, l'interrupteur et l'enregistrement des visages,
+renseignez aussi `[stream] ticket_secret` (le même que sur les caméras, voir
+« La mosaïque des directs »).
 
 Le `compose.yml` fournit PostgreSQL, et Mosquitto **en option**. Renseignez
 d'abord le mot de passe de la base dans un `.env` à côté du compose :
@@ -921,6 +987,10 @@ toutes les caméras (`#/direct`), ou une seule en grand (`#/direct/<caméra>`),
 décodés par l'interface elle-même (voir « La mosaïque des directs » plus
 haut).
 
+Un troisième, **« Visages »** (`#/visages`), enregistre les photos de
+référence de la reconnaissance faciale devant la caméra de son choix, et
+liste les personnes enregistrées (voir « L'enregistrement des visages »).
+
 Le bundle est produit par une étape Node du `Dockerfile` du manager : l'image
 ne dépend d'aucun `npm run build` lancé à la main.
 
@@ -1015,12 +1085,12 @@ copiée à côté du binaire, et non du code qui voyage dans le crate.
 
 Partez de `camera-config-sample.toml` pour créer votre propre `camera-config.toml`.
 
-* **`[server]`** : `host`, `port`, `api_token` (jeton qui donne tous les droits : mot de passe de l'interface complète, et paramètre `?token=` pour le WebSocket, les enregistrements et, si `[rtsp] require_token`, le flux RTSP — voir « Ce qui est authentifié »), `public_url` (URL par laquelle cette caméra est joignable depuis un navigateur, ex. `"http://192.168.1.42:8080"` — publiée dans les événements pour que le manager ouvre ses clips, son direct et son interrupteur ; vide par défaut, auquel cas rien n'est proposé), `stream_ticket_secret` (secret partagé avec le manager pour signer les tickets ; vide par défaut, auquel cas ses tickets sont refusés), `manager_origin` (seule origine autorisée à afficher les pages de la caméra dans un cadre ; vide par défaut) et `max_stream_clients` (plafond de clients du flux vidéo, 8 par défaut).
+* **`[server]`** : `host`, `port`, `api_token` (jeton qui donne tous les droits : mot de passe de l'interface complète, et paramètre `?token=` pour le WebSocket, les enregistrements et, si `[rtsp] require_token`, le flux RTSP — voir « Ce qui est authentifié »), `public_url` (URL par laquelle cette caméra est joignable depuis un navigateur, ex. `"http://192.168.1.42:8080"` — publiée dans les événements pour que le manager ouvre ses clips, son direct et son interrupteur ; vide par défaut, auquel cas rien n'est proposé), `stream_ticket_secret` (secret partagé avec le manager pour signer les tickets, et qui signe aussi les photos de référence partagées entre caméras ; vide par défaut, auquel cas ses tickets sont refusés et ses photos restent locales), `manager_origin` (seule origine autorisée à afficher les pages de la caméra dans un cadre ; vide par défaut) et `max_stream_clients` (plafond de clients du flux vidéo, 8 par défaut).
 * **`[camera]`** : `device_index` (index du périphérique V4L2, ex. `0` pour `/dev/video0`), `name` (nom de la caméra inclus dans les événements MQTT, optionnel — `"foxguard"` par défaut).
 * **`[detection]`** : `enabled` (surveillance active au démarrage), chemins des 3 modèles ONNX (`model_path`, `model_detect_face_path`, `model_face_path`, tous dans `crates/camera/models/`), tailles d'entrée (`input_size` pour YOLO, qui doit correspondre à la taille d'export du modèle ONNX — `320` pour le modèle fourni —, `input_face_size` pour ArcFace), `confidence_threshold` (seuil de détection YOLO), `email_cooldown_secs` et `known_faces_dir` (dossier des photos de référence, `"known_faces"` par défaut, relatif au répertoire de travail — à renseigner en absolu pour un déploiement en conteneur ou en service systemd).
 * **`[email]`** : `enabled`, identifiants SMTP (`smtp_server`, `smtp_user`, `smtp_password`), `from_address`, `to_address`.
 * **`[recording]`** *(optionnel, section entière absente = valeurs par défaut)* : `dir` (dossier des enregistrements, `"output_record"` par défaut, relatif au répertoire de travail — à renseigner en absolu pour un déploiement en conteneur ou en service systemd), `retention_days` (durée de conservation des enregistrements, en jours — **`0` désactive entièrement la suppression automatique**) et `cleanup_interval_secs` (intervalle entre deux passages, `3600` par défaut). Un passage a aussi lieu au démarrage, pour purger ce qui a expiré pendant un arrêt prolongé. L'âge est déterminé par la date de dernière modification du fichier, jamais par son nom : un enregistrement en cours d'écriture ne peut donc pas être supprimé sous la caméra. La même section règle les **clips d'événement** : `clips_enabled`, `clip_pre_secs` (durée conservée *avant* la détection, 4 s par défaut) et `clip_post_secs` (8 s). Les clips partagent le dossier, le format et la rétention des enregistrements — ils sont donc listés, servis, supprimés et purgés par le même code.
-* **`[mqtt]`** *(optionnel, section entière absente = désactivé)* : `enabled`, `broker_host`, `broker_port` (`1883` par défaut), `username`/`password` (authentification optionnelle, pas de TLS), `topic` (`"foxguard/detections"` par défaut). Publie un message JSON à chaque changement d'état de reconnaissance, par exemple :
+* **`[mqtt]`** *(optionnel, section entière absente = désactivé)* : `enabled`, `broker_host`, `broker_port` (`1883` par défaut), `username`/`password` (authentification optionnelle, pas de TLS), `topic` (`"foxguard/detections"` par défaut), `faces_topic` (préfixe des topics des photos de référence partagées, `"foxguard/faces"` par défaut — le même sur toutes les caméras et sur le manager). Publie un message JSON à chaque changement d'état de reconnaissance, par exemple :
   ```json
   {"camera": "salon", "timestamp": "2026-09-18T15:42:07+02:00", "status": "known", "name": "jerome",
    "thumbnail": "<JPEG en base64>", "base_url": "http://192.168.1.42:8080", "clip": "evt_20260918_154207123.mp4"}
@@ -1289,7 +1359,7 @@ cadre noir. Le pilotage et les enregistrements, eux, restent accessibles.
 Utilisez l'interface pour :
 
 * Activer ou désactiver la surveillance (détection IA + enregistrement) — aussi faisable depuis l'interface du manager, voir « Le pilotage depuis le manager ».
-* Capturer une photo de référence webcam pour la reconnaissance faciale (carte « 📸 Photo de référence »), pour un nom donné ; chaque capture s'ajoute aux précédentes pour ce nom.
+* Capturer une photo de référence webcam pour la reconnaissance faciale (carte « Reconnaissance faciale »), pour un nom donné ; chaque capture s'ajoute aux précédentes pour ce nom, et la caméra dit si elle l'a acceptée ou pourquoi elle la refuse (aucun visage détecté, nom invalide). Plus besoin d'activer la surveillance pour capturer. Si le partage est configuré, la photo est envoyée à toutes les autres caméras.
 * Consulter, actualiser, relire et supprimer les enregistrements vidéo sauvegardés.
 
 ---

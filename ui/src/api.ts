@@ -18,11 +18,13 @@
 export type { CameraInfo } from "./generated/CameraInfo";
 export type { EventRecord } from "./generated/EventRecord";
 export type { EventsResponse } from "./generated/EventsResponse";
+export type { FaceRecord } from "./generated/FaceRecord";
 export type { PersonStatus } from "./generated/PersonStatus";
 export type { StreamTicket } from "./generated/StreamTicket";
 
 import type { CameraInfo } from "./generated/CameraInfo";
 import type { EventsResponse } from "./generated/EventsResponse";
+import type { FaceRecord } from "./generated/FaceRecord";
 import type { StreamTicket } from "./generated/StreamTicket";
 
 /** Erreur portant le code HTTP, pour distinguer « serveur injoignable » de « 500 ». */
@@ -74,10 +76,19 @@ export function fetchEventsForDay(day: string, signal?: AbortSignal): Promise<Ev
 }
 
 /**
- * URL du WebSocket d'une caméra, munie d'un ticket de visionnage tout frais.
+ * Photos de référence de la reconnaissance faciale, partagées par les
+ * caméras, triées par personne puis de la plus ancienne à la plus récente.
+ */
+export function fetchFaces(signal?: AbortSignal): Promise<FaceRecord[]> {
+  return getJson<FaceRecord[]>("/api/faces", signal, { cache: "no-store" });
+}
+
+/**
+ * URL du WebSocket d'une caméra, munie d'un ticket tout frais.
  *
- * `streamUrl` est le `stream_url` de la caméra (voir `CameraInfo`). Le ticket
- * expire en quelques minutes : il se demande juste avant d'ouvrir la
+ * `streamUrl` est le `stream_url` de la caméra (direct seul), ou son
+ * `enrollment_url` (direct plus capture de visages) — voir `CameraInfo`. Le
+ * ticket expire en quelques minutes : il se demande juste avant d'ouvrir la
  * connexion, et se redemande à chaque reconnexion.
  */
 export function fetchStreamTicket(streamUrl: string, signal?: AbortSignal): Promise<StreamTicket> {

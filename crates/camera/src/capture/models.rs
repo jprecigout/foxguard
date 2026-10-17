@@ -3,15 +3,16 @@
 //! `super::start_camera_loop`).
 
 use anyhow::Result;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::config::Config;
 use crate::mail::Mailer;
-use crate::mqtt::MqttPublisher;
+use crate::mqtt::{FaceTopic, MqttPublisher};
 use crate::vision::{FaceDetectorYuNet, FaceEmbedder, KnownPerson, ObjectDetector};
 use tracing::{error, info, warn};
 
-use super::known_faces::load_known_faces;
+use super::known_faces::{EmbeddingCache, load_known_faces};
 
 /// Modèles IA et base de visages connus chargés au démarrage de la caméra.
 pub(super) struct Models {
@@ -20,6 +21,10 @@ pub(super) struct Models {
     pub(super) face_detector: Arc<Option<FaceDetectorYuNet>>,
     pub(super) face_embedder: Arc<Option<FaceEmbedder>>,
     pub(super) known_people: Arc<Mutex<Vec<KnownPerson>>>,
+    /// Empreintes calculées au chargement, transmises à la bibliothèque de
+    /// visages pour qu'elle ne les recalcule pas au premier rechargement
+    /// (voir `super::face_library`).
+    pub(super) face_cache: EmbeddingCache,
     // `None` si `[mqtt] enabled = false` (par défaut) : aucune connexion au
     // broker n'est alors tentée (voir `crate::mqtt::MqttPublisher::connect`).
     pub(super) mqtt: Option<MqttPublisher>,
@@ -30,7 +35,10 @@ impl Models {
     /// (détection de visage) et ArcFace/MobileFaceNet (empreintes
     /// faciales), et enfin la base de visages connus (`known_faces/`) à
     /// partir de ces deux derniers.
-    pub(super) fn load(config: &Config) -> Result<Self> {
+    ///
+    /// `faces` : abonnement au topic des photos partagées, si le partage est
+    /// actif (voir `super::start_camera_loop`).
+    pub(super) fn load(config: &Config, faces: Option<FaceTopic>) -> Result<Self> {
         // Initialisation de l'IA (ObjectDetector) et du Mailer
         let detector = ObjectDetector::new(config.detection.clone())?;
         let mailer = Mailer::new(config.email.clone());
@@ -54,15 +62,17 @@ impl Models {
         // Le chargement des visages connus réutilise le détecteur YuNet 640x640
         // partagé, mais via detect_face_native_res() qui scanne les photos plus
         // grandes par fenêtres 640x640 à résolution native (voir sa doc).
-        // Enveloppé dans un Mutex pour pouvoir être rechargé à chaud après une
-        // capture de référence déclenchée depuis l'interface web (voir
-        // `super::known_faces::try_capture_reference`).
+        // Enveloppé dans un Mutex pour pouvoir être rechargé à chaud par la
+        // bibliothèque de visages, après une capture, une suppression ou une
+        // photo reçue d'une autre caméra (voir `super::face_library`).
+        let mut face_cache = EmbeddingCache::default();
         let known_people: Arc<Mutex<Vec<KnownPerson>>> =
             if let (Some(detector), Some(embedder)) = (&*face_detector, &*face_embedder) {
                 Arc::new(Mutex::new(load_known_faces(
                     detector,
                     embedder,
-                    &config.detection.known_faces_dir,
+                    Path::new(&config.detection.known_faces_dir),
+                    &mut face_cache,
                 )))
             } else {
                 warn!("⚠️ YuNet ou ArcFace indisponible.");
@@ -79,7 +89,11 @@ impl Models {
                 "📡 Connexion MQTT activée : {}:{} (topic \"{}\")",
                 config.mqtt.broker_host, config.mqtt.broker_port, config.mqtt.topic
             );
-            Some(MqttPublisher::connect(&config.mqtt))
+            Some(MqttPublisher::connect(
+                &config.mqtt,
+                &config.camera.name,
+                faces,
+            ))
         } else {
             None
         };
@@ -90,6 +104,7 @@ impl Models {
             face_detector,
             face_embedder,
             known_people,
+            face_cache,
             mqtt,
         })
     }

@@ -115,13 +115,38 @@ function statusText(status: StreamStatus): string | null {
   }
 }
 
-export function LiveStream({ streamUrl, camera }: { streamUrl: string; camera: string }) {
+export function LiveStream({
+  streamUrl,
+  camera,
+  onSocket,
+  onMessage,
+}: {
+  streamUrl: string;
+  camera: string;
+  /**
+   * Connexion ouverte (ou `null` quand elle se ferme) : de quoi envoyer des
+   * commandes sur le même WebSocket que la vidéo — c'est ainsi que la vue des
+   * visages demande une capture (voir `FacesView`).
+   */
+  onSocket?: (socket: WebSocket | null) => void;
+  /** Message texte de la caméra autre que l'annonce du codec. */
+  onMessage?: (message: Record<string, unknown>) => void;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [status, setStatus] = useState<StreamStatus>({ kind: "connecting" });
   const pageVisible = usePageVisible();
   const onScreen = useOnScreen(containerRef);
   const visible = pageVisible && onScreen;
+
+  // Rappels tenus dans des références : la connexion ne doit pas être
+  // rouverte parce que le parent a redessiné avec une nouvelle fonction.
+  const onSocketRef = useRef(onSocket);
+  const onMessageRef = useRef(onMessage);
+  useEffect(() => {
+    onSocketRef.current = onSocket;
+    onMessageRef.current = onMessage;
+  });
 
   useEffect(() => {
     // Il n'y a qu'un format : sans WebCodecs, aucun repli possible. On le
@@ -192,6 +217,7 @@ export function LiveStream({ streamUrl, camera }: { streamUrl: string; camera: s
 
       ws.binaryType = "arraybuffer";
       socket = ws;
+      ws.onopen = () => onSocketRef.current?.(ws);
 
       // L'état « en direct » n'est signalé qu'à la première image : le
       // repasser à chaque frame ferait un rendu React par image.
@@ -203,7 +229,7 @@ export function LiveStream({ streamUrl, camera }: { streamUrl: string; camera: s
 
       ws.onmessage = (event: MessageEvent) => {
         if (typeof event.data === "string") {
-          let announcement: { type?: string; codec?: string };
+          let announcement: { type?: string; codec?: string } & Record<string, unknown>;
           try {
             announcement = JSON.parse(event.data);
           } catch {
@@ -211,7 +237,12 @@ export function LiveStream({ streamUrl, camera }: { streamUrl: string; camera: s
             return;
           }
 
-          if (announcement.type !== "config" || !announcement.codec) return;
+          if (announcement.type !== "config") {
+            onMessageRef.current?.(announcement);
+            return;
+          }
+
+          if (!announcement.codec) return;
 
           closeDecoder();
           decoder = new VideoDecoder({
@@ -268,6 +299,7 @@ export function LiveStream({ streamUrl, camera }: { streamUrl: string; camera: s
 
       ws.onclose = () => {
         if (socket === ws) socket = null;
+        onSocketRef.current?.(null);
         retry(showing ? "Flux interrompu" : "Caméra injoignable");
       };
 
@@ -285,6 +317,7 @@ export function LiveStream({ streamUrl, camera }: { streamUrl: string; camera: s
         // Fermeture VOULUE : pas de reconnexion derrière.
         socket.onclose = null;
         socket.close();
+        onSocketRef.current?.(null);
       }
 
       closeDecoder();

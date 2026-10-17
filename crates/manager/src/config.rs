@@ -140,6 +140,13 @@ pub struct MqttConfig {
     /// ce que publient les caméras (`[mqtt] topic` de leur configuration).
     #[serde(default = "default_mqtt_topic")]
     pub topic: String,
+    /// Préfixe des topics des photos de référence partagées par les caméras
+    /// (`[mqtt] faces_topic` de leur configuration, voir
+    /// `foxguard_protocol::faces`). Le manager en tient la liste pour son
+    /// interface — à condition de pouvoir en vérifier la signature, donc que
+    /// `[stream] ticket_secret` soit renseigné.
+    #[serde(default = "default_faces_topic")]
+    pub faces_topic: String,
 }
 
 fn default_mqtt_port() -> u16 {
@@ -148,6 +155,10 @@ fn default_mqtt_port() -> u16 {
 
 fn default_mqtt_topic() -> String {
     "foxguard/detections".to_string()
+}
+
+fn default_faces_topic() -> String {
+    foxguard_protocol::faces::DEFAULT_TOPIC.to_string()
 }
 
 /// Nom de la variable d'environnement qui, si elle est renseignée, prend le
@@ -240,6 +251,7 @@ mod tests {
         assert_eq!(config.mqtt.broker_host, "192.168.1.50");
         assert_eq!(config.mqtt.broker_port, 1883);
         assert_eq!(config.mqtt.topic, "foxguard/detections");
+        assert_eq!(config.mqtt.faces_topic, "foxguard/faces");
         assert_eq!(config.server.port, 8090);
         assert_eq!(config.database.max_connections, 5);
         assert_eq!(config.database.retention_days, 90);
@@ -304,6 +316,7 @@ mod tests {
             broker_host = "broker.local"
             broker_port = 8883
             topic = "maison/+/detections"
+            faces_topic = "maison/visages"
 
             [database]
             url = "postgres://u:p@db/foxguard"
@@ -321,6 +334,7 @@ mod tests {
         assert_eq!(config.server.ui_dir, "/srv/foxguard-ui");
         assert_eq!(config.mqtt.broker_port, 8883);
         assert_eq!(config.mqtt.topic, "maison/+/detections");
+        assert_eq!(config.mqtt.faces_topic, "maison/visages");
         assert_eq!(config.database.max_connections, 20);
         assert_eq!(config.database.retention_days, 30);
     }
