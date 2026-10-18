@@ -145,6 +145,11 @@ et hors des contextes de build Docker (voir `.gitignore` et `.dockerignore`).
 Le manager sert le bundle statique à la racine, et son API sous `/api/*`
 (voir `crates/manager/src/api.rs`) :
 
+Le bundle, l'interface et les URL que renvoie l'API sont tous en chemins
+RELATIFS (`./assets/...`, `api/...`) : derrière un reverse proxy, le manager
+peut donc aussi être publié sous un sous-chemin (`http://serveur/foxguard/`,
+le proxy retirant le préfixe) sans rien configurer.
+
 | Route             | Contenu                                        |
 | ----------------- | ---------------------------------------------- |
 | `GET /`           | ce bundle (`[server] ui_dir` de `manager-config.toml`) |

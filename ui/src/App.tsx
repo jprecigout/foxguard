@@ -23,8 +23,8 @@ export default function App() {
       <header>
         <div className="brand">
           {/* Servi depuis `public/` : le fichier est copié tel quel à la
-              racine du bundle, donc référencé en chemin absolu. */}
-          <img className="logo" src="/logo.svg" alt="" aria-hidden="true" />
+              racine du bundle, à côté de la page : chemin relatif. */}
+          <img className="logo" src="logo.svg" alt="" aria-hidden="true" />
           <h1>
             Fox<span className="fox">Guard</span>
           </h1>

@@ -37,6 +37,11 @@ export class ApiError extends Error {
   }
 }
 
+// Les chemins sont RELATIFS (`api/...`, sans `/` initial), comme les URL que
+// renvoie le manager : ils se résolvent par rapport à la page, si bien que
+// l'interface fonctionne aussi derrière un reverse proxy qui la publie sous un
+// sous-chemin (`http://serveur/foxguard/`). La navigation passe par le hash
+// (voir `route.ts`) : la page reste toujours à la racine de l'application.
 async function getJson<T>(path: string, signal?: AbortSignal, init?: RequestInit): Promise<T> {
   let response: Response;
 
@@ -61,7 +66,7 @@ async function getJson<T>(path: string, signal?: AbortSignal, init?: RequestInit
  * de leur vue en direct quand elles en déclarent une.
  */
 export function fetchCameras(signal?: AbortSignal): Promise<CameraInfo[]> {
-  return getJson<CameraInfo[]>("/api/cameras", signal);
+  return getJson<CameraInfo[]>("api/cameras", signal);
 }
 
 /**
@@ -72,7 +77,7 @@ export function fetchCameras(signal?: AbortSignal): Promise<CameraInfo[]> {
  * fuseaux différents voient la même chose.
  */
 export function fetchEventsForDay(day: string, signal?: AbortSignal): Promise<EventsResponse> {
-  return getJson<EventsResponse>(`/api/events?date=${encodeURIComponent(day)}`, signal);
+  return getJson<EventsResponse>(`api/events?date=${encodeURIComponent(day)}`, signal);
 }
 
 /**
@@ -80,7 +85,7 @@ export function fetchEventsForDay(day: string, signal?: AbortSignal): Promise<Ev
  * caméras, triées par personne puis de la plus ancienne à la plus récente.
  */
 export function fetchFaces(signal?: AbortSignal): Promise<FaceRecord[]> {
-  return getJson<FaceRecord[]>("/api/faces", signal, { cache: "no-store" });
+  return getJson<FaceRecord[]>("api/faces", signal, { cache: "no-store" });
 }
 
 /**

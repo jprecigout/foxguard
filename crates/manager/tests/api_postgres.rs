@@ -214,7 +214,7 @@ async fn an_event_with_a_thumbnail_exposes_its_url() {
 
     assert_eq!(
         first["thumbnail_url"].as_str(),
-        Some(format!("/api/events/{id}/thumbnail").as_str())
+        Some(format!("api/events/{id}/thumbnail").as_str())
     );
 }
 
@@ -259,7 +259,7 @@ async fn a_clip_url_goes_through_the_manager() {
 
     assert_eq!(
         body["events"][0]["clip_url"].as_str(),
-        Some(format!("/api/events/{id}/clip").as_str())
+        Some(format!("api/events/{id}/clip").as_str())
     );
 }
 
@@ -487,7 +487,7 @@ async fn a_camera_exposes_the_route_of_its_monitoring_switch() {
 
     assert_eq!(
         body[0]["control_url"].as_str(),
-        Some("/api/cameras/salon/control")
+        Some("api/cameras/salon/control")
     );
     // Plus d'URL de direct « nue » : la caméra refuserait de la servir.
     assert!(body[0].get("live_url").is_none());
@@ -518,7 +518,7 @@ async fn a_reachable_camera_offers_a_stream_route() {
     // Le nom est encodé : il est libre, et la route doit rester valide.
     assert_eq!(
         body[0]["stream_url"].as_str(),
-        Some("/api/cameras/all%C3%A9e%20nord/stream")
+        Some("api/cameras/all%C3%A9e%20nord/stream")
     );
 }
 
@@ -604,7 +604,7 @@ async fn a_reachable_camera_offers_an_enrollment_route() {
 
     let body = get_json(repo, "/api/cameras").await;
 
-    assert_eq!(body[0]["enrollment_url"], "/api/cameras/salon/enrollment");
+    assert_eq!(body[0]["enrollment_url"], "api/cameras/salon/enrollment");
 }
 
 #[tokio::test]
@@ -686,7 +686,7 @@ async fn reference_photos_are_listed_with_their_photo_url() {
     assert_eq!(body[0]["camera"], "entree");
     assert_eq!(
         body[0]["photo_url"],
-        "/api/faces/lou_20261017093604123.jpg/photo"
+        "api/faces/lou_20261017093604123.jpg/photo"
     );
     assert!(body[0]["captured_at"].is_string());
 }

@@ -188,7 +188,7 @@ pub struct FaceRecord {
 impl From<StoredFace> for FaceRecord {
     fn from(face: StoredFace) -> Self {
         Self {
-            photo_url: format!("/api/faces/{}/photo", face.file),
+            photo_url: format!("api/faces/{}/photo", face.file),
             file: face.file,
             name: face.person_name,
             camera: face.camera,
@@ -225,9 +225,9 @@ impl EventRecord {
         Self {
             thumbnail_url: stored
                 .has_thumbnail
-                .then(|| format!("/api/events/{}/thumbnail", stored.id)),
+                .then(|| format!("api/events/{}/thumbnail", stored.id)),
             clip_url: (tickets && stored.event.clip_url().is_some())
-                .then(|| format!("/api/events/{}/clip", stored.id)),
+                .then(|| format!("api/events/{}/clip", stored.id)),
             id: stored.id,
             camera: stored.event.camera,
             timestamp: stored.event.timestamp,
@@ -346,7 +346,7 @@ async fn cameras_handler(State(state): State<Arc<AppState>>) -> Response {
                     let route = |action: &str| {
                         reachable.then(|| {
                             format!(
-                                "/api/cameras/{}/{action}",
+                                "api/cameras/{}/{action}",
                                 encode_path_segment(&camera.name)
                             )
                         })
@@ -614,6 +614,11 @@ async fn health_handler() -> &'static str {
 /// par `ui/` (voir le README). Tant que l'interface React n'existe pas, ce
 /// dossier est simplement absent et `/` retourne 404 — le reste de l'API
 /// fonctionne normalement.
+///
+/// Les URL que l'API renvoie (vignettes, clips, photos, tickets) sont
+/// RELATIVES (`api/...`, sans `/` initial) : elles se résolvent par rapport à
+/// la page, ce qui permet de publier le manager derrière un reverse proxy
+/// sous un sous-chemin (`http://serveur/foxguard/`) sans le configurer.
 pub fn create_router(state: Arc<AppState>, ui_dir: &str) -> Router {
     let authenticator = state.authenticator.clone();
 
