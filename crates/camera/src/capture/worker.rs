@@ -84,6 +84,7 @@ pub(super) fn spawn_recognition_worker(
     face_embedder: Arc<Option<FaceEmbedder>>,
     known_people: Arc<Mutex<Vec<KnownPerson>>>,
     motion_config: MotionConfig,
+    face_recognition_threshold: f32,
     publishing: EventPublishing,
 ) {
     tokio::task::spawn_blocking(move || {
@@ -153,7 +154,7 @@ pub(super) fn spawn_recognition_worker(
                         face_detector,
                         face_embedder,
                         known_people_guard.as_slice(),
-                        0.55,
+                        face_recognition_threshold,
                     );
                     drop(known_people_guard);
 

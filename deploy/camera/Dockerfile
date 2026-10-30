@@ -63,8 +63,9 @@ RUN rm -rf crates/camera/src crates/manager/src crates/protocol/src
 COPY crates ./crates
 RUN find crates -name '*.rs' -exec touch {} +
 
-# Compilation finale du binaire
-RUN cargo build --release -p foxguard-camera
+# Compilation finale du binaire. `--locked` : les versions du Cargo.lock sont
+# imposées, la compilation échoue plutôt que de le mettre à jour.
+RUN cargo build --release --locked -p foxguard-camera
 
 # ==========================================
 # 2. STAGE D'EXÉCUTION (RUNTIME SÉCURISÉ)
@@ -105,7 +106,10 @@ COPY --from=builder --chown=foxguard:foxguard /app/target/release/foxguard-camer
 # `static/` est servi à l'exécution par ServeDir (icônes de l'interface) :
 # il doit être présent dans l'image, pas seulement à la compilation.
 COPY --from=builder --chown=foxguard:foxguard /app/crates/camera/static /app/static
-COPY --chown=foxguard:foxguard camera-config.toml /app/camera-config.toml
+# `camera-config.toml` n'est PAS copié : il contient des secrets (jeton d'API,
+# mot de passe SMTP, secret des tickets) et se règle par caméra. Il est monté
+# au lancement, en lecture seule :
+#   -v $(pwd)/camera-config.toml:/app/camera-config.toml:ro
 # Les 3 modèles ONNX (YOLO26, YuNet, ArcFace)
 COPY --chown=foxguard:foxguard crates/camera/models /app/crates/camera/models
 

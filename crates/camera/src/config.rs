@@ -88,13 +88,26 @@ pub struct MotionConfig {
     /// Délai maximal, en secondes, entre deux passages de YOLO même en
     /// l'absence totale de mouvement.
     ///
-    /// SECOND GARDE-FOU : la détection de mouvement compare deux images
-    /// successives, elle est donc aveugle à une présence parfaitement
-    /// immobile. Ce passage périodique garantit qu'une personne figée finit
+    /// SECOND GARDE-FOU : la détection de mouvement compare chaque image à
+    /// un fond de référence, elle est donc aveugle à une présence immobile
+    /// déjà absorbée par ce fond. Ce passage périodique garantit qu'une personne figée finit
     /// toujours par être vue. `0` le désactive — à n'utiliser que si
     /// l'économie de CPU primait sur tout le reste.
     #[serde(default = "default_motion_max_idle_secs")]
     pub max_idle_secs: u64,
+
+    /// Constante de temps, en secondes, du fond de référence auquel chaque
+    /// image est comparée (moyenne glissante exponentielle, voir
+    /// [`crate::capture::motion`]).
+    ///
+    /// Le fond suit les changements lents de la scène (lumière du jour,
+    /// objet déposé) : au bout d'environ trois constantes de temps, un
+    /// changement est absorbé. Plus courte, une personne immobile se fond
+    /// plus vite dans le décor ; plus longue, un changement d'éclairage
+    /// brusque déclenche YOLO plus longtemps. `0` revient à comparer chaque
+    /// image à la précédente.
+    #[serde(default = "default_motion_background_time_constant_secs")]
+    pub background_time_constant_secs: f32,
 }
 
 impl Default for MotionConfig {
@@ -105,6 +118,7 @@ impl Default for MotionConfig {
             min_changed_ratio: default_motion_min_changed_ratio(),
             hold_secs: default_motion_hold_secs(),
             max_idle_secs: default_motion_max_idle_secs(),
+            background_time_constant_secs: default_motion_background_time_constant_secs(),
         }
     }
 }
@@ -131,6 +145,13 @@ fn default_motion_hold_secs() -> u64 {
 
 fn default_motion_max_idle_secs() -> u64 {
     20
+}
+
+fn default_motion_background_time_constant_secs() -> f32 {
+    // Une personne qui s'arrête reste visible une quinzaine de secondes
+    // avant d'être absorbée ; un changement d'éclairage brusque ne fait
+    // tourner YOLO que le temps équivalent.
+    5.0
 }
 
 /// Encodage H.264 du flux caméra (voir `crate::h264`).
@@ -343,6 +364,10 @@ fn default_clip_post_secs() -> u64 {
     8
 }
 
+fn default_face_recognition_threshold() -> f32 {
+    0.55
+}
+
 fn default_known_faces_dir() -> String {
     DEFAULT_KNOWN_FACES_DIR.to_string()
 }
@@ -461,6 +486,12 @@ pub struct DetectionConfig {
     pub input_face_size: u32,
     // Score de confiance minimal pour retenir une détection YOLO
     pub confidence_threshold: f32,
+    // Similarité cosinus minimale (ArcFace) entre un visage et une photo de
+    // référence pour l'attribuer à cette personne. Plus haut : moins de
+    // fausses identifications, mais plus de personnes connues signalées
+    // comme inconnues.
+    #[serde(default = "default_face_recognition_threshold")]
+    pub face_recognition_threshold: f32,
     // Délai minimal entre deux e-mails d'alerte, en secondes
     pub email_cooldown_secs: u64,
 }
@@ -548,6 +579,20 @@ impl Config {
 
         foxguard_protocol::ticket::validate_secret(&config.server.stream_ticket_secret)
             .map_err(|e| anyhow::anyhow!("[server] stream_ticket_secret : {e}"))?;
+
+        let threshold = config.detection.face_recognition_threshold;
+        if !(0.0..=1.0).contains(&threshold) {
+            anyhow::bail!(
+                "[detection] face_recognition_threshold : {threshold} hors de l'intervalle 0 à 1"
+            );
+        }
+
+        let time_constant = config.motion.background_time_constant_secs;
+        if !(time_constant.is_finite() && time_constant >= 0.0) {
+            anyhow::bail!(
+                "[motion] background_time_constant_secs : {time_constant} doit être positif ou nul"
+            );
+        }
 
         Ok(config)
     }
@@ -827,6 +872,48 @@ mod tests {
         assert_eq!(config.motion.pixel_threshold, 20);
         assert_eq!(config.motion.hold_secs, 3);
         assert_eq!(config.motion.max_idle_secs, 20);
+        assert!((config.motion.background_time_constant_secs - 5.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_negative_background_time_constant_is_rejected() {
+        let toml = format!("{VALID_TOML}\n[motion]\nbackground_time_constant_secs = -1.0\n");
+        let file = write_temp_toml(&toml);
+
+        assert!(Config::load(file.path().to_str().unwrap()).is_err());
+    }
+
+    // --- `[detection] face_recognition_threshold` ---
+
+    #[test]
+    fn the_face_recognition_threshold_defaults_to_0_55() {
+        let file = write_temp_toml(VALID_TOML);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert!((config.detection.face_recognition_threshold - 0.55).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_face_recognition_threshold_can_be_tuned() {
+        let toml = VALID_TOML.replace(
+            "confidence_threshold = 0.5",
+            "confidence_threshold = 0.5\nface_recognition_threshold = 0.7",
+        );
+        let file = write_temp_toml(&toml);
+        let config = Config::load(file.path().to_str().unwrap()).expect("config valide");
+
+        assert!((config.detection.face_recognition_threshold - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn an_out_of_range_face_recognition_threshold_is_rejected() {
+        let toml = VALID_TOML.replace(
+            "confidence_threshold = 0.5",
+            "confidence_threshold = 0.5\nface_recognition_threshold = 55",
+        );
+        let file = write_temp_toml(&toml);
+
+        assert!(Config::load(file.path().to_str().unwrap()).is_err());
     }
 
     #[test]

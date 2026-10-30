@@ -144,6 +144,7 @@ pub fn start_camera_loop(
         Arc::clone(&models.face_embedder),
         Arc::clone(&models.known_people),
         config.motion.clone(),
+        config.detection.face_recognition_threshold,
         EventPublishing {
             mqtt: models.mqtt.clone(),
             camera_name: config.camera.name.clone(),

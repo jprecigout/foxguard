@@ -362,9 +362,16 @@ c'est payer en permanence le prix fort pour réapprendre à chaque passage que
 rien n'a changé.
 
 Chaque frame candidate est donc réduite à une grille de 64×48 luminances
-**moyennées**, et comparée à la précédente. Au-delà d'une proportion de cases
-changées (`min_changed_ratio`), on parle de mouvement — et seulement alors
-YOLO tourne.
+**moyennées**, et comparée à un **fond de référence**. Au-delà d'une
+proportion de cases changées (`min_changed_ratio`), on parle de mouvement — et
+seulement alors YOLO tourne.
+
+Ce fond n'est pas la frame précédente mais une **moyenne glissante** des
+frames candidates, de constante de temps `background_time_constant_secs` (5 s
+par défaut). Un mouvement lent, qui change peu d'une frame à la suivante, s'en
+écarte nettement ; une personne qui s'arrête reste visible jusqu'à y être
+absorbée ; et les changements durables (lumière du jour, objet déposé) finissent
+par y être intégrés, en trois constantes de temps environ.
 
 Le moyennage n'est pas un détail : un simple échantillonnage ponctuel ferait
 du bruit de capteur, très présent en basse lumière (précisément quand une
@@ -378,9 +385,9 @@ Un filtre naïf rate deux situations, et toutes deux comptent :
 1. **quelqu'un s'arrête.** Il ne produit plus de mouvement mais il est
    toujours là. Le filtre garde donc la porte ouverte pendant `hold_secs`
    après le dernier mouvement constaté ;
-2. **quelqu'un est déjà immobile.** Comparer deux frames successives est par
-   construction aveugle à une présence qui ne bouge pas. YOLO tourne donc de
-   toute façon au moins une fois toutes les `max_idle_secs`.
+2. **quelqu'un est déjà immobile.** Une présence absorbée par le fond (ou déjà
+   là quand il s'est formé) ne s'en écarte plus. YOLO tourne donc de toute
+   façon au moins une fois toutes les `max_idle_secs`.
 
 Sans eux, l'économie de CPU se paierait en détections manquées — ce qui n'est
 pas un compromis acceptable pour un système de surveillance. C'est aussi
@@ -1087,7 +1094,7 @@ Partez de `camera-config-sample.toml` pour créer votre propre `camera-config.to
 
 * **`[server]`** : `host`, `port`, `api_token` (jeton qui donne tous les droits : mot de passe de l'interface complète, et paramètre `?token=` pour le WebSocket, les enregistrements et, si `[rtsp] require_token`, le flux RTSP — voir « Ce qui est authentifié »), `public_url` (URL par laquelle cette caméra est joignable depuis un navigateur, ex. `"http://192.168.1.42:8080"` — publiée dans les événements pour que le manager ouvre ses clips, son direct et son interrupteur ; vide par défaut, auquel cas rien n'est proposé), `stream_ticket_secret` (secret partagé avec le manager pour signer les tickets, et qui signe aussi les photos de référence partagées entre caméras ; vide par défaut, auquel cas ses tickets sont refusés et ses photos restent locales), `manager_origin` (seule origine autorisée à afficher les pages de la caméra dans un cadre ; vide par défaut) et `max_stream_clients` (plafond de clients du flux vidéo, 8 par défaut).
 * **`[camera]`** : `device_index` (index du périphérique V4L2, ex. `0` pour `/dev/video0`), `name` (nom de la caméra inclus dans les événements MQTT, optionnel — `"foxguard"` par défaut).
-* **`[detection]`** : `enabled` (surveillance active au démarrage), chemins des 3 modèles ONNX (`model_path`, `model_detect_face_path`, `model_face_path`, tous dans `crates/camera/models/`), tailles d'entrée (`input_size` pour YOLO, qui doit correspondre à la taille d'export du modèle ONNX — `320` pour le modèle fourni —, `input_face_size` pour ArcFace), `confidence_threshold` (seuil de détection YOLO), `email_cooldown_secs` et `known_faces_dir` (dossier des photos de référence, `"known_faces"` par défaut, relatif au répertoire de travail — à renseigner en absolu pour un déploiement en conteneur ou en service systemd).
+* **`[detection]`** : `enabled` (surveillance active au démarrage), chemins des 3 modèles ONNX (`model_path`, `model_detect_face_path`, `model_face_path`, tous dans `crates/camera/models/`), tailles d'entrée (`input_size` pour YOLO, qui doit correspondre à la taille d'export du modèle ONNX — `320` pour le modèle fourni —, `input_face_size` pour ArcFace), `confidence_threshold` (seuil de détection YOLO), `face_recognition_threshold` (similarité minimale, de 0 à 1, pour attribuer un visage à une photo de référence, `0.55` par défaut), `email_cooldown_secs` et `known_faces_dir` (dossier des photos de référence, `"known_faces"` par défaut, relatif au répertoire de travail — à renseigner en absolu pour un déploiement en conteneur ou en service systemd).
 * **`[email]`** : `enabled`, identifiants SMTP (`smtp_server`, `smtp_user`, `smtp_password`), `from_address`, `to_address`.
 * **`[recording]`** *(optionnel, section entière absente = valeurs par défaut)* : `dir` (dossier des enregistrements, `"output_record"` par défaut, relatif au répertoire de travail — à renseigner en absolu pour un déploiement en conteneur ou en service systemd), `retention_days` (durée de conservation des enregistrements, en jours — **`0` désactive entièrement la suppression automatique**) et `cleanup_interval_secs` (intervalle entre deux passages, `3600` par défaut). Un passage a aussi lieu au démarrage, pour purger ce qui a expiré pendant un arrêt prolongé. L'âge est déterminé par la date de dernière modification du fichier, jamais par son nom : un enregistrement en cours d'écriture ne peut donc pas être supprimé sous la caméra. La même section règle les **clips d'événement** : `clips_enabled`, `clip_pre_secs` (durée conservée *avant* la détection, 4 s par défaut) et `clip_post_secs` (8 s). Les clips partagent le dossier, le format et la rétention des enregistrements — ils sont donc listés, servis, supprimés et purgés par le même code.
 * **`[mqtt]`** *(optionnel, section entière absente = désactivé)* : `enabled`, `broker_host`, `broker_port` (`1883` par défaut), `username`/`password` (authentification optionnelle, pas de TLS), `topic` (`"foxguard/detections"` par défaut), `faces_topic` (préfixe des topics des photos de référence partagées, `"foxguard/faces"` par défaut — le même sur toutes les caméras et sur le manager). Publie un message JSON à chaque changement d'état de reconnaissance, par exemple :
@@ -1096,7 +1103,7 @@ Partez de `camera-config-sample.toml` pour créer votre propre `camera-config.to
    "thumbnail": "<JPEG en base64>", "base_url": "http://192.168.1.42:8080", "clip": "evt_20260918_154207123.mp4"}
   {"camera": "salon", "timestamp": "2026-09-18T15:45:12+02:00", "status": "unknown", "thumbnail": null, "base_url": null, "clip": null}
   ```
-* **`[motion]`** *(optionnel, section entière absente = **actif** avec ses valeurs par défaut)* : `enabled`, `pixel_threshold` (écart de luminance à partir duquel un pixel a changé, `20`), `min_changed_ratio` (proportion de l'image qui doit avoir changé, `0.006`), `hold_secs` (durée pendant laquelle YOLO continue après le dernier mouvement, `3`) et `max_idle_secs` (délai maximal entre deux passages même sans mouvement, `20` — **`0` désactive ce passage périodique**). Voir « Le pré-filtre de mouvement » plus haut pour le rôle des deux derniers.
+* **`[motion]`** *(optionnel, section entière absente = **actif** avec ses valeurs par défaut)* : `enabled`, `pixel_threshold` (écart de luminance à partir duquel un pixel a changé, `20`), `min_changed_ratio` (proportion de l'image qui doit avoir changé, `0.006`), `hold_secs` (durée pendant laquelle YOLO continue après le dernier mouvement, `3`) `max_idle_secs` (délai maximal entre deux passages même sans mouvement, `20` — **`0` désactive ce passage périodique**) et `background_time_constant_secs` (constante de temps du fond glissant, `5.0` — `0` revient à comparer chaque image à la précédente). Voir « Le pré-filtre de mouvement » plus haut pour le rôle des deux derniers.
 * **`[h264]`** *(optionnel, section entière absente = ses valeurs par défaut)* : `fps` (`12`), `bitrate_kbps` (`1500`) et `keyframe_interval_secs` (`2`). **Pas d'interrupteur** : le H.264 est le seul chemin vidéo de la caméra, et le désactiver ne laisserait rien à diffuser ni à enregistrer. Ces réglages pilotent l'encodeur, dont le flux alimente **trois** consommateurs : le WebSocket des interfaces web, les enregistrements et le RTSP. Ils vivent donc ici et non dans `[rtsp]`, qui n'en est qu'un des trois. Voir « L'encodage H.264 » plus haut.
 * **`[rtsp]`** *(optionnel, section entière absente = serveur désactivé)* : `enabled`, `host`, `port` (`8554`), `path` (`"stream"`) et `require_token` (`true`) — uniquement les réglages RÉSEAU du serveur RTSP. Le laisser éteint n'économise qu'un port ouvert, pas le coût de l'encodage. Voir « Le flux RTSP » plus haut.
 
@@ -1157,6 +1164,7 @@ docker run -d \
   --name foxguard_app \
   --device=/dev/video0:/dev/video0 \
   -p 8080:8080 \
+  -v $(pwd)/camera-config.toml:/app/camera-config.toml:ro \
   -v $(pwd)/output_record:/app/output_record \
   -v $(pwd)/known_faces:/app/known_faces \
   foxguard-camera:latest
@@ -1164,6 +1172,9 @@ docker run -d \
 
 Ajoutez `-p 8554:8554` si vous avez activé le flux RTSP (`[rtsp] enabled =
 true`) : le port est déclaré dans l'image, mais il faut encore le publier.
+
+`camera-config.toml` n'est pas dans l'image : il est monté en lecture seule
+depuis le dossier courant. Sans lui, la caméra refuse de démarrer.
 
 `known_faces/` est monté lui aussi : sans cela, les photos de référence
 capturées depuis l'interface web vivent dans le système de fichiers du
@@ -1328,6 +1339,7 @@ docker run -d \
   -v /dev:/dev \
   -p 8080:8080 \
   -p 8554:8554 \
+  -v $(pwd)/camera-config.toml:/app/camera-config.toml:ro \
   -v $(pwd)/output_record:/app/output_record \
   -v $(pwd)/known_faces:/app/known_faces \
   foxguard-camera:rpi4

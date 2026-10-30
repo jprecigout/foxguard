@@ -18,9 +18,29 @@
 //! Chaque frame candidate est réduite à une grille de
 //! [`GRID_WIDTH`]×[`GRID_HEIGHT`] valeurs de luminance, chacune MOYENNÉE sur
 //! la zone qu'elle représente. On compte ensuite les cases dont la luminance
-//! a bougé de plus de `pixel_threshold` par rapport à la frame candidate
-//! précédente ; au-delà d'une proportion `min_changed_ratio`, on considère
-//! qu'il y a mouvement (voir [`crate::config::MotionConfig`]).
+//! s'écarte de plus de `pixel_threshold` du FOND de référence ; au-delà
+//! d'une proportion `min_changed_ratio`, on considère qu'il y a mouvement
+//! (voir [`crate::config::MotionConfig`]).
+//!
+//! # Le fond glissant
+//!
+//! Le fond n'est pas la frame précédente mais une MOYENNE GLISSANTE
+//! exponentielle des frames candidates : à chaque évaluation, chaque case du
+//! fond se rapproche de l'image courante d'une fraction
+//! `1 - exp(-Δt / background_time_constant_secs)`. Pondérer par le temps
+//! écoulé, et non par le nombre de frames, rend le fond indépendant de la
+//! cadence d'évaluation, qui varie selon que YOLO tourne ou non.
+//!
+//! Comparer à la seule frame précédente avait deux défauts :
+//!
+//! - un mouvement LENT (quelqu'un qui avance doucement, une silhouette qui
+//!   émerge de la pénombre) change peu d'une frame à l'autre et passait sous
+//!   le seuil, alors qu'il s'écarte nettement d'un fond plus ancien ;
+//! - une personne qui s'arrête cessait instantanément d'être « en
+//!   mouvement ». Contre le fond, elle le reste jusqu'à y être absorbée.
+//!
+//! Le fond suit malgré tout les changements durables (lumière du jour, objet
+//! déposé), sans quoi le filtre resterait ouvert pour de bon.
 //!
 //! Le moyennage n'est pas un détail : un simple échantillonnage ponctuel
 //! ferait du bruit de capteur (très présent en basse lumière, précisément
@@ -35,9 +55,9 @@
 //! 1. **quelqu'un s'arrête.** Il ne produit plus de mouvement mais il est
 //!    toujours là. Le filtre garde donc la porte ouverte pendant
 //!    `hold_secs` après le dernier mouvement constaté ;
-//! 2. **quelqu'un est déjà immobile.** Comparer deux frames successives est
-//!    par construction aveugle à une présence qui ne bouge pas. YOLO tourne
-//!    donc de toute façon au moins une fois toutes les `max_idle_secs`.
+//! 2. **quelqu'un est déjà immobile.** Une présence absorbée par le fond (ou
+//!    déjà là quand il s'est formé) ne s'en écarte plus. YOLO tourne donc de
+//!    toute façon au moins une fois toutes les `max_idle_secs`.
 //!
 //! Sans ces deux règles, l'économie de CPU se paierait en détections
 //! manquées — ce qui n'est pas un compromis acceptable pour un système de
@@ -94,18 +114,58 @@ pub struct Verdict {
     pub changed_ratio: f32,
 }
 
-/// Pré-filtre de mouvement, à raison d'une instance par flux (il porte la
-/// frame de référence).
+/// Fond de référence : moyenne glissante des miniatures des frames
+/// CANDIDATES.
+///
+/// Candidates, et non toutes les frames capturées : le filtre n'est consulté
+/// qu'aux frames où YOLO pourrait tourner (voir `super::worker`).
+struct Background {
+    /// Luminance moyenne de chaque case. En flottants : avec des entiers, les
+    /// petits pas de la moyenne seraient arrondis à zéro et le fond ne
+    /// suivrait plus une dérive lente.
+    luma: Vec<f32>,
+    /// Instant de la dernière mise à jour, d'où se déduit le poids de la
+    /// suivante.
+    updated: Instant,
+}
+
+impl Background {
+    fn new(thumbnail: &[u8], now: Instant) -> Self {
+        Self {
+            luma: thumbnail.iter().map(|&value| f32::from(value)).collect(),
+            updated: now,
+        }
+    }
+
+    /// Rapproche le fond de `thumbnail`, d'autant plus que la dernière mise à
+    /// jour est ancienne.
+    fn update(&mut self, thumbnail: &[u8], now: Instant, time_constant_secs: f32) {
+        let elapsed = now.saturating_duration_since(self.updated).as_secs_f32();
+        self.updated = now;
+
+        // Une constante nulle ramène à « le fond est la frame précédente ».
+        let weight = if time_constant_secs > 0.0 {
+            1.0 - (-elapsed / time_constant_secs).exp()
+        } else {
+            1.0
+        };
+
+        if self.luma.len() != thumbnail.len() {
+            *self = Self::new(thumbnail, now);
+            return;
+        }
+
+        for (background, &current) in self.luma.iter_mut().zip(thumbnail) {
+            *background += weight * (f32::from(current) - *background);
+        }
+    }
+}
+
+/// Pré-filtre de mouvement, à raison d'une instance par flux (il porte le
+/// fond de référence).
 pub(super) struct MotionGate {
     config: MotionConfig,
-    /// Miniature de la dernière frame CANDIDATE.
-    ///
-    /// Candidate, et non la dernière frame capturée : le filtre n'est
-    /// consulté qu'aux frames où YOLO pourrait tourner (voir
-    /// `super::worker`). Comparer des frames espacées de quelques centaines
-    /// de millisecondes rend d'ailleurs le mouvement plus franc qu'entre deux
-    /// frames consécutives.
-    reference: Option<Vec<u8>>,
+    background: Option<Background>,
     last_motion: Option<Instant>,
     last_scan: Option<Instant>,
 }
@@ -114,7 +174,7 @@ impl MotionGate {
     pub(super) fn new(config: MotionConfig) -> Self {
         Self {
             config,
-            reference: None,
+            background: None,
             last_motion: None,
             last_scan: None,
         }
@@ -143,16 +203,25 @@ impl MotionGate {
 
         let thumbnail = downscale_luma(image);
 
-        let changed_ratio = match &self.reference {
-            Some(reference) => changed_ratio(reference, &thumbnail, self.config.pixel_threshold),
-            // Première frame : aucune référence, donc aucun verdict possible.
-            // On lance l'inférence — ne pas le faire reviendrait à ignorer la
-            // scène déjà en place au démarrage.
-            None => 1.0,
-        };
+        let had_reference = self.background.is_some();
 
-        let had_reference = self.reference.is_some();
-        self.reference = Some(thumbnail);
+        // La comparaison se fait AVANT la mise à jour du fond : sinon l'image
+        // courante y serait déjà en partie, et masquerait son propre écart.
+        let changed_ratio = match &mut self.background {
+            Some(background) => {
+                let ratio =
+                    changed_ratio(&background.luma, &thumbnail, self.config.pixel_threshold);
+                background.update(&thumbnail, now, self.config.background_time_constant_secs);
+                ratio
+            }
+            // Première frame : aucun fond, donc aucun verdict possible. On
+            // lance l'inférence — ne pas le faire reviendrait à ignorer la
+            // scène déjà en place au démarrage.
+            None => {
+                self.background = Some(Background::new(&thumbnail, now));
+                1.0
+            }
+        };
 
         let moving = had_reference && changed_ratio >= self.config.min_changed_ratio;
 
@@ -266,18 +335,20 @@ fn downscale_luma(image: &RgbImage) -> Vec<u8> {
     grid
 }
 
-/// Proportion de cases dont la luminance a changé de plus de `threshold`.
-fn changed_ratio(reference: &[u8], current: &[u8], threshold: u8) -> f32 {
-    if reference.len() != current.len() || current.is_empty() {
+/// Proportion de cases dont la luminance s'écarte du fond de plus de
+/// `threshold`.
+fn changed_ratio(background: &[f32], current: &[u8], threshold: u8) -> f32 {
+    if background.len() != current.len() || current.is_empty() {
         // Deux grilles de tailles différentes ne sont pas comparables : on
         // signale un changement total plutôt que de comparer n'importe quoi.
         return 1.0;
     }
 
-    let changed = reference
+    let threshold = f32::from(threshold);
+    let changed = background
         .iter()
         .zip(current)
-        .filter(|(before, after)| before.abs_diff(**after) > threshold)
+        .filter(|&(&background, &current)| (f32::from(current) - background).abs() > threshold)
         .count();
 
     changed as f32 / current.len() as f32
@@ -294,7 +365,21 @@ mod tests {
             min_changed_ratio: 0.01,
             hold_secs: 3,
             max_idle_secs: 20,
+            background_time_constant_secs: 5.0,
         }
+    }
+
+    /// Fond = frame précédente : isole les garde-fous temporels de
+    /// l'absorption progressive par le fond.
+    fn frame_to_frame() -> MotionConfig {
+        MotionConfig {
+            background_time_constant_secs: 0.0,
+            ..config()
+        }
+    }
+
+    fn background(grid: &[u8]) -> Vec<f32> {
+        grid.iter().map(|&value| f32::from(value)).collect()
     }
 
     fn uniform(level: u8) -> RgbImage {
@@ -351,7 +436,7 @@ mod tests {
     #[test]
     fn two_identical_grids_have_not_changed() {
         let grid = downscale_luma(&uniform(100));
-        assert_eq!(changed_ratio(&grid, &grid, 20), 0.0);
+        assert_eq!(changed_ratio(&background(&grid), &grid, 20), 0.0);
     }
 
     #[test]
@@ -360,7 +445,7 @@ mod tests {
         let before = downscale_luma(&uniform(100));
         let after = downscale_luma(&uniform(110));
 
-        assert_eq!(changed_ratio(&before, &after, 20), 0.0);
+        assert_eq!(changed_ratio(&background(&before), &after, 20), 0.0);
     }
 
     #[test]
@@ -368,12 +453,12 @@ mod tests {
         let before = downscale_luma(&uniform(60));
         let after = downscale_luma(&uniform(200));
 
-        assert_eq!(changed_ratio(&before, &after, 20), 1.0);
+        assert_eq!(changed_ratio(&background(&before), &after, 20), 1.0);
     }
 
     #[test]
     fn incomparable_grids_report_a_total_change() {
-        assert_eq!(changed_ratio(&[1, 2, 3], &[1, 2], 20), 1.0);
+        assert_eq!(changed_ratio(&[1.0, 2.0, 3.0], &[1, 2], 20), 1.0);
         assert_eq!(changed_ratio(&[], &[], 20), 1.0);
     }
 
@@ -442,7 +527,7 @@ mod tests {
     #[test]
     fn scanning_continues_while_someone_may_have_merely_stopped() {
         // PREMIER GARDE-FOU : quelqu'un d'immobile est toujours là.
-        let mut gate = MotionGate::new(config());
+        let mut gate = MotionGate::new(frame_to_frame());
         let start = Instant::now();
 
         gate.evaluate_at(&uniform(100), start);
@@ -458,7 +543,7 @@ mod tests {
 
     #[test]
     fn the_motion_hold_eventually_expires() {
-        let mut gate = MotionGate::new(config());
+        let mut gate = MotionGate::new(frame_to_frame());
         let start = Instant::now();
 
         gate.evaluate_at(&uniform(100), start);
@@ -539,10 +624,12 @@ mod tests {
         );
     }
 
+    // --- Fond glissant ---
+
     #[test]
-    fn the_reference_follows_the_scene_so_a_subject_at_rest_is_not_rescanned_forever() {
-        // La référence est mise à jour à chaque évaluation : une fois la
-        // personne immobile intégrée au décor, le filtre se referme.
+    fn someone_who_stops_still_stands_out_from_the_background() {
+        // Contre la frame précédente, une personne qui s'arrête ne « bouge »
+        // plus ; contre le fond, elle s'en écarte toujours.
         let mut gate = MotionGate::new(config());
         let start = Instant::now();
         let scene = with_subject(100, 40, 60);
@@ -550,8 +637,73 @@ mod tests {
         gate.evaluate_at(&uniform(100), start);
         gate.evaluate_at(&scene, start + Duration::from_secs(1));
 
-        // Bien après la rémanence, et avant le passage périodique.
-        let verdict = gate.evaluate_at(&scene, start + Duration::from_secs(10));
-        assert!(!verdict.scan);
+        // Au-delà de `hold_secs` : seul l'écart au fond peut ouvrir le filtre.
+        let verdict = gate.evaluate_at(&scene, start + Duration::from_secs(5));
+
+        assert!(verdict.scan);
+        assert_eq!(verdict.reason, ScanReason::Motion);
+    }
+
+    #[test]
+    fn a_subject_at_rest_is_eventually_absorbed_by_the_background() {
+        // Le fond suit la scène : une fois la personne immobile intégrée au
+        // décor, le filtre se referme.
+        let mut gate = MotionGate::new(MotionConfig {
+            max_idle_secs: 0,
+            ..config()
+        });
+        let start = Instant::now();
+        let scene = with_subject(100, 40, 60);
+
+        gate.evaluate_at(&uniform(100), start);
+
+        let mut verdict = gate.evaluate_at(&scene, start);
+        for quarter in 1..=120 {
+            verdict = gate.evaluate_at(&scene, start + Duration::from_millis(quarter * 250));
+        }
+
+        // 30 s, soit six constantes de temps.
+        assert!(!verdict.scan, "ratio {}", verdict.changed_ratio);
+    }
+
+    #[test]
+    fn a_slow_change_missed_frame_to_frame_is_seen_against_the_background() {
+        // Une silhouette qui émerge lentement : 8 niveaux par évaluation,
+        // sous le seuil de 20 d'une frame à la suivante.
+        let emerging = |level: u8| {
+            RgbImage::from_fn(320, 240, |x, y| {
+                if (40..100).contains(&x) && (60..200).contains(&y) {
+                    image::Rgb([level, level, level])
+                } else {
+                    image::Rgb([100, 100, 100])
+                }
+            })
+        };
+
+        for (config, expected) in [(frame_to_frame(), false), (config(), true)] {
+            let mut gate = MotionGate::new(MotionConfig {
+                max_idle_secs: 0,
+                ..config
+            });
+            let start = Instant::now();
+
+            gate.evaluate_at(&uniform(100), start);
+            gate.evaluate_at(&uniform(100), start + Duration::from_secs(10));
+
+            let mut seen = false;
+            for step in 1..=10u8 {
+                let verdict = gate.evaluate_at(
+                    &emerging(100 + step * 8),
+                    start + Duration::from_secs(10) + Duration::from_millis(u64::from(step) * 250),
+                );
+                seen |= verdict.reason == ScanReason::Motion && verdict.scan;
+            }
+
+            assert_eq!(
+                seen, expected,
+                "constante {}",
+                config.background_time_constant_secs
+            );
+        }
     }
 }

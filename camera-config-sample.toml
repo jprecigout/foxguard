@@ -59,6 +59,10 @@ model_face_path = "crates/camera/models/arcface-mobilefacenet.onnx"
 input_size = 320
 input_face_size = 112
 confidence_threshold = 0.4
+# Similarité (0 à 1) à partir de laquelle un visage est attribué à une photo de
+# référence. Plus haut : moins de fausses identifications, mais davantage de
+# personnes connues signalées comme inconnues. 0.55 par défaut si absent.
+face_recognition_threshold = 0.55
 email_cooldown_secs = 60
 # Dossier des photos de référence de la reconnaissance faciale, où sont aussi
 # écrites les captures déclenchées depuis l'interface web. Relatif au
@@ -167,11 +171,17 @@ min_changed_ratio = 0.006
 # produit plus de mouvement, mais est toujours là.
 hold_secs = 3
 # GARDE-FOU 2 : délai maximal, en secondes, entre deux passages de YOLO même
-# sans aucun mouvement. La détection de mouvement compare deux images
-# successives : elle est aveugle à une présence déjà immobile.
+# sans aucun mouvement. Une présence déjà là quand le fond de référence s'est
+# formé en fait partie : la détection de mouvement ne la voit pas.
 #
 # 0 DÉSACTIVE ce passage périodique.
 max_idle_secs = 20
+# Constante de temps, en secondes, du fond de référence : chaque image est
+# comparée à une MOYENNE GLISSANTE des images précédentes, et non à la seule
+# précédente. Un changement durable (lumière, objet déposé, personne
+# immobile) est absorbé en trois constantes de temps environ. 0 revient à
+# comparer chaque image à la précédente.
+background_time_constant_secs = 5.0
 
 # Section entièrement optionnelle : réglages de l'encodage H.264.
 #

@@ -60,8 +60,9 @@ RUN rm -rf crates/camera/src crates/manager/src crates/protocol/src
 COPY crates ./crates
 RUN find crates -name '*.rs' -exec touch {} +
 
-# Compilation finale du binaire
-RUN cargo build --release -p foxguard-manager
+# Compilation finale du binaire. `--locked` : les versions du Cargo.lock sont
+# imposées, la compilation échoue plutôt que de le mettre à jour.
+RUN cargo build --release --locked -p foxguard-manager
 
 # ==========================================
 # 2. STAGE D'EXÉCUTION (RUNTIME SÉCURISÉ)
@@ -85,6 +86,10 @@ WORKDIR /app
 RUN mkdir -p /app/ui/dist && chown -R foxguard:foxguard /app
 
 COPY --from=builder --chown=foxguard:foxguard /app/target/release/foxguard-manager /app/foxguard-manager
+
+# `manager-config.toml` n'est PAS copié dans l'image : il est monté au
+# lancement, en lecture seule (voir `volumes:` dans compose.yml et
+# compose.deploy.yml).
 
 # Bundle de l'interface, produit par l'étape Node ci-dessus. Il vient du
 # BUILD et non de l'hôte : l'image ne dépend donc pas d'un `npm run build`
