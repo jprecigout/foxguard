@@ -32,17 +32,17 @@ services:
       timeout: 5s
       retries: 10
 
-  # Broker MQTT, derrière un profil comme dans `compose.yml` : à n'activer que
-  # si le serveur n'en a pas déjà un (`--profile broker`).
-  mosquitto:
-    profiles: ["broker"]
-    image: eclipse-mosquitto:2
-    restart: unless-stopped
-    ports:
-      - "1883:1883"
-    volumes:
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - mosquitto_data:/mosquitto/data
+  # Broker MQTT désactivé : le serveur cargo en a déjà un. Décommenter (et
+  # lancer avec `--profile broker`) pour un serveur qui n'en a pas.
+#   mosquitto:
+#     profiles: ["broker"]
+#     image: eclipse-mosquitto:2
+#     restart: unless-stopped
+#     ports:
+#       - "1883:1883"
+#     volumes:
+#       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+#       - mosquitto_data:/mosquitto/data
 
   manager:
     # Aucune section `build:` : l'image est chargée depuis une archive
@@ -64,32 +64,33 @@ services:
       # lui sur le serveur, et non à la racine d'un dépôt cloné.
       - ./manager-config.toml:/app/manager-config.toml:ro
 
-  # Reverse-proxy TLS OPTIONNEL devant le manager (voir ./Caddyfile).
+  # Reverse-proxy TLS désactivé : le serveur cargo a déjà son Caddy. Décommenter
+  # pour l'utiliser ici (voir ./Caddyfile).
   #
   # Derrière un profil, comme le broker : `--profile tls` pour l'activer. Il
   # faut alors activer TLS devant CHAQUE caméra aussi (deploy/camera/Caddyfile),
   # et ne plus publier le port 8090 qu'en local (`127.0.0.1:8090:8090`) pour
   # que le manager ne reste pas joignable en clair à côté.
-  caddy:
-    profiles: ["tls"]
-    image: caddy:2
-    restart: unless-stopped
-    depends_on:
-      - manager
-    ports:
-      - "443:443"
-      # Uniquement utile à Let's Encrypt (`FOXGUARD_TLS` = une adresse e-mail).
-      - "80:80"
-    environment:
-      FOXGUARD_SITE: ${FOXGUARD_SITE:-localhost}
-      FOXGUARD_TLS: ${FOXGUARD_TLS:-internal}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      # Certificats ET autorité interne : à conserver, sans quoi les appareils
-      # clients devraient refaire confiance à une nouvelle autorité.
-      - caddy_data:/data
+#   caddy:
+#     profiles: ["tls"]
+#     image: caddy:2
+#     restart: unless-stopped
+#     depends_on:
+#       - manager
+#     ports:
+#       - "443:443"
+#       # Uniquement utile à Let's Encrypt (`FOXGUARD_TLS` = une adresse e-mail).
+#       - "80:80"
+#     environment:
+#       FOXGUARD_SITE: ${FOXGUARD_SITE:-localhost}
+#       FOXGUARD_TLS: ${FOXGUARD_TLS:-internal}
+#     volumes:
+#       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+#       # Certificats ET autorité interne : à conserver, sans quoi les appareils
+#       # clients devraient refaire confiance à une nouvelle autorité.
+#       - caddy_data:/data
 
 volumes:
-  caddy_data:
-  mosquitto_data:
+#   caddy_data:
+#   mosquitto_data:
   postgres_data:
