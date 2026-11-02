@@ -53,8 +53,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    ports:
-      - "8090:8090"
+    # Aucun port publié : seul le Caddy de cargo, qui authentifie par Authelia
+    # (`[auth] disabled = true`), joint le manager, par le réseau `proxy`. Le
+    # publier rendrait le manager accessible sans authentification.
+    # ports:
+    #   - "8090:8090"
+    networks:
+      default:
+      proxy:
+        # Nom sans ambiguïté sur le réseau partagé, visé par le Caddyfile.
+        aliases: [foxguard-manager]
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -94,3 +102,8 @@ volumes:
 #   caddy_data:
 #   mosquitto_data:
   postgres_data:
+
+networks:
+  # Réseau du Caddy de cargo, créé hors de cette pile.
+  proxy:
+    external: true
